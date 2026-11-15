@@ -27,6 +27,8 @@ extern "C" {
     fn afuse_spawn_in_new_pgroup(argv: *const *const i8, cwd: *const i8, out_pid: *mut i32)
         -> i32;
     fn afuse_try_wait_pid(pid: i32, out_exited: *mut i32, out_code: *mut i32) -> i32;
+    fn afuse_fsgetpath(fsid0: i32, fsid1: i32, obj_id: u64, buf: *mut i8, len: usize) -> i32;
+    fn afuse_can_write(path: *const i8) -> i32;
     fn afuse_freeze_kill_reap_pgid(pgid: i32);
 }
 
@@ -256,4 +258,31 @@ pub(crate) fn freeze_kill_reap_pgid(pgid: i32) {
 
 pub(crate) fn is_tty_stdin() -> bool {
     unsafe { afuse_isatty_stdin() != 0 }
+}
+
+pub fn fsgetpath(fsid: (i32, i32), obj_id: u64) -> Result<PathBuf, AfuseError> {
+    let mut buf = [0i8; 4096];
+    let rc = unsafe { afuse_fsgetpath(fsid.0, fsid.1, obj_id, buf.as_mut_ptr(), buf.len()) };
+    if rc != 0 {
+        return Err(AfuseError::new(rc, format!("fsgetpath failed: errno={}", rc)));
+    }
+    let bytes: Vec<u8> = buf
+        .iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c as u8)
+        .collect();
+    if bytes.is_empty() {
+        return Err(AfuseError::new(ERR_EINVAL, "fsgetpath returned empty path"));
+    }
+    Ok(PathBuf::from(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+pub(crate) fn can_write_path(p: &Path) -> Result<(), AfuseError> {
+    let cp = c_path(p)?;
+    let rc = unsafe { afuse_can_write(cp.as_ptr()) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(AfuseError::new(rc, format!("path not writable {}: errno={}", p.display(), rc)))
+    }
 }

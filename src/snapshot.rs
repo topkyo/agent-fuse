@@ -1,15 +1,16 @@
-use crate::apfs::{force_remove_all, lstat_inode_mode, TMP_SEQ};
+use crate::apfs::{clonefile_nofollow, force_remove_all, lstat_inode_mode, TMP_SEQ};
 use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
 use crate::manifest::{
-    clone_filtered_tree, compute_tree_manifest, compute_tree_stats_fast, read_meta, write_meta,
-    SnapshotMeta,
+    clone_filtered_tree, compute_single_file_manifest, compute_tree_manifest,
+    compute_tree_stats_fast, read_meta, write_meta, SnapshotMeta,
 };
 pub use crate::restore::{
     restore_snapshot, restore_snapshot_paths, restore_snapshot_paths_with_vault,
     restore_snapshot_with_vault, RestoreReport,
 };
+use crate::trash::record_snapshot_inodes;
 use crate::vault::{
-    lock_vault, prepare_live_workspace_vault_with, resolve_workspace_vault_recovery, PROJECT_MARKERS,
+    lock_vault, prepare_live_workspace_vault_with, resolve_workspace_vault_recovery, TargetKind,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -68,7 +69,11 @@ pub fn create_snapshot_if_changed_with_vault(
     let _guard = lock_vault(&ws_vault)?;
     let existing = list_snapshots_unlocked(&ws_vault)?;
     if let Some(latest) = existing.first() {
-        let (live_sha, _, _, _) = compute_tree_manifest(&ws)?;
+        let (live_sha, _, _, _) = if ws.is_file() {
+            compute_single_file_manifest(&ws)?
+        } else {
+            compute_tree_manifest(&ws)?
+        };
         let latest_sha = if latest.tree_sha256 == "fast" {
             let latest_tree = ws_vault.join("snapshots").join(&latest.id).join("tree");
             compute_tree_manifest(&latest_tree)
@@ -105,9 +110,26 @@ pub(crate) fn create_snapshot_unlocked_opts(
     let tree_dir = snap_dir.join("tree");
 
     let (root_inode, root_mode) = lstat_inode_mode(ws)?;
+    let target_kind = if ws.is_file() {
+        TargetKind::SingleFile
+    } else {
+        TargetKind::Directory
+    };
 
     let t0 = Instant::now();
-    if let Err(e) = clone_filtered_tree(ws, &tree_dir) {
+    let clone_res = if target_kind == TargetKind::SingleFile {
+        fs::create_dir_all(&tree_dir)
+            .map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))
+            .and_then(|_| {
+                let fname = ws
+                    .file_name()
+                    .ok_or_else(|| AfuseError::new(ERR_EINVAL, "missing single-file name"))?;
+                clonefile_nofollow(ws, &tree_dir.join(fname))
+            })
+    } else {
+        clone_filtered_tree(ws, &tree_dir)
+    };
+    if let Err(e) = clone_res {
         let _ = force_remove_all(&snap_dir);
         return Err(e);
     }
@@ -120,20 +142,20 @@ pub(crate) fn create_snapshot_unlocked_opts(
         let (sha, fc, lb, _) = compute_tree_manifest(&tree_dir)?;
         (sha, fc, lb)
     };
-    if label.starts_with("auto:") && label != "auto:pre-restore" {
-        let has_marker = PROJECT_MARKERS
-            .iter()
-            .any(|m| fs::symlink_metadata(ws.join(m)).is_ok());
-        if (!has_marker || file_count == 0)
-            && list_snapshots_unlocked(ws_vault)?.iter().any(|m| m.file_count > 0)
-        {
-            let _ = force_remove_all(&snap_dir);
-            return Err(AfuseError::new(
-                ERR_EINVAL,
-                "refusing auto-snapshot of empty or markerless workspace while non-empty history exists",
-            ));
-        }
+    if label.starts_with("auto:")
+        && label != "auto:pre-restore"
+        && target_kind == TargetKind::Directory
+        && file_count == 0
+        && list_snapshots_unlocked(ws_vault)?.iter().any(|m| m.file_count > 0)
+    {
+        let _ = force_remove_all(&snap_dir);
+        return Err(AfuseError::new(
+            ERR_EINVAL,
+            "refusing auto-snapshot of empty directory while non-empty history exists",
+        ));
     }
+
+    record_snapshot_inodes(ws, target_kind, &snap_dir, ws_vault);
 
     let meta = SnapshotMeta {
         id: snap_id,
@@ -150,6 +172,7 @@ pub(crate) fn create_snapshot_unlocked_opts(
         logical_bytes,
         tree_sha256,
         elapsed_us: clone_elapsed_us,
+        target_kind,
     };
     write_meta(&snap_dir.join("meta.kv"), &meta)?;
     enforce_auto_snap_quota_unlocked(ws_vault, &meta.label)?;
@@ -274,7 +297,14 @@ pub fn diff_snapshot_with_vault(
     let snap_tree = ws_vault.join("snapshots").join(&meta.id).join("tree");
 
     let (_, _, _, snap_map) = compute_tree_manifest(&snap_tree)?;
-    let live_map = if ws.is_dir() {
+    let live_map = if meta.target_kind == TargetKind::SingleFile {
+        match fs::symlink_metadata(&ws) {
+            Ok(m) if !m.file_type().is_symlink() && m.file_type().is_file() => {
+                compute_single_file_manifest(&ws)?.3
+            }
+            _ => BTreeMap::new(),
+        }
+    } else if ws.is_dir() {
         compute_tree_manifest(&ws)?.3
     } else {
         BTreeMap::new()

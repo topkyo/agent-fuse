@@ -58,18 +58,26 @@ pub fn run_doctor_with_vault(
     if !workspace.exists() {
         return Err(AfuseError::new(
             ERR_ENOENT,
-            "target workspace directory does not exist",
+            "target path does not exist",
         ));
     }
-    if !workspace.is_dir() {
+    let sym = fs::symlink_metadata(workspace).map_err(|e| {
+        AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), e.to_string())
+    })?;
+    if sym.file_type().is_symlink() || (!sym.file_type().is_dir() && !sym.file_type().is_file()) {
         return Err(AfuseError::new(
             ERR_EINVAL,
-            "target workspace path is not a directory",
+            "target path must be a regular directory or regular file",
         ));
     }
     let target_ws = workspace.to_path_buf();
     let workspace_valid = check_workspace_path_rules(&target_ws).is_ok();
-    let fs_info = statfs_info(&target_ws)
+    let stat_target = if target_ws.is_dir() {
+        target_ws.as_path()
+    } else {
+        target_ws.parent().unwrap_or(Path::new("/"))
+    };
+    let fs_info = statfs_info(stat_target)
         .map_err(|e| AfuseError::new(e.code, "statfs probe failed on target workspace"))?;
     let apfs_verified = fs_info.fstype.eq_ignore_ascii_case("apfs");
     let free_gib = (fs_info.avail_bytes as f64) / (1024.0 * 1024.0 * 1024.0);

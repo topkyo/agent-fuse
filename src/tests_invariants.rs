@@ -220,11 +220,10 @@ fn stateful_280_step_property_invariants_i1_and_i2() {
                 non_empty_oracle.insert(name.to_string(), data);
             }
             2 if ws.is_dir() => {
-                // Attempt auto-snap; reject empty/markerless when history exists (I1)
-                let had_marker = ws.join(".git").exists();
+                // Attempt auto-snap; reject empty directory when non-empty history exists (I1)
                 let res = create_snapshot_opts_with_vault(&ws, Some(&vault), "auto:pro:fsevents", true);
                 let live_empty = non_empty_oracle.is_empty() && !ws.join(".git/HEAD").is_file();
-                if (!had_marker || live_empty) && !good_snaps.is_empty() {
+                if live_empty && !good_snaps.is_empty() {
                     assert_eq!(res.unwrap_err().code, ERR_EINVAL);
                 } else if let Ok(meta) = res {
                     assert!(meta.file_count > 0);

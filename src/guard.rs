@@ -58,6 +58,9 @@ fn collect_git_critical_paths(git_dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn collect_baseline_paths(ws: &Path) -> Vec<PathBuf> {
+    if ws.is_file() {
+        return vec![ws.to_path_buf()];
+    }
     let mut paths = Vec::new();
     fn walk(cur: &Path, out: &mut Vec<PathBuf>) {
         let Ok(rd) = fs::read_dir(cur) else { return };
@@ -105,10 +108,15 @@ pub fn run_guarded_command_with_vault(
     }
     let (ws, _ws_vault) = prepare_workspace_vault_with(workspace, vault_override)?;
     let (ino_start, _) = lstat_inode_mode(&ws)?;
+    let stat_dir = if ws.is_dir() {
+        ws.clone()
+    } else {
+        ws.parent().unwrap_or(Path::new("/")).to_path_buf()
+    };
     let baseline =
         create_snapshot_opts_with_vault(&ws, vault_override, "auto:guard-baseline", true)?;
     let baseline_paths = collect_baseline_paths(&ws);
-    let baseline_avail = statfs_info(&ws)?.avail_bytes;
+    let baseline_avail = statfs_info(&stat_dir)?.avail_bytes;
     let max_write_bytes = cfg.max_write_mb.saturating_mul(1024 * 1024);
 
     let mut c_strs: Vec<CString> = Vec::with_capacity(cmd_args.len());
@@ -121,7 +129,7 @@ pub fn run_guarded_command_with_vault(
     let mut ptrs: Vec<*const i8> = c_strs.iter().map(|s| s.as_ptr()).collect();
     ptrs.push(std::ptr::null());
 
-    let child_pid = spawn_in_new_pgroup(&ptrs, &ws).map_err(|spawn_rc| {
+    let child_pid = spawn_in_new_pgroup(&ptrs, &stat_dir).map_err(|spawn_rc| {
         AfuseError::new(
             spawn_rc,
             format!("failed to spawn guarded command: errno={}", spawn_rc),
@@ -154,7 +162,7 @@ pub fn run_guarded_command_with_vault(
             break;
         }
 
-        if let Ok(cur_fs) = statfs_info(&ws) {
+        if let Ok(cur_fs) = statfs_info(&stat_dir) {
             let consumed = baseline_avail.saturating_sub(cur_fs.avail_bytes);
             if max_write_bytes > 0 && consumed >= max_write_bytes {
                 freeze_kill_reap_pgid(child_pid);

@@ -3,7 +3,10 @@ use crate::error::{AfuseError, ERR_EWOULDBLOCK};
 use crate::manifest::SnapshotMeta;
 use crate::prune::{prune_unlocked, ORPHAN_MAX_AGE_SECS};
 use crate::snapshot::create_snapshot_unlocked_opts;
-use crate::vault::{prepare_workspace_vault_with, try_lock_vault, validate_workspace_binding_with_vault, PROJECT_MARKERS};
+use crate::vault::{
+    prepare_workspace_vault_with, resolve_workspace_vault_recovery, try_lock_vault,
+    validate_workspace_binding_with_vault, PROJECT_MARKERS,
+};
 use std::env;
 use std::fs;
 use std::io::Read;
@@ -249,12 +252,24 @@ pub fn execute_hook_auto_snap(
         return Ok(None);
     }
 
-    let Some(project_root) = find_project_root(start_cwd) else {
+    let target_candidate = if let Some(project_root) = find_project_root(start_cwd) {
+        project_root
+    } else if resolve_workspace_vault_recovery(start_cwd, vault_override)
+        .map(|(_, v)| v.join("snapshots").is_dir())
+        .unwrap_or(false)
+    {
+        start_cwd.to_path_buf()
+    } else {
         return Ok(None);
     };
-    let validated = validate_workspace_binding_with_vault(&project_root, vault_override)?;
+    let validated = validate_workspace_binding_with_vault(&target_candidate, vault_override)?;
     let ws = validated.canonical_path;
-    let ws_fs = statfs_info(&ws)?;
+    let stat_dir = if ws.is_dir() {
+        ws.as_path()
+    } else {
+        ws.parent().unwrap_or(Path::new("/"))
+    };
+    let ws_fs = statfs_info(stat_dir)?;
     if ws_fs.avail_bytes < HOOK_MIN_AVAIL_BYTES {
         return Ok(None);
     }

@@ -138,7 +138,7 @@ struct ScopedDir(PathBuf);
     }
 
     #[test]
-    fn validate_workspace_binding_rejects_root_home_symlinks_files_and_unmarked_dirs() {
+    fn validate_workspace_binding_rejects_forbidden_containers_and_symlinks_accepts_dirs_and_files() {
         let sandbox = ScopedDir::new("validate");
         let vault = sandbox.0.join("vault");
         let real_home = real_home_dir().unwrap();
@@ -156,15 +156,24 @@ struct ScopedDir(PathBuf);
 
         let plain_file = sandbox.0.join("plain.txt");
         fs::write(&plain_file, b"hi").unwrap();
-        assert!(validate_workspace_binding_with_vault(&plain_file, Some(&vault)).is_err());
+        let file_link = sandbox.0.join("plain_link.txt");
+        std::os::unix::fs::symlink(&plain_file, &file_link).unwrap();
+        assert!(validate_workspace_binding_with_vault(&file_link, Some(&vault)).is_err());
+
+        let valid_file = validate_workspace_binding_with_vault(&plain_file, Some(&vault)).unwrap();
+        assert_eq!(valid_file.kind, TargetKind::SingleFile);
+        assert_eq!(valid_file.marker, "file");
 
         let unmarked_dir = sandbox.0.join("unmarked");
         fs::create_dir_all(&unmarked_dir).unwrap();
-        assert!(validate_workspace_binding_with_vault(&unmarked_dir, Some(&vault)).is_err());
+        let valid_dir = validate_workspace_binding_with_vault(&unmarked_dir, Some(&vault)).unwrap();
+        assert_eq!(valid_dir.kind, TargetKind::Directory);
+        assert_eq!(valid_dir.marker, "dir");
 
         let good_repo = sandbox.0.join("good_repo");
         fs::create_dir_all(good_repo.join(".git")).unwrap();
         let valid = validate_workspace_binding_with_vault(&good_repo, Some(&vault)).unwrap();
+        assert_eq!(valid.kind, TargetKind::Directory);
         assert_eq!(valid.marker, ".git");
         assert!(valid.ino > 0);
     }
@@ -447,12 +456,12 @@ struct ScopedDir(PathBuf);
         assert!(!val_missing.message.contains("probe_user_invalid"));
         assert!(!val_missing.message.contains("nonexistent_secret_xyz"));
 
-        let no_marker_dir = sandbox.0.join("plain_dir_secret");
-        fs::create_dir_all(&no_marker_dir).unwrap();
-        let no_marker_err = validate_workspace_binding_with_vault(&no_marker_dir, Some(&vault)).unwrap_err();
-        assert_eq!(no_marker_err.code, ERR_EINVAL);
-        assert!(!no_marker_err.message.contains("plain_dir_secret"));
-        assert!(no_marker_err.message.contains("Makefile"));
+        let desktop_err = validate_workspace_binding_with_vault(
+            &real_home_dir().unwrap().join("Desktop"),
+            Some(&vault),
+        )
+        .unwrap_err();
+        assert_eq!(desktop_err.code, ERR_EINVAL);
 
         let prev_env = env::var_os("AFUSE_VAULT_DIR");
         env::set_var("AFUSE_VAULT_DIR", &vault);

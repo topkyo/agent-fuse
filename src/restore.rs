@@ -1,10 +1,12 @@
 use crate::apfs::{
-    clonefile_nofollow, force_remove_all, force_unlock, lstat_inode_mode, swap_paths, TMP_SEQ,
+    clonefile_nofollow, force_remove_all, force_unlock, lstat_inode_mode, statfs_info, swap_paths,
+    TMP_SEQ,
 };
 use crate::error::{AfuseError, ERR_EACCES, ERR_EINVAL, ERR_ENOENT};
-use crate::manifest::{compute_tree_manifest, SnapshotMeta};
+use crate::manifest::{compute_single_file_manifest, compute_tree_manifest, SnapshotMeta};
 use crate::snapshot::{create_snapshot_unlocked_opts, resolve_snapshot_id};
-use crate::vault::{is_ignored_name, lock_vault, resolve_workspace_vault_recovery};
+use crate::trash::{purge_trashed_counterparts, TrashCleanupStatus};
+use crate::vault::{is_ignored_name, lock_vault, resolve_workspace_vault_recovery, TargetKind};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
@@ -24,6 +26,7 @@ pub struct RestoreReport {
     pub elapsed_us: u128,
     pub selective: bool,
     pub restored_paths: usize,
+    pub trash_cleanup: TrashCleanupStatus,
 }
 
 fn force_unlock_tree_recursive(p: &Path) {
@@ -42,10 +45,7 @@ fn force_unlock_tree_recursive(p: &Path) {
     }
 }
 
-fn verify_snapshot_tree(
-    ws_vault: &Path,
-    target_id: &str,
-) -> Result<(SnapshotMeta, PathBuf, Option<String>), AfuseError> {
+fn verify_snapshot_tree(ws_vault: &Path, target_id: &str) -> Result<(SnapshotMeta, PathBuf, Option<String>), AfuseError> {
     if !ws_vault.join("snapshots").is_dir() {
         return Err(AfuseError::new(ERR_ENOENT, "no snapshots exist for this workspace"));
     }
@@ -59,21 +59,14 @@ fn verify_snapshot_tree(
     } else {
         let (vh, _, _, _) = compute_tree_manifest(&snap_tree)?;
         if vh != meta.tree_sha256 {
-            return Err(AfuseError::new(
-                ERR_EINVAL,
-                format!("snapshot integrity check failed: expected {}, found {}", meta.tree_sha256, vh),
-            ));
+            return Err(AfuseError::new(ERR_EINVAL, format!("snapshot integrity mismatch: expected {}, found {}", meta.tree_sha256, vh)));
         }
         Some(vh)
     };
     Ok((meta, snap_tree, vault_hash))
 }
 
-fn take_pre_restore_backup(
-    ws: &Path,
-    ws_vault: &Path,
-    safety_backup: bool,
-) -> Result<Option<String>, AfuseError> {
+fn take_pre_restore_backup(ws: &Path, ws_vault: &Path, safety_backup: bool) -> Result<Option<String>, AfuseError> {
     if !safety_backup {
         return Ok(None);
     }
@@ -106,18 +99,12 @@ fn workspace_has_visible_files(ws: &Path) -> bool {
     false
 }
 
-fn prepare_restore_stage(
-    ws: &Path,
-    ws_vault: &Path,
-    safety_backup: bool,
-) -> Result<(u64, Option<String>), AfuseError> {
+fn prepare_restore_stage(ws: &Path, ws_vault: &Path, safety_backup: bool) -> Result<(u64, Option<String>), AfuseError> {
     if !ws.exists() {
         if fs::symlink_metadata(ws).is_ok() {
             return Err(AfuseError::new(ERR_EINVAL, "workspace is not a directory"));
         }
-        fs::create_dir_all(ws).map_err(|e| {
-            AfuseError::new(e.raw_os_error().unwrap_or(1), format!("cannot recreate workspace dir: {}", e))
-        })?;
+        fs::create_dir_all(ws).map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), format!("cannot recreate workspace dir: {}", e)))?;
         return Ok((0, None));
     }
     if !ws.is_dir() {
@@ -166,8 +153,7 @@ fn commit_staged_entry(tmp_new: &Path, target: &Path, tmp_old: &Path) -> Result<
         let _ = force_remove_all(tmp_new);
         return Err(AfuseError::new(e.raw_os_error().unwrap_or(1), format!("stage-2 rename failed: {}", e)));
     }
-    force_remove_all(tmp_old)?;
-    Ok(())
+    force_remove_all(tmp_old)
 }
 
 fn stage_and_replace(parent: &Path, tag: &str, snap_item: &Path, target: &Path) -> Result<(), AfuseError> {
@@ -182,25 +168,83 @@ fn stage_and_replace(parent: &Path, tag: &str, snap_item: &Path, target: &Path) 
     commit_staged_entry(&tmp_new, target, &tmp_old)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn finalize_restore_unlocked(
+    ws: &Path, kind: TargetKind, ws_vault: &Path, meta: &SnapshotMeta,
+    ino_before: u64, ino_after: u64, safety_id: Option<String>,
+    selective: bool, restored_paths: usize, vault_hash: Option<&str>, t0: Instant,
+) -> Result<RestoreReport, AfuseError> {
+    let elapsed_us = t0.elapsed().as_micros();
+    let (live_hash, live_files, _, _) = if kind == TargetKind::SingleFile {
+        compute_single_file_manifest(ws)?
+    } else {
+        compute_tree_manifest(ws)?
+    };
+    if let Some(expected) = vault_hash {
+        if live_hash != expected {
+            return Err(AfuseError::new(ERR_EINVAL, format!("post-restore Merkle mismatch: expected {}, got {}", expected, live_hash)));
+        }
+    }
+    let stat_p = if kind == TargetKind::SingleFile { ws.parent().unwrap_or(ws) } else { ws };
+    let snap_dir = ws_vault.join("snapshots").join(&meta.id);
+    let trash_cleanup = statfs_info(stat_p)
+        .map(|fsi| purge_trashed_counterparts(ws, kind, ws_vault, &snap_dir, meta, fsi.fsid))
+        .unwrap_or(TrashCleanupStatus::NotInTrash);
+    Ok(RestoreReport {
+        snapshot_id: meta.id.clone(), safety_snapshot_id: safety_id,
+        root_inode_before: ino_before, root_inode_after: ino_after,
+        tree_sha256: live_hash, restored_files: live_files, elapsed_us,
+        selective, restored_paths, trash_cleanup,
+    })
+}
+
+fn restore_single_file_unlocked(
+    ws: &Path, ws_vault: &Path, meta: &SnapshotMeta, snap_tree: &Path,
+    vault_hash: Option<&str>, safety_backup: bool, t0: Instant,
+) -> Result<RestoreReport, AfuseError> {
+    let (ino_before, safety_id) = match fs::symlink_metadata(ws) {
+        Ok(m) => {
+            if m.file_type().is_symlink() || m.file_type().is_dir() {
+                return Err(AfuseError::new(ERR_EINVAL, "target path is a directory or symlink, expected regular file"));
+            }
+            let (ino, _) = lstat_inode_mode(ws)?;
+            force_unlock(ws);
+            (ino, take_pre_restore_backup(ws, ws_vault, safety_backup)?)
+        }
+        Err(_) => {
+            let parent = ws.parent().ok_or_else(|| AfuseError::new(ERR_EINVAL, "missing parent directory"))?;
+            fs::create_dir_all(parent).map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))?;
+            (0, None)
+        }
+    };
+    let parent = ws.parent().ok_or_else(|| AfuseError::new(ERR_EINVAL, "missing parent directory"))?;
+    let snap_file = ws.file_name().map(|n| snap_tree.join(n)).filter(|p| p.is_file())
+        .or_else(|| fs::read_dir(snap_tree).ok()?.flatten().map(|e| e.path()).find(|p| p.is_file()))
+        .ok_or_else(|| AfuseError::new(ERR_ENOENT, "snapshot file missing in tree"))?;
+    stage_and_replace(parent, "file", &snap_file, ws)?;
+    let _ = fs::set_permissions(ws, fs::Permissions::from_mode(meta.root_mode & 0o7777));
+    let (ino_after, _) = lstat_inode_mode(ws)?;
+    finalize_restore_unlocked(
+        ws, TargetKind::SingleFile, ws_vault, meta, ino_before, ino_after,
+        safety_id, false, 0, vault_hash, t0,
+    )
+}
+
 pub fn restore_snapshot(workspace: &Path, target_id: &str, safety_backup: bool) -> Result<RestoreReport, AfuseError> {
     restore_snapshot_with_vault(workspace, None, target_id, safety_backup)
 }
 
 pub fn restore_snapshot_with_vault(
-    workspace: &Path,
-    vault_override: Option<&Path>,
-    target_id: &str,
-    safety_backup: bool,
+    workspace: &Path, vault_override: Option<&Path>, target_id: &str, safety_backup: bool,
 ) -> Result<RestoreReport, AfuseError> {
     let (ws, ws_vault) = resolve_workspace_vault_recovery(workspace, vault_override)?;
-    if !ws_vault.join("snapshots").is_dir() {
-        return Err(AfuseError::new(ERR_ENOENT, "no snapshots exist for this workspace"));
-    }
     let _guard = lock_vault(&ws_vault)?;
     let t0 = Instant::now();
     let (meta, snap_tree, vault_hash) = verify_snapshot_tree(&ws_vault, target_id)?;
+    if meta.target_kind == TargetKind::SingleFile {
+        return restore_single_file_unlocked(&ws, &ws_vault, &meta, &snap_tree, vault_hash.as_deref(), safety_backup, t0);
+    }
     let (ino_before, safety_id) = prepare_restore_stage(&ws, &ws_vault, safety_backup)?;
-
     let mut snap_children: BTreeMap<OsString, PathBuf> = BTreeMap::new();
     for entry in fs::read_dir(&snap_tree).map_err(|e| AfuseError::new(1, e.to_string()))? {
         let entry = entry.map_err(|e| AfuseError::new(1, e.to_string()))?;
@@ -216,13 +260,10 @@ pub fn restore_snapshot_with_vault(
         let name_str = name.to_string_lossy();
         if name_str.starts_with(".afuse.tmp.") {
             let _ = force_remove_all(&entry.path());
-            continue;
-        }
-        if !is_ignored_name(&name_str) {
+        } else if !is_ignored_name(&name_str) {
             ws_children.push(name);
         }
     }
-
     for (name, snap_child) in &snap_children {
         stage_and_replace(&ws, "new", snap_child, &ws.join(name))?;
     }
@@ -231,28 +272,12 @@ pub fn restore_snapshot_with_vault(
             force_remove_all(&ws.join(name))?;
         }
     }
-
     let _ = fs::set_permissions(&ws, fs::Permissions::from_mode(meta.root_mode & 0o7777));
-    let elapsed_us = t0.elapsed().as_micros();
     let ino_after = verify_root_inode(&ws, ino_before)?;
-    let (live_hash, live_files, _, _) = compute_tree_manifest(&ws)?;
-    if let Some(expected_hash) = vault_hash {
-        if live_hash != expected_hash {
-            return Err(AfuseError::new(ERR_EINVAL, format!("post-restore Merkle mismatch: expected {}, got {}", expected_hash, live_hash)));
-        }
-    }
-
-    Ok(RestoreReport {
-        snapshot_id: meta.id,
-        safety_snapshot_id: safety_id,
-        root_inode_before: ino_before,
-        root_inode_after: ino_after,
-        tree_sha256: live_hash,
-        restored_files: live_files,
-        elapsed_us,
-        selective: false,
-        restored_paths: 0,
-    })
+    finalize_restore_unlocked(
+        &ws, TargetKind::Directory, &ws_vault, &meta, ino_before, ino_after,
+        safety_id, false, 0, vault_hash.as_deref(), t0,
+    )
 }
 
 fn validate_rel_restore_path(raw: &str) -> Result<PathBuf, AfuseError> {
@@ -277,9 +302,7 @@ fn validate_rel_restore_path(raw: &str) -> Result<PathBuf, AfuseError> {
                 clean.push(seg);
             }
             Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(AfuseError::new(ERR_EINVAL, "rejected '..' or root traversal"));
-            }
+            _ => return Err(AfuseError::new(ERR_EINVAL, "rejected '..' or root traversal")),
         }
     }
     if clean.as_os_str().is_empty() {
@@ -291,23 +314,15 @@ fn validate_rel_restore_path(raw: &str) -> Result<PathBuf, AfuseError> {
 fn verify_no_symlink_ancestors(ws: &Path, rel: &Path, create_missing: bool) -> Result<(), AfuseError> {
     let mut cur = ws.to_path_buf();
     let comps: Vec<_> = rel.components().collect();
-    if comps.len() <= 1 {
-        return Ok(());
-    }
-    for comp in &comps[..comps.len() - 1] {
+    for comp in comps.iter().take(comps.len().saturating_sub(1)) {
         cur.push(comp.as_os_str());
         match fs::symlink_metadata(&cur) {
-            Ok(meta) if meta.file_type().is_symlink() || !meta.file_type().is_dir() => {
-                return Err(AfuseError::new(ERR_EINVAL, "unsafe symlink or file ancestor"));
-            }
+            Ok(m) if m.file_type().is_symlink() || !m.file_type().is_dir() => return Err(AfuseError::new(ERR_EINVAL, "unsafe symlink or file ancestor")),
             Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                if create_missing {
-                    fs::create_dir(&cur).map_err(|ce| AfuseError::new(ce.raw_os_error().unwrap_or(1), ce.to_string()))?;
-                } else {
-                    return Ok(());
-                }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && create_missing => {
+                fs::create_dir(&cur).map_err(|ce| AfuseError::new(ce.raw_os_error().unwrap_or(1), ce.to_string()))?;
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string())),
         }
     }
@@ -315,20 +330,13 @@ fn verify_no_symlink_ancestors(ws: &Path, rel: &Path, create_missing: bool) -> R
 }
 
 pub fn restore_snapshot_paths(
-    workspace: &Path,
-    target_id: &str,
-    safety_backup: bool,
-    rel_paths: &[String],
+    workspace: &Path, target_id: &str, safety_backup: bool, rel_paths: &[String],
 ) -> Result<RestoreReport, AfuseError> {
     restore_snapshot_paths_with_vault(workspace, None, target_id, safety_backup, rel_paths)
 }
 
 pub fn restore_snapshot_paths_with_vault(
-    workspace: &Path,
-    vault_override: Option<&Path>,
-    target_id: &str,
-    safety_backup: bool,
-    rel_paths: &[String],
+    workspace: &Path, vault_override: Option<&Path>, target_id: &str, safety_backup: bool, rel_paths: &[String],
 ) -> Result<RestoreReport, AfuseError> {
     if rel_paths.is_empty() {
         return restore_snapshot_with_vault(workspace, vault_override, target_id, safety_backup);
@@ -342,19 +350,21 @@ pub fn restore_snapshot_paths_with_vault(
         }
     }
     let (ws, ws_vault) = resolve_workspace_vault_recovery(workspace, vault_override)?;
-    if !ws_vault.join("snapshots").is_dir() {
-        return Err(AfuseError::new(ERR_ENOENT, "no snapshots exist for this workspace"));
-    }
     let _guard = lock_vault(&ws_vault)?;
     let t0 = Instant::now();
-    let (meta, snap_tree, _) = verify_snapshot_tree(&ws_vault, target_id)?;
+    let (meta, snap_tree, vault_hash) = verify_snapshot_tree(&ws_vault, target_id)?;
+    if meta.target_kind == TargetKind::SingleFile {
+        if clean_paths.len() == 1 && ws.file_name().map(|n| Path::new(n) == clean_paths[0].as_path()).unwrap_or(false) {
+            return restore_single_file_unlocked(&ws, &ws_vault, &meta, &snap_tree, vault_hash.as_deref(), safety_backup, t0);
+        }
+        return Err(AfuseError::new(ERR_EINVAL, "invalid selective path for single-file target"));
+    }
     for rel in &clean_paths {
         if fs::symlink_metadata(snap_tree.join(rel)).is_err() && fs::symlink_metadata(ws.join(rel)).is_err() {
             return Err(AfuseError::new(ERR_ENOENT, "requested path does not exist in snapshot or workspace"));
         }
     }
     let (ino_before, safety_id) = prepare_restore_stage(&ws, &ws_vault, safety_backup)?;
-
     for rel in &clean_paths {
         let snap_item = snap_tree.join(rel);
         let dst_item = ws.join(rel);
@@ -368,19 +378,9 @@ pub fn restore_snapshot_paths_with_vault(
             }
         }
     }
-
-    let elapsed_us = t0.elapsed().as_micros();
     let ino_after = verify_root_inode(&ws, ino_before)?;
-    let (live_hash, live_files, _, _) = compute_tree_manifest(&ws)?;
-    Ok(RestoreReport {
-        snapshot_id: meta.id,
-        safety_snapshot_id: safety_id,
-        root_inode_before: ino_before,
-        root_inode_after: ino_after,
-        tree_sha256: live_hash,
-        restored_files: live_files,
-        elapsed_us,
-        selective: true,
-        restored_paths: clean_paths.len(),
-    })
+    finalize_restore_unlocked(
+        &ws, TargetKind::Directory, &ws_vault, &meta, ino_before, ino_after,
+        safety_id, true, clean_paths.len(), None, t0,
+    )
 }

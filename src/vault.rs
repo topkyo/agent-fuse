@@ -9,12 +9,36 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetKind {
+    Directory,
+    SingleFile,
+}
+
+impl TargetKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TargetKind::Directory => "dir",
+            TargetKind::SingleFile => "file",
+        }
+    }
+
+    pub fn parse_str(s: &str) -> Self {
+        if s.trim().eq_ignore_ascii_case("file") {
+            TargetKind::SingleFile
+        } else {
+            TargetKind::Directory
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ValidatedWorkspace {
     pub canonical_path: PathBuf,
     pub dev: u64,
     pub ino: u64,
     pub marker: String,
+    pub kind: TargetKind,
 }
 
 pub(crate) struct VaultLock {
@@ -43,140 +67,128 @@ pub fn resolve_vault_base() -> Result<PathBuf, AfuseError> {
     let home = real_home_dir()?;
     let base_root = home.join(".agent-fuse");
     fs::create_dir_all(&base_root).map_err(|e| {
-        AfuseError::new(
-            e.raw_os_error().unwrap_or(ERR_EACCES),
-            format!("cannot create vault base directory: errno={}", e.raw_os_error().unwrap_or(ERR_EACCES)),
-        )
+        AfuseError::new(e.raw_os_error().unwrap_or(ERR_EACCES), format!("cannot create vault base dir: errno={}", e.raw_os_error().unwrap_or(ERR_EACCES)))
     })?;
     let _ = fs::set_permissions(&base_root, fs::Permissions::from_mode(0o700));
     Ok(base_root.join("vault.noindex"))
 }
 
 pub(crate) const PROJECT_MARKERS: &[&str] = &[
-    ".git",
-    "Cargo.toml",
-    "Package.swift",
-    "package.json",
-    "pyproject.toml",
-    "go.mod",
-    "Makefile",
+    ".git", "Cargo.toml", "Package.swift", "package.json", "pyproject.toml", "go.mod", "Makefile",
 ];
+
+fn resolve_norm_or_canon(p: &Path) -> PathBuf {
+    fs::canonicalize(p).unwrap_or_else(|_| lexical_normalize_path(p).unwrap_or_else(|_| p.to_path_buf()))
+}
 
 pub fn reject_forbidden_workspace_paths(ws: &Path) -> Result<PathBuf, AfuseError> {
     let real_home = real_home_dir()?;
-    let env_home = env::var("HOME")
-        .ok()
-        .map(PathBuf::from)
-        .map(|p| fs::canonicalize(&p).unwrap_or(p));
-
-    let forbidden_exact: &[&str] = &[
-        "/",
-        "/Users",
-        "/Volumes",
-        "/System",
-        "/Library",
-        "/Applications",
-        "/bin",
-        "/sbin",
-        "/usr",
-        "/var",
-        "/private",
-        "/private/var",
-        "/private/tmp",
-        "/tmp",
-        "/etc",
-        "/dev",
-        "/cores",
+    let env_home = env::var("HOME").ok().map(|s| resolve_norm_or_canon(Path::new(&s)));
+    let forbidden_exact = [
+        PathBuf::from("/"), PathBuf::from("/Users"), PathBuf::from("/Volumes"),
+        PathBuf::from("/tmp"), PathBuf::from("/private/tmp"),
+        PathBuf::from("/var"), PathBuf::from("/private/var"),
+        real_home.clone(), real_home.join("Desktop"), real_home.join("Documents"), real_home.join("Downloads"),
     ];
-    for exact in forbidden_exact {
-        if ws == Path::new(exact) {
-            return Err(AfuseError::new(
-                ERR_EINVAL,
-                "binding system/root directory is forbidden",
-            ));
+    if env_home.as_deref() == Some(ws)
+        || forbidden_exact.iter().any(|ex| ws == ex || ws == &resolve_norm_or_canon(ex))
+    {
+        return Err(AfuseError::new(ERR_EINVAL, "binding system root, HOME, or top-level Desktop/Documents/Downloads folder itself is forbidden"));
+    }
+    let mut forbidden_subtrees = vec![
+        PathBuf::from("/System"), PathBuf::from("/Library"), PathBuf::from("/Applications"),
+        PathBuf::from("/bin"), PathBuf::from("/sbin"), PathBuf::from("/usr"),
+        PathBuf::from("/dev"), PathBuf::from("/etc"), PathBuf::from("/private/etc"), PathBuf::from("/cores"),
+        real_home.join(".agent-fuse"), real_home.join(".Trash"), real_home.join("Library"),
+    ];
+    if let Ok(tdir) = env::var("AFUSE_TRASH_DIR") {
+        if !tdir.trim().is_empty() {
+            forbidden_subtrees.push(PathBuf::from(tdir.trim()));
         }
     }
-    if ws == real_home || env_home.as_deref() == Some(ws) {
-        return Err(AfuseError::new(
-            ERR_EINVAL,
-            "binding user HOME directory is forbidden",
-        ));
-    }
-
-    let forbidden_subtrees = [
-        PathBuf::from("/System"),
-        PathBuf::from("/Library"),
-        PathBuf::from("/Applications"),
-        real_home.join(".agent-fuse"),
-        real_home.join("Desktop"),
-        real_home.join("Documents"),
-        real_home.join("Downloads"),
-        real_home.join("Library"),
-    ];
     for sub in &forbidden_subtrees {
-        let canon_sub = fs::canonicalize(sub).unwrap_or_else(|_| sub.clone());
-        if ws == canon_sub || ws.starts_with(&canon_sub) {
-            return Err(AfuseError::new(
-                ERR_EINVAL,
-                "binding protected/TCC subtree is forbidden",
-            ));
+        let canon_sub = resolve_norm_or_canon(sub);
+        if ws == sub || ws.starts_with(sub) || ws == &canon_sub || ws.starts_with(&canon_sub) {
+            return Err(AfuseError::new(ERR_EINVAL, "binding protected/system/trash subtree is forbidden"));
+        }
+    }
+    if let Ok(vdir) = env::var("AFUSE_VAULT_DIR") {
+        if !vdir.trim().is_empty() {
+            let v_canon = resolve_norm_or_canon(Path::new(vdir.trim()));
+            if ws == &v_canon || ws.starts_with(&v_canon) || v_canon.starts_with(ws) {
+                return Err(AfuseError::new(ERR_EINVAL, "self-ingestion forbidden: vault and target must not overlap"));
+            }
         }
     }
     Ok(real_home)
 }
 
+fn strip_trailing_slashes(candidate: &Path) -> PathBuf {
+    let raw = candidate.as_os_str().as_bytes();
+    let trimmed = if raw.len() > 1 {
+        let mut end = raw.len();
+        while end > 1 && raw[end - 1] == b'/' {
+            end -= 1;
+        }
+        &raw[..end]
+    } else {
+        raw
+    };
+    PathBuf::from(std::ffi::OsStr::from_bytes(trimmed))
+}
+
+fn verify_leaf_regular_or_dir(candidate: &Path) -> Result<(PathBuf, fs::Metadata), AfuseError> {
+    let trimmed = strip_trailing_slashes(candidate);
+    let sym = fs::symlink_metadata(&trimmed).map_err(|e| {
+        AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), "target path does not exist or is inaccessible")
+    })?;
+    let ft = sym.file_type();
+    if ft.is_symlink() {
+        return Err(AfuseError::new(ERR_EINVAL, "binding symbolic links directly is forbidden"));
+    }
+    if !ft.is_dir() && !ft.is_file() {
+        return Err(AfuseError::new(ERR_EINVAL, "target must be a regular directory or regular file"));
+    }
+    Ok((trimmed, sym))
+}
+
 pub fn check_workspace_path_rules(
     candidate: &Path,
-) -> Result<(PathBuf, fs::Metadata, String), AfuseError> {
-    let ws = fs::canonicalize(candidate).map_err(|e| {
-        AfuseError::new(
-            e.raw_os_error().unwrap_or(ERR_ENOENT),
-            "workspace path does not exist or is inaccessible",
-        )
+) -> Result<(PathBuf, fs::Metadata, String, TargetKind), AfuseError> {
+    let (trimmed, _) = verify_leaf_regular_or_dir(candidate)?;
+    let ws = fs::canonicalize(&trimmed).map_err(|e| {
+        AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), "target path does not exist or is inaccessible")
     })?;
-    let meta = fs::metadata(&ws).map_err(|e| {
-        AfuseError::new(
-            e.raw_os_error().unwrap_or(ERR_ENOENT),
-            "cannot stat workspace path",
-        )
-    })?;
-    if !meta.is_dir() {
-        return Err(AfuseError::new(
-            ERR_EINVAL,
-            "workspace must be a directory",
-        ));
+    let meta = fs::symlink_metadata(&ws)
+        .map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), "cannot stat target path"))?;
+    let ft = meta.file_type();
+    if !ft.is_dir() && !ft.is_file() {
+        return Err(AfuseError::new(ERR_EINVAL, "target must be a regular directory or regular file"));
     }
-
     let _real_home = reject_forbidden_workspace_paths(&ws)?;
-
-    let mut found_marker: Option<String> = None;
-    for &m in PROJECT_MARKERS {
-        if fs::symlink_metadata(ws.join(m)).is_ok() {
-            found_marker = Some(m.to_string());
-            break;
-        }
+    if ft.is_file() {
+        return Ok((ws, meta, "file".to_string(), TargetKind::SingleFile));
     }
-    let marker = found_marker.ok_or_else(|| {
-        AfuseError::new(
-            ERR_EINVAL,
-            "workspace directory has no project root marker (.git, Cargo.toml, Package.swift, package.json, pyproject.toml, go.mod, Makefile)",
-        )
-    })?;
-    Ok((ws, meta, marker))
+    let marker = PROJECT_MARKERS
+        .iter()
+        .find(|&&m| fs::symlink_metadata(ws.join(m)).is_ok())
+        .map(|&m| m.to_string())
+        .unwrap_or_else(|| "dir".to_string());
+    Ok((ws, meta, marker, TargetKind::Directory))
 }
 
 pub fn validate_workspace_binding_with_vault(
     candidate: &Path,
     vault_override: Option<&Path>,
 ) -> Result<ValidatedWorkspace, AfuseError> {
-    let (ws, meta, marker) = check_workspace_path_rules(candidate)?;
+    let (ws, meta, marker, kind) = check_workspace_path_rules(candidate)?;
     let (_, _ws_vault) = prepare_live_workspace_vault_with(&ws, vault_override)?;
-
     Ok(ValidatedWorkspace {
         canonical_path: ws,
         dev: meta.dev(),
         ino: meta.ino(),
         marker,
+        kind,
     })
 }
 
@@ -294,17 +306,29 @@ fn workspace_vault_common(
     Ok((ws.to_path_buf(), ws_vault))
 }
 
+fn stat_dir_for(ws: &Path) -> &Path {
+    if ws.is_dir() {
+        ws
+    } else {
+        ws.parent().unwrap_or(Path::new("/"))
+    }
+}
+
 pub fn prepare_live_workspace_vault_with(
     workspace: &Path,
     vault_override: Option<&Path>,
 ) -> Result<(PathBuf, PathBuf), AfuseError> {
-    let ws = fs::canonicalize(workspace).map_err(|e| {
-        AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), "workspace path does not exist or is inaccessible")
+    let (trimmed, _) = verify_leaf_regular_or_dir(workspace)?;
+    let ws = fs::canonicalize(&trimmed).map_err(|e| {
+        AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), "target path does not exist or is inaccessible")
     })?;
-    if !ws.is_dir() {
-        return Err(AfuseError::new(ERR_EINVAL, "workspace is not a directory"));
+    let ft = fs::symlink_metadata(&ws)
+        .map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), "cannot stat target path"))?
+        .file_type();
+    if !ft.is_dir() && !ft.is_file() {
+        return Err(AfuseError::new(ERR_EINVAL, "target must be a regular directory or regular file"));
     }
-    workspace_vault_common(&ws, &ws, vault_override, true)
+    workspace_vault_common(&ws, stat_dir_for(&ws), vault_override, true)
 }
 
 pub fn prepare_workspace_vault_with(
@@ -318,14 +342,13 @@ pub fn resolve_workspace_vault_recovery(
     workspace: &Path,
     vault_override: Option<&Path>,
 ) -> Result<(PathBuf, PathBuf), AfuseError> {
-    if let Ok(ws) = fs::canonicalize(workspace) {
-        if !ws.is_dir() {
-            return Err(AfuseError::new(ERR_EINVAL, "workspace is not a directory"));
-        }
-        return workspace_vault_common(&ws, &ws, vault_override, false);
-    }
-    if fs::symlink_metadata(workspace).is_ok() && !workspace.is_dir() {
-        return Err(AfuseError::new(ERR_EINVAL, "workspace is not a directory"));
+    let trimmed = strip_trailing_slashes(workspace);
+    if fs::symlink_metadata(&trimmed).is_ok() {
+        let (_, _) = verify_leaf_regular_or_dir(&trimmed)?;
+        let ws = fs::canonicalize(&trimmed).map_err(|e| {
+            AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), "target path does not exist or is inaccessible")
+        })?;
+        return workspace_vault_common(&ws, stat_dir_for(&ws), vault_override, false);
     }
     let (ws, stat_dir) = resolve_via_existing_ancestor(workspace)?;
     workspace_vault_common(&ws, &stat_dir, vault_override, false)

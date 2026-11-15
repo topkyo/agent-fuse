@@ -177,6 +177,32 @@ int afuse_try_wait_pid(int pid, int *out_exited, int *out_code) {
     return 0;
 }
 
+#ifdef __APPLE__
+extern ssize_t fsgetpath(char *buf, size_t bufsize, fsid_t *fsid, uint64_t objid);
+#endif
+
+int afuse_fsgetpath(int32_t fsid0, int32_t fsid1, uint64_t obj_id, char *buf, size_t len) {
+    if (!buf || len == 0) {
+        return EINVAL;
+    }
+    fsid_t fsid;
+    fsid.val[0] = fsid0;
+    fsid.val[1] = fsid1;
+    ssize_t rc = fsgetpath(buf, len, &fsid, obj_id);
+    if (rc < 0) {
+        return errno ? errno : -1;
+    }
+    buf[len - 1] = '\0';
+    return 0;
+}
+
+int afuse_can_write(const char *path) {
+    if (!path || access(path, W_OK) != 0) {
+        return errno ? errno : EACCES;
+    }
+    return 0;
+}
+
 void afuse_freeze_kill_reap_pgid(int pgid) {
     if (pgid <= 1) {
         return;

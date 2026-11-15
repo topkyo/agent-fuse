@@ -26,18 +26,19 @@ pub mod prune;
 pub mod restore;
 pub mod sha256;
 pub mod snapshot;
+pub mod trash;
 pub mod upgrade;
 pub mod upgrade_json;
 pub mod vault;
 
 pub use apfs::{
-    clonefile_nofollow, force_remove_all, lstat_inode_mode, real_home_dir, short_hash,
+    clonefile_nofollow, force_remove_all, fsgetpath, lstat_inode_mode, real_home_dir, short_hash,
     statfs_info, StatFsInfo,
 };
 pub use doctor::{format_doctor_json, run_doctor, run_doctor_with_vault, DoctorReport};
 pub use error::{
-    AfuseError, ERR_EACCES, ERR_EEXIST, ERR_EINVAL, ERR_ENOENT, ERR_ENOTSUP, ERR_USAGE,
-    ERR_EWOULDBLOCK, ERR_EXDEV, EXIT_FUSE_TRIPPED,
+    AfuseError, ERR_EACCES, ERR_EEXIST, ERR_EINVAL, ERR_ENOENT, ERR_ENOTSUP, ERR_EPERM,
+    ERR_USAGE, ERR_EWOULDBLOCK, ERR_EXDEV, EXIT_FUSE_TRIPPED,
 };
 pub use guard::{run_guarded_command, run_guarded_command_with_vault, GuardConfig, GuardReport};
 pub use hook::{
@@ -47,8 +48,8 @@ pub use hook::{
 };
 pub use hook_config::{render_hook_snippet, uninstall_hooks, UninstallAction};
 pub use manifest::{
-    compute_tree_manifest, compute_tree_stats_fast, json_escape, sanitize_terminal_text,
-    SnapshotMeta,
+    compute_single_file_manifest, compute_tree_manifest, compute_tree_stats_fast, json_escape,
+    sanitize_terminal_text, SnapshotMeta,
 };
 pub use prune::{
     parse_prune_args, prune_snapshots, prune_snapshots_filtered,
@@ -64,6 +65,7 @@ pub use snapshot::{
     create_snapshot_with_vault, diff_snapshot, diff_snapshot_with_vault, list_snapshots,
     list_snapshots_with_vault, DiffReport,
 };
+pub use trash::{allowed_trash_roots, TrashCleanupStatus};
 pub use upgrade::{
     check_for_updates, is_newer_version, parse_release_json, perform_upgrade_on_exe,
     run_upgrade_apply, ReleaseAsset, ReleaseInfo, UpgradeApplyReport, UpgradeCheckReport,
@@ -72,10 +74,12 @@ pub use vault::{
     is_ignored_name, prepare_live_workspace_vault_with, prepare_workspace_vault,
     prepare_workspace_vault_with, reject_forbidden_workspace_paths, resolve_vault_base,
     resolve_workspace_vault_recovery, validate_workspace_binding,
-    validate_workspace_binding_with_vault, ValidatedWorkspace,
+    validate_workspace_binding_with_vault, TargetKind, ValidatedWorkspace,
 };
 
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_invariants;
+#[cfg(test)]
+mod tests_trash_targets;

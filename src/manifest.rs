@@ -1,7 +1,7 @@
 use crate::apfs::{clonefile_nofollow, lstat_inode_mode};
 use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
 use crate::sha256::{sha256_hex, Sha256};
-use crate::vault::is_ignored_name;
+use crate::vault::{is_ignored_name, TargetKind};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
@@ -21,6 +21,7 @@ pub struct SnapshotMeta {
     pub logical_bytes: u64,
     pub tree_sha256: String,
     pub elapsed_us: u128,
+    pub target_kind: TargetKind,
 }
 pub fn compute_tree_stats_fast(root: &Path) -> Result<(u64, u64), AfuseError> {
     let mut files: u64 = 0;
@@ -85,6 +86,33 @@ fn hash_file_streaming(path: &Path) -> Result<String, AfuseError> {
         hasher.update(&buf[..n]);
     }
     Ok(hasher.finalize_hex())
+}
+
+pub fn compute_single_file_manifest(
+    file_path: &Path,
+) -> Result<(String, u64, u64, BTreeMap<String, String>), AfuseError> {
+    let meta = fs::symlink_metadata(file_path).map_err(|e| {
+        AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), format!("stat failed on {}: {}", file_path.display(), e))
+    })?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+        return Err(AfuseError::new(ERR_EINVAL, "target is not a regular file"));
+    }
+    let name = file_path
+        .file_name()
+        .ok_or_else(|| AfuseError::new(ERR_EINVAL, "missing file name"))?
+        .to_string_lossy()
+        .into_owned();
+    let mode = meta.permissions().mode() & 0o7777;
+    let fhash = hash_file_streaming(file_path)?;
+    let sig = format!("F:{:04o}:{}:{}", mode, meta.len(), fhash);
+    let mut map = BTreeMap::new();
+    map.insert(name.clone(), sig.clone());
+    let mut overall = Sha256::new();
+    overall.update(name.as_bytes());
+    overall.update(b"\0");
+    overall.update(sig.as_bytes());
+    overall.update(b"\n");
+    Ok((overall.finalize_hex(), 1, meta.len(), map))
 }
 
 pub fn compute_tree_manifest(
@@ -278,7 +306,7 @@ fn sanitize_meta_value(s: &str) -> String {
 
 pub(crate) fn write_meta(meta_path: &Path, m: &SnapshotMeta) -> Result<(), AfuseError> {
     let content = format!(
-        "id={}\ncreated_ms={}\nlabel={}\nworkspace={}\nroot_inode={}\nroot_mode={}\nfile_count={}\nlogical_bytes={}\ntree_sha256={}\nelapsed_us={}\n",
+        "id={}\ncreated_ms={}\nlabel={}\nworkspace={}\nroot_inode={}\nroot_mode={}\nfile_count={}\nlogical_bytes={}\ntree_sha256={}\nelapsed_us={}\ntarget_kind={}\n",
         sanitize_meta_value(&m.id),
         m.created_ms,
         sanitize_meta_value(&m.label),
@@ -288,23 +316,18 @@ pub(crate) fn write_meta(meta_path: &Path, m: &SnapshotMeta) -> Result<(), Afuse
         m.file_count,
         m.logical_bytes,
         sanitize_meta_value(&m.tree_sha256),
-        m.elapsed_us
+        m.elapsed_us,
+        m.target_kind.as_str()
     );
     fs::write(meta_path, content).map_err(|e| {
-        AfuseError::new(
-            e.raw_os_error().unwrap_or(1),
-            format!("failed to write meta {}: {}", meta_path.display(), e),
-        )
+        AfuseError::new(e.raw_os_error().unwrap_or(1), format!("failed to write meta {}: {}", meta_path.display(), e))
     })
 }
 
 impl SnapshotMeta {
     pub fn read_from(meta_path: &Path) -> Result<SnapshotMeta, AfuseError> {
         let raw = fs::read_to_string(meta_path).map_err(|e| {
-            AfuseError::new(
-                e.raw_os_error().unwrap_or(ERR_ENOENT),
-                format!("failed to read snapshot meta {}: {}", meta_path.display(), e),
-            )
+            AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), format!("failed to read snapshot meta {}: {}", meta_path.display(), e))
         })?;
         let mut kv: BTreeMap<String, String> = BTreeMap::new();
         for line in raw.lines() {
@@ -314,33 +337,16 @@ impl SnapshotMeta {
         }
         let meta = SnapshotMeta {
             id: kv.get("id").cloned().unwrap_or_default(),
-            created_ms: kv
-                .get("created_ms")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
+            created_ms: kv.get("created_ms").and_then(|v| v.parse().ok()).unwrap_or(0),
             label: kv.get("label").cloned().unwrap_or_default(),
             workspace: kv.get("workspace").cloned().unwrap_or_default(),
-            root_inode: kv
-                .get("root_inode")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-            root_mode: kv
-                .get("root_mode")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0o755),
-            file_count: kv
-                .get("file_count")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-            logical_bytes: kv
-                .get("logical_bytes")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
+            root_inode: kv.get("root_inode").and_then(|v| v.parse().ok()).unwrap_or(0),
+            root_mode: kv.get("root_mode").and_then(|v| v.parse().ok()).unwrap_or(0o755),
+            file_count: kv.get("file_count").and_then(|v| v.parse().ok()).unwrap_or(0),
+            logical_bytes: kv.get("logical_bytes").and_then(|v| v.parse().ok()).unwrap_or(0),
             tree_sha256: kv.get("tree_sha256").cloned().unwrap_or_default(),
-            elapsed_us: kv
-                .get("elapsed_us")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
+            elapsed_us: kv.get("elapsed_us").and_then(|v| v.parse().ok()).unwrap_or(0),
+            target_kind: kv.get("target_kind").map(|s| TargetKind::parse_str(s)).unwrap_or(TargetKind::Directory),
         };
         if !meta.id.starts_with("snap-") || meta.tree_sha256.is_empty() || meta.created_ms == 0 {
             return Err(AfuseError::new(ERR_EINVAL, "corrupted snapshot meta.kv"));

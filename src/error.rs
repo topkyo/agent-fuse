@@ -1,5 +1,6 @@
 use std::fmt;
 
+pub const ERR_EPERM: i32 = 1;
 pub const ERR_ENOENT: i32 = 2;
 pub const ERR_EACCES: i32 = 13;
 pub const ERR_EEXIST: i32 = 17;

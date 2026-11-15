@@ -46,9 +46,9 @@ fn print_restore_report(r: &RestoreReport, json: bool) {
             String::new()
         };
         println!(
-            "{{\"ok\":true,\"snapshot_id\":\"{}\",\"safety_snapshot_id\":{},\"root_inode_before\":{},\"root_inode_after\":{},\"restored_files\":{},\"tree_sha256\":\"{}\",\"elapsed_us\":{}{}}}",
+            "{{\"ok\":true,\"snapshot_id\":\"{}\",\"safety_snapshot_id\":{},\"root_inode_before\":{},\"root_inode_after\":{},\"restored_files\":{},\"tree_sha256\":\"{}\",\"elapsed_us\":{},\"trash_cleanup\":\"{}\"{}}}",
             json_escape(&r.snapshot_id), sb, r.root_inode_before, r.root_inode_after,
-            r.restored_files, json_escape(&r.tree_sha256), r.elapsed_us, tail
+            r.restored_files, json_escape(&r.tree_sha256), r.elapsed_us, r.trash_cleanup.as_str(), tail
         );
     } else if r.selective {
         println!(
@@ -163,14 +163,14 @@ pub(crate) fn cmd_validate(workspace: &Path, rest: &[String], mut json: bool) {
         Ok(v) => {
             if json {
                 println!(
-                    "{{\"ok\":true,\"path\":\"{}\",\"dev\":{},\"ino\":{},\"marker\":\"{}\"}}",
-                    json_escape(&v.canonical_path.to_string_lossy()), v.dev, v.ino, json_escape(&v.marker)
+                    "{{\"ok\":true,\"path\":\"{}\",\"dev\":{},\"ino\":{},\"kind\":\"{}\",\"marker\":\"{}\"}}",
+                    json_escape(&v.canonical_path.to_string_lossy()), v.dev, v.ino, v.kind.as_str(), json_escape(&v.marker)
                 );
             } else {
                 println!(
-                    "VALID {} (dev={} ino={} marker={})",
+                    "VALID {} (dev={} ino={} kind={} marker={})",
                     sanitize_terminal_text(&v.canonical_path.to_string_lossy()),
-                    v.dev, v.ino, v.marker
+                    v.dev, v.ino, v.kind.as_str(), v.marker
                 );
             }
         }
