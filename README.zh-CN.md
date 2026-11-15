@@ -67,10 +67,10 @@ afuse restore latest -- src/auth.rs Cargo.toml
 # 4. 为任意自主 Agent 套上文件误删与磁盘暴涨双阈值熔断护盾
 afuse guard --max-delete 15 --max-write-mb 256 --auto-rollback -- claude "重构鉴权模块"
 
-# 5. 输出可选挂载的 Zsh / Claude Code PreToolUse 钩子代码（绝不后台静默篡改用户配置文件）
-afuse hook zsh
+# 5. 输出可选挂载的 Zsh / Claude Code PreToolUse 钩子代码（自动回退探测 ~/.local/bin 与 .app 内嵌路径，免配 PATH）
+afuse hook zsh                # 覆盖 claude|cursor-agent|codex|aider|gemini|opencode|goose
 afuse hook claude
-afuse hook uninstall          # 默认只读扫描预览（传入 --apply 自动备份 .afuse-bak-<ts> 后安全卸载）
+afuse hook uninstall          # 默认只读扫描预览（传入 --apply 自动备份 .afuse-bak-<ts> 后移除 Zsh 块）
 
 # 6. 隐私脱敏体检与按需手动 SHA-256 校验自更新（零后台静默联网轮询）
 afuse doctor [--json] [<DIR>] # 检查 APFS 卷、clonefile(2) 与保险库权限（输出不含用户名与绝对路径）
@@ -86,8 +86,8 @@ afuse upgrade --check         # 仅在手动执行时查询 GitHub Releases 新�
 
 需要零配置成本的原生 macOS 桌面级守护壳（纯手写 AppKit + QuartzCore + CoreGraphics Swift，单模块严格 `< 400` 行，双架构 DMG `< 5 MiB` / 单架构 `~2.7 MiB`，冷启动实测 `61.42 ms`，双仓静默守护 2 秒窗口 CPU 占用 `3.26 ms`）？
 
-- **居中 `500×410` 深色毛玻璃主控台 + 中英双语（`中文` / `EN`）秒切**：启动即呈现屏幕居中的 `500×410` 原生毛玻璃主控窗口（不受刘海屏、Bartender 或 Dozer 折叠影响，重开应用或点击菜单栏护盾图标随时唤回），采用 SF Pro 与苹方舒适排版，支持一键 `中文 | EN` 切换、全窗口拖拽添加项目、原生编辑与操作快捷键（`⌘O` 绑定、`⌘S` 快照、`⌘R` 恢复、`⌘W` / `Esc` 逐层关闭）与彩色文件变更预览。
-- **多项目拖拽守护、新手 5 秒安全演练与单文件精准恢复**：拖入最多 `5` 个项目目录即可开启 `FSEvents` 滚动基线守护。内置 `>= 20` 文件批量误删熔断警戒线（菜单栏护盾图标实时标红告警、后台非焦点状态下推送 macOS 原生横幅与提示音告警、后台异步非阻塞一键救回不卡主线程），内置**5 秒误删救回安全演练**、一键安装 **CLI 与 Claude Code / Zsh 钩子**、**单文件精准恢复**（涵盖已删、已改与移除新增文件）子菜单、按需手动**检查更新**与可选 `--background` **开机静默自启**。
+- **居中 `500×410` 深色毛玻璃主控台 + 拖入即守护**：启动即呈现屏幕居中的 `500×410` 原生毛玻璃主控窗口（不受刘海屏、Bartender 或 Dozer 折叠影响，重开应用或点击菜单栏护盾图标随时唤回），采用 SF Pro 与苹方舒适排版，支持 `中文 | EN` 秒切、首屏零术语引导（拖入文件夹即开启 0 字节守护，或体验 **5 秒安全演练**）、原生编辑与操作快捷键（`⌘O` 绑定、`⌘S` 快照、`⌘R` 恢复、`⌘W` / `Esc` 逐层关闭）与彩色文件变更预览。
+- **多项目拖拽守护、单文件精准恢复与可选 AI 事前留档开关**：拖入最多 `5` 个项目目录即可开启 `FSEvents` 滚动基线守护。内置 `>= 20` 文件批量误删熔断警戒线（菜单栏护盾图标实时标红告警、后台非焦点状态下推送 macOS 原生横幅与提示音告警、后台异步非阻塞一键救回），菜单内置**「高级增强：AI 执行前自动留档（可选）」**确认式开关（自动备份并安全开关终端 `claude|cursor-agent|codex|aider|gemini|opencode|goose` 与 Claude Code `PreToolUse`，免手动配置 `PATH` 与手改 JSON）、**单文件精准恢复**子菜单、按需手动**检查更新**与可选 `--background` **开机静默自启**。
 - **恢复反馈层与中英双语「APFS 原位恢复凭证」（`1200×630` sRGB PNG）**：救回瞬间呈现零空闲 CPU 占用的 `QuartzCore` 流金脉冲反馈层，实时渲染零隐私泄露的黑金质感**恢复凭证**（不含任何仓库名、文件名或路径，展示恢复耗时、文件数、Inode 保全与 Merkle SHA-256 校验状态），自动写入系统剪贴板并支持一键分享至 `𝕏`、`微信 / 朋友圈` 或导出高清 PNG。
 - **单仓永久免费与终身买断原则**：**社区免费版永久守护 1 个活跃项目**，无试用倒计时，历史时间线恢复永久开放。**AgentFuse Pro 终身买断版（中国大陆 `¥98` 一次买断 · 海外 `$19` 一次买断）** 解锁最多 `5` 个并发守护仓库与 **100% 离线 `Ed25519` 激活码**（支持 3 台本人 Mac，零遥测联网，14 天无理由退款）。
 - **[前往 GitHub Releases 下载 `AgentFuse.app` 双架构 DMG](https://github.com/topkyo/agent-fuse/releases/latest)** · **可直接通过 `AgentFuse.app` 内置离线双语购买指引获取 AgentFuse Pro（`¥98` / `$19` 一次买断）**。

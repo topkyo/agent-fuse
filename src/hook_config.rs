@@ -27,8 +27,16 @@ pub fn render_hook_snippet(target: &str) -> Result<String, AfuseError> {
              \x20     [[ \"${{AFUSE_HOOK_DISABLE:-0}}\" == \"1\" || \"${{AFUSE_GUARDED:-0}}\" == \"1\" ]] && return 0\n\
              \x20     local -a _af_w=(${{=1}})\n\
              \x20     case \"${{_af_w[1]:t}}\" in\n\
-             \x20       claude|cursor-agent|codex|aider|gemini)\n\
-             \x20         command -v afuse >/dev/null 2>&1 && command afuse hook zsh --exec --cwd \"$PWD\" --tool \"${{_af_w[1]:t}}\" >/dev/null 2>&1 || true\n\
+             \x20       claude|cursor-agent|codex|aider|gemini|opencode|goose)\n\
+             \x20         local _af_bin=\"\"\n\
+             \x20         if command -v afuse >/dev/null 2>&1; then\n\
+             \x20           _af_bin=\"afuse\"\n\
+             \x20         elif [[ -x \"$HOME/.local/bin/afuse\" ]]; then\n\
+             \x20           _af_bin=\"$HOME/.local/bin/afuse\"\n\
+             \x20         elif [[ -x \"/Applications/AgentFuse.app/Contents/MacOS/afuse\" ]]; then\n\
+             \x20           _af_bin=\"/Applications/AgentFuse.app/Contents/MacOS/afuse\"\n\
+             \x20         fi\n\
+             \x20         [[ -n \"$_af_bin\" ]] && command \"$_af_bin\" hook zsh --exec --cwd \"$PWD\" --tool \"${{_af_w[1]:t}}\" >/dev/null 2>&1 || true\n\
              \x20         ;;\n\
              \x20     esac\n\
              \x20   }}\n\
@@ -48,7 +56,7 @@ pub fn render_hook_snippet(target: &str) -> Result<String, AfuseError> {
              \x20       \"hooks\": [\n\
              \x20         {\n\
              \x20           \"type\": \"command\",\n\
-             \x20           \"command\": \"command -v afuse >/dev/null 2>&1 && afuse hook claude --exec || true\",\n\
+             \x20           \"command\": \"if command -v afuse >/dev/null 2>&1; then afuse hook claude --exec; elif [ -x \\\"$HOME/.local/bin/afuse\\\" ]; then \\\"$HOME/.local/bin/afuse\\\" hook claude --exec; elif [ -x \\\"/Applications/AgentFuse.app/Contents/MacOS/afuse\\\" ]; then \\\"/Applications/AgentFuse.app/Contents/MacOS/afuse\\\" hook claude --exec; fi || true\",\n\
              \x20           \"timeout\": 10\n\
              \x20         }\n\
              \x20       ]\n\

@@ -1,5 +1,5 @@
 use crate::apfs::{force_remove_all, force_unlock, lstat_inode_mode, TMP_SEQ};
-use crate::hook_config::HOOK_MARKER_BEGIN;
+use crate::hook_config::{HOOK_MARKER_BEGIN, HOOK_MARKER_END};
 use crate::manifest::compute_tree_manifest;
 use crate::prune::prune_unlocked;
 use crate::sha256::sha256_hex;
@@ -285,18 +285,39 @@ struct ScopedDir(PathBuf);
         assert!(all.iter().any(|m| m.id == pro_base.id));
         assert!(all.iter().any(|m| m.id == pre_rest.id));
 
-        // Uninstall dry-run vs apply
+        // Uninstall dry-run vs apply (covering new PATH-fallback snippets, opencode|goose, & legacy Claude snippet)
         let zsh_snippet = render_hook_snippet("zsh").unwrap();
+        assert!(zsh_snippet.contains("claude|cursor-agent|codex|aider|gemini|opencode|goose"));
+        assert!(zsh_snippet.contains("$HOME/.local/bin/afuse"));
+        assert!(zsh_snippet.contains("/Applications/AgentFuse.app/Contents/MacOS/afuse"));
+        let claude_snippet = render_hook_snippet("claude").unwrap();
+        assert!(claude_snippet.contains("$HOME/.local/bin/afuse"));
+        assert!(claude_snippet.contains("/Applications/AgentFuse.app/Contents/MacOS/afuse"));
+        assert!(claude_snippet.contains("hook claude --exec"));
+
         let zshrc = fake_home.join(".zshrc");
         let orig_zshrc = format!("export PATH=/usr/bin:$PATH\n{}alias ll='ls -l'\n", zsh_snippet);
         fs::write(&zshrc, &orig_zshrc).unwrap();
         let settings = fake_home.join(".claude/settings.json");
-        fs::write(&settings, render_hook_snippet("claude").unwrap()).unwrap();
+        fs::write(&settings, &claude_snippet).unwrap();
+        fs::create_dir_all(repo.join(".claude")).unwrap();
+        let legacy_claude = repo.join(".claude/settings.json");
+        fs::write(
+            &legacy_claude,
+            "{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"Bash\",\"hooks\":[{\"type\":\"command\",\"command\":\"command -v afuse >/dev/null 2>&1 && afuse hook claude --exec || true\"}]}]}}\n",
+        )
+        .unwrap();
         let sha_before = sha256_hex(&fs::read(&zshrc).unwrap());
         let set_sha_before = sha256_hex(&fs::read(&settings).unwrap());
 
         let dry = uninstall_hooks(false, Some(&fake_home), &repo).unwrap();
-        assert!(dry.len() >= 2);
+        assert!(dry.iter().any(|a| a.kind == "zsh_marker_block" && !a.applied));
+        assert_eq!(
+            dry.iter()
+                .filter(|a| a.kind == "manual_claude_settings_json")
+                .count(),
+            2
+        );
         assert_eq!(sha256_hex(&fs::read(&zshrc).unwrap()), sha_before);
         assert_eq!(sha256_hex(&fs::read(&settings).unwrap()), set_sha_before);
 
@@ -304,6 +325,8 @@ struct ScopedDir(PathBuf);
         assert!(applied.iter().any(|a| a.applied && a.backup_path.is_some()));
         let after_zshrc = fs::read_to_string(&zshrc).unwrap();
         assert!(!after_zshrc.contains(HOOK_MARKER_BEGIN));
+        assert!(!after_zshrc.contains(HOOK_MARKER_END));
+        assert!(!after_zshrc.contains("_afuse_preexec"));
         assert!(after_zshrc.contains("alias ll='ls -l'"));
         assert_eq!(sha256_hex(&fs::read(&settings).unwrap()), set_sha_before);
     }
