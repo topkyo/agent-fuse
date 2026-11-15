@@ -3,7 +3,7 @@ use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
 use crate::manifest::json_escape;
 use crate::snapshot::list_snapshots_unlocked;
 use crate::vault::{
-    prepare_workspace_vault_with, resolve_vault_base, validate_workspace_binding_with_vault,
+    check_workspace_path_rules, prepare_workspace_vault_with, resolve_vault_base,
 };
 use std::env;
 use std::fs;
@@ -21,6 +21,7 @@ pub struct DoctorReport {
     pub clonefile_probe_us: u64,
     pub free_gib: f64,
     pub vault_writable: bool,
+    pub workspace_valid: bool,
     pub snapshot_count: usize,
 }
 
@@ -32,7 +33,7 @@ impl DoctorReport {
 
 pub fn format_doctor_json(rep: &DoctorReport) -> String {
     format!(
-        "{{\"ok\":{},\"version\":\"{}\",\"os\":\"{}\",\"arch\":\"{}\",\"apfs_verified\":{},\"clonefile_probe_us\":{},\"free_gib\":{:.2},\"vault_writable\":{},\"snapshot_count\":{}}}",
+        "{{\"ok\":{},\"version\":\"{}\",\"os\":\"{}\",\"arch\":\"{}\",\"apfs_verified\":{},\"clonefile_probe_us\":{},\"free_gib\":{:.2},\"vault_writable\":{},\"workspace_valid\":{},\"snapshot_count\":{}}}",
         rep.ok,
         json_escape(&rep.version),
         json_escape(&rep.os),
@@ -41,6 +42,7 @@ pub fn format_doctor_json(rep: &DoctorReport) -> String {
         rep.clonefile_probe_us,
         rep.free_gib,
         rep.vault_writable,
+        rep.workspace_valid,
         rep.snapshot_count
     )
 }
@@ -66,6 +68,7 @@ pub fn run_doctor_with_vault(
         ));
     }
     let target_ws = workspace.to_path_buf();
+    let workspace_valid = check_workspace_path_rules(&target_ws).is_ok();
     let fs_info = statfs_info(&target_ws)
         .map_err(|e| AfuseError::new(e.code, "statfs probe failed on target workspace"))?;
     let apfs_verified = fs_info.fstype.eq_ignore_ascii_case("apfs");
@@ -100,9 +103,7 @@ pub fn run_doctor_with_vault(
             }
         }
 
-        if vault_writable
-            && validate_workspace_binding_with_vault(&target_ws, Some(&probe_root)).is_ok()
-        {
+        if vault_writable && workspace_valid {
             snapshot_count = prepare_workspace_vault_with(&target_ws, Some(&probe_root))
                 .and_then(|(_, ws_vault)| list_snapshots_unlocked(&ws_vault))
                 .map(|s| s.len())
@@ -110,7 +111,7 @@ pub fn run_doctor_with_vault(
         }
     }
 
-    let ok = apfs_verified && vault_writable && clonefile_probe_us > 0;
+    let ok = apfs_verified && vault_writable && clonefile_probe_us > 0 && workspace_valid;
 
     Ok(DoctorReport {
         ok,
@@ -121,6 +122,7 @@ pub fn run_doctor_with_vault(
         clonefile_probe_us,
         free_gib,
         vault_writable,
+        workspace_valid,
         snapshot_count,
     })
 }

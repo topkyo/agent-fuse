@@ -12,12 +12,12 @@ Autonomous CLI coding agents run `rm -rf`, `mv`, or mass file overwrites on dirt
 4. **Zero-Dotfile-Mutation Hooks & Opt-In Verified Upgrade**: `afuse hook zsh | claude` prints auditable snippets to stdout without editing dotfiles. `afuse upgrade [--check]` performs zero background polling and verifies `SHA256SUMS` strictly upon manual invocation.
 
 ## Verified Benchmarks (2015 MacBook Pro, Core i5-5257U, 8 GB RAM, macOS 12.7.6 APFS)
-- `afuse` MIT CLI binary: `< 600 KiB` stripped (`0` external Rust crates, links only `libSystem.B.dylib`)
-- `AgentFuse-0.5.0-macos.dmg`: `< 3 MiB` Universal (`arm64 + x86_64` AppKit GUI + Retina `AppIcon.icns` + embedded CLI)
-- Peak RSS (1,000-file chaos test): `< 2.0 MiB` (`1.77 MiB` measured)
-- 142-file dirty repo `snap`: `6.63 ms` | in-place `restore`: `7.73 ms`
-- 1,000-file `snap --fast`: `26.19 ms` (`39.69 ms` with full Merkle SHA-256)
-- `AgentFuse.app` cold start: `< 300 ms` | 2-repo `FSEvents` idle CPU (2s): `< 5 ms` | `APFS Recovery Receipt` PNG render: `< 100 ms`
+- `afuse` MIT CLI binary: `550 KiB` (`563,376 B`) stripped (`0` external Rust crates, links only `libSystem.B.dylib`)
+- `AgentFuse-0.5.0-macos.dmg`: `< 5 MiB` Universal (`2.73 MiB` single-arch `2,862,571 B` AppKit GUI + Retina `AppIcon.icns` + embedded CLI)
+- Peak RSS: `1.73 MiB` (`1,810,432 B`) on 1,000-file chaos test; `1.20 MiB` (`1,257,472 B`) on 64 MiB streaming SHA-256 snapshot
+- 142-file dirty repo `snap`: `6.46 ms` | in-place `restore` (with `auto:pre-restore` + Merkle verify): `12.60 ms`
+- 1,000-file `snap --fast`: `24.15 ms` (`37.99 ms` with full streaming Merkle SHA-256)
+- `AgentFuse.app` cold start: `61.42 ms` (`< 300 ms`) | 2-repo `FSEvents` idle CPU (2s): `3.26 ms` (`< 5 ms`) | async rescue + `1200×630` `APFS Recovery Receipt` PNG render: `215.26 ms` (`265,584 B`)
 
 ## Comparison Matrix
 - **vs `git stash -u`**: `afuse` does not touch `.git` locks, protects `.git` itself if deleted, supports single-path restore of untracked files, and finishes in single-digit ms without zlib hashing.

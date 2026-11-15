@@ -125,10 +125,9 @@ pub fn reject_forbidden_workspace_paths(ws: &Path) -> Result<PathBuf, AfuseError
     Ok(real_home)
 }
 
-pub fn validate_workspace_binding_with_vault(
+pub fn check_workspace_path_rules(
     candidate: &Path,
-    vault_override: Option<&Path>,
-) -> Result<ValidatedWorkspace, AfuseError> {
+) -> Result<(PathBuf, fs::Metadata, String), AfuseError> {
     let ws = fs::canonicalize(candidate).map_err(|e| {
         AfuseError::new(
             e.raw_os_error().unwrap_or(ERR_ENOENT),
@@ -163,7 +162,14 @@ pub fn validate_workspace_binding_with_vault(
             "workspace directory has no project root marker (.git, Cargo.toml, Package.swift, package.json, pyproject.toml, go.mod, Makefile)",
         )
     })?;
+    Ok((ws, meta, marker))
+}
 
+pub fn validate_workspace_binding_with_vault(
+    candidate: &Path,
+    vault_override: Option<&Path>,
+) -> Result<ValidatedWorkspace, AfuseError> {
+    let (ws, meta, marker) = check_workspace_path_rules(candidate)?;
     let (_, _ws_vault) = prepare_workspace_vault_with(&ws, vault_override)?;
 
     Ok(ValidatedWorkspace {

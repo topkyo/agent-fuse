@@ -38,10 +38,9 @@ pub struct StatFsInfo {
     pub fstype: String,
 }
 pub fn short_hash(s: &str, max_chars: usize) -> &str {
-    if s.len() <= max_chars {
-        s
-    } else {
-        &s[..max_chars]
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
     }
 }
 

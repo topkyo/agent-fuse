@@ -100,6 +100,38 @@ fn verify_root_inode(ws: &Path, ino_before: u64) -> Result<u64, AfuseError> {
     Ok(ino_after)
 }
 
+fn swap_with_old_backup(
+    tmp_new: &Path,
+    target: &Path,
+    tmp_old: &Path,
+) -> Result<(), AfuseError> {
+    force_unlock(target);
+    if swap_paths(tmp_new, target).is_ok() {
+        force_remove_all(tmp_new)?;
+        return Ok(());
+    }
+    if fs::symlink_metadata(tmp_old).is_ok() {
+        force_remove_all(tmp_old)?;
+    }
+    fs::rename(target, tmp_old).map_err(|e| {
+        let _ = force_remove_all(tmp_new);
+        AfuseError::new(
+            e.raw_os_error().unwrap_or(1),
+            format!("stage-1 rename failed: {}", e),
+        )
+    })?;
+    if let Err(e) = fs::rename(tmp_new, target) {
+        let _ = fs::rename(tmp_old, target);
+        let _ = force_remove_all(tmp_new);
+        return Err(AfuseError::new(
+            e.raw_os_error().unwrap_or(1),
+            format!("stage-2 rename failed: {}", e),
+        ));
+    }
+    force_remove_all(tmp_old)?;
+    Ok(())
+}
+
 fn atomic_replace_child(ws: &Path, name: &OsString, snap_child: &Path) -> Result<(), AfuseError> {
     let pid = std::process::id();
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -118,30 +150,8 @@ fn atomic_replace_child(ws: &Path, name: &OsString, snap_child: &Path) -> Result
         return Ok(());
     }
 
-    force_unlock(&target);
-    if swap_paths(&tmp_new, &target).is_ok() {
-        force_remove_all(&tmp_new)?;
-        return Ok(());
-    }
-
     let tmp_old = ws.join(format!(".afuse.tmp.old.{}.{}", pid, seq));
-    if fs::symlink_metadata(&tmp_old).is_ok() {
-        force_remove_all(&tmp_old)?;
-    }
-    fs::rename(&target, &tmp_old).map_err(|e| {
-        let _ = force_remove_all(&tmp_new);
-        AfuseError::new(e.raw_os_error().unwrap_or(1), format!("stage-1 rename failed: {}", e))
-    })?;
-    if let Err(e) = fs::rename(&tmp_new, &target) {
-        let _ = fs::rename(&tmp_old, &target);
-        let _ = force_remove_all(&tmp_new);
-        return Err(AfuseError::new(
-            e.raw_os_error().unwrap_or(1),
-            format!("stage-2 rename failed: {}", e),
-        ));
-    }
-    force_remove_all(&tmp_old)?;
-    Ok(())
+    swap_with_old_backup(&tmp_new, &target, &tmp_old)
 }
 
 pub fn restore_snapshot(
@@ -225,7 +235,13 @@ pub fn restore_snapshot_with_vault(
 }
 
 fn validate_rel_restore_path(raw: &str) -> Result<PathBuf, AfuseError> {
-    if raw.is_empty() || raw.trim().is_empty() || raw.contains('\0') || raw.contains('\\') {
+    if raw.contains('\\') {
+        return Err(AfuseError::new(
+            ERR_EINVAL,
+            "selective restore path must not contain backslashes ('\\')",
+        ));
+    }
+    if raw.is_empty() || raw.trim().is_empty() || raw.contains('\0') {
         return Err(AfuseError::new(ERR_EINVAL, "selective restore path must be relative"));
     }
     let p = Path::new(raw);
@@ -299,17 +315,8 @@ fn atomic_replace_path(ws: &Path, dst_item: &Path, snap_item: &Path) -> Result<(
         })?;
         return Ok(());
     }
-    force_unlock(dst_item);
-    if swap_paths(&tmp_new, dst_item).is_ok() {
-        force_remove_all(&tmp_new)?;
-        return Ok(());
-    }
-    force_remove_all(dst_item)?;
-    fs::rename(&tmp_new, dst_item).map_err(|e| {
-        let _ = force_remove_all(&tmp_new);
-        AfuseError::new(e.raw_os_error().unwrap_or(1), format!("replace failed: {}", e))
-    })?;
-    Ok(())
+    let tmp_old = dst_parent.join(format!(".afuse.tmp.old.{}.{}", pid, seq));
+    swap_with_old_backup(&tmp_new, dst_item, &tmp_old)
 }
 
 pub fn restore_snapshot_paths(

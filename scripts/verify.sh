@@ -316,6 +316,66 @@ assert any(s["label"] == "manual-keep" for s in snaps), "manual-keep vanished"
 '
 AFUSE_VAULT_DIR="$SEL_VAULT" "$BIN_PATH" --workspace "$SEL_WS" --json prune --keep 0 >/dev/null
 
+# Deep-audit regressions: (1) corrupted meta.kv list/diff safety; (2) snap --help / --bad-flag; (3) 64 MiB streaming SHA-256 RSS < 15 MiB; (4) UTF-8/space/0444 selective restore
+ADV_WS="$TMP_SANDBOX/adv-ws"
+ADV_VAULT="$TMP_SANDBOX/adv-vault"
+mkdir -p "$ADV_WS/.git" "$ADV_WS/中文 目录" "$ADV_VAULT"
+printf "utf8-readonly-v1\n" > "$ADV_WS/中文 目录/配置 文稿.txt"
+chmod 0444 "$ADV_WS/中文 目录/配置 文稿.txt"
+GOOD_ID=$(AFUSE_VAULT_DIR="$ADV_VAULT" "$BIN_PATH" --workspace "$ADV_WS" --json snap -m "adv-good" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+BAD_ID=$(AFUSE_VAULT_DIR="$ADV_VAULT" "$BIN_PATH" --workspace "$ADV_WS" --json snap -m "adv-corrupt" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+BAD_META_FILE=$(find "$ADV_VAULT" -path "*/snapshots/${BAD_ID}/meta.kv" -type f | head -n 1)
+[ -n "$BAD_META_FILE" ] || { echo "FAIL: could not locate meta.kv for $BAD_ID" >&2; exit 1; }
+printf "corrupt=garbage\ncreated_ms=nope\n" > "$BAD_META_FILE"
+
+AFUSE_VAULT_DIR="$ADV_VAULT" "$BIN_PATH" --workspace "$ADV_WS" --json list | python3 -c '
+import json, sys
+snaps = json.load(sys.stdin)["snapshots"]
+assert len(snaps) == 1 and snaps[0]["id"] != "", f"expected clean single snap, got {snaps}"
+'
+set +e
+AFUSE_VAULT_DIR="$ADV_VAULT" "$BIN_PATH" --workspace "$ADV_WS" --json diff "$BAD_ID" >/dev/null 2>&1
+DIFF_CORRUPT_RC=$?
+set -e
+[ "$DIFF_CORRUPT_RC" -eq 22 ] || { echo "FAIL: diff corrupted snapshot returned rc=$DIFF_CORRUPT_RC (expected 22)" >&2; exit 1; }
+
+AFUSE_VAULT_DIR="$ADV_VAULT" "$BIN_PATH" --workspace "$ADV_WS" snap --help >/dev/null
+SNAP_COUNT_BEFORE_HELP=$(AFUSE_VAULT_DIR="$ADV_VAULT" "$BIN_PATH" --workspace "$ADV_WS" --json list | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["snapshots"]))')
+[ "$SNAP_COUNT_BEFORE_HELP" -eq 1 ] || { echo "FAIL: snap --help mutated snapshots" >&2; exit 1; }
+set +e
+AFUSE_VAULT_DIR="$ADV_VAULT" "$BIN_PATH" --workspace "$ADV_WS" --json snap --bad-flag >/dev/null 2>&1
+BAD_FLAG_RC=$?
+set -e
+[ "$BAD_FLAG_RC" -eq 22 ] || { echo "FAIL: snap --bad-flag returned rc=$BAD_FLAG_RC (expected 22)" >&2; exit 1; }
+
+chmod 0644 "$ADV_WS/中文 目录/配置 文稿.txt"
+printf "corrupted-content\n" > "$ADV_WS/中文 目录/配置 文稿.txt"
+AFUSE_VAULT_DIR="$ADV_VAULT" "$BIN_PATH" --workspace "$ADV_WS" --json restore "$GOOD_ID" -- "中文 目录/配置 文稿.txt" >/dev/null
+[ "$(cat "$ADV_WS/中文 目录/配置 文稿.txt")" = "utf8-readonly-v1" ] || { echo "FAIL: UTF-8 space selective restore content mismatch" >&2; exit 1; }
+ADV_MODE=$(stat -f%Lp "$ADV_WS/中文 目录/配置 文稿.txt")
+[ "$ADV_MODE" = "444" ] || { echo "FAIL: UTF-8 selective restore lost 0444 mode (got $ADV_MODE)" >&2; exit 1; }
+chmod 0644 "$ADV_WS/中文 目录/配置 文稿.txt"
+
+BIG_WS="$TMP_SANDBOX/big-ws"
+BIG_VAULT="$TMP_SANDBOX/big-vault"
+BIG_TIME_LOG="$TMP_SANDBOX/big-time.log"
+mkdir -p "$BIG_WS/.git" "$BIG_VAULT"
+python3 - "$BIG_WS/payload.bin" <<'PY'
+import sys
+with open(sys.argv[1], "wb") as f:
+    chunk = b"0123456789abcdef" * 65536
+    for _ in range(64):
+        f.write(chunk)
+PY
+/usr/bin/time -l env AFUSE_VAULT_DIR="$BIG_VAULT" "$BIN_PATH" --workspace "$BIG_WS" --json snap -m "big-64mib" >/dev/null 2>"$BIG_TIME_LOG"
+BIG_RSS=$(awk '/maximum resident set size/ {print $1}' "$BIG_TIME_LOG")
+if ! [[ "${BIG_RSS:-}" =~ ^[1-9][0-9]*$ ]] || [ "$BIG_RSS" -ge 15728640 ]; then
+  echo "FAIL: 64 MiB streaming snap RSS ${BIG_RSS:-} >= 15 MiB (15728640 B)" >&2
+  exit 1
+fi
+AFUSE_VAULT_DIR="$BIG_VAULT" "$BIN_PATH" --workspace "$BIG_WS" --json prune --keep 0 >/dev/null
+AFUSE_VAULT_DIR="$ADV_VAULT" "$BIN_PATH" --workspace "$ADV_WS" --json prune --keep 0 >/dev/null
+
 "$BIN_PATH" --workspace "$WS" --json prune --keep 0 >/dev/null
 AFUSE_VAULT_DIR="$HOOK_VAULT" "$BIN_PATH" --workspace "$HOOK_REPO" --json prune --keep 0 >/dev/null
-echo "PASS: Gate 2 verified (1,000 files restored, root Inode=$INO_AFTER preserved, binary=${BIN_BYTES}B, RSS=${RSS_BYTES}B, hook & v0.5.0 suite green)."
+echo "PASS: Gate 2 verified (1,000 files restored, root Inode=$INO_AFTER preserved, binary=${BIN_BYTES}B, RSS=${RSS_BYTES}B, 64MiB_RSS=${BIG_RSS}B, hook & deep-audit suite green)."

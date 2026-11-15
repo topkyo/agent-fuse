@@ -46,7 +46,10 @@ pub use hook::{
     run_zsh_hook_exec, ClaudeHookPayload,
 };
 pub use hook_config::{render_hook_snippet, uninstall_hooks, UninstallAction};
-pub use manifest::{compute_tree_manifest, compute_tree_stats_fast, json_escape, SnapshotMeta};
+pub use manifest::{
+    compute_tree_manifest, compute_tree_stats_fast, json_escape, sanitize_terminal_text,
+    SnapshotMeta,
+};
 pub use prune::{
     parse_prune_args, prune_snapshots, prune_snapshots_filtered,
     prune_snapshots_filtered_with_vault, prune_snapshots_with_vault,

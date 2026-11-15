@@ -1,9 +1,10 @@
 use crate::apfs::{clonefile_nofollow, lstat_inode_mode};
-use crate::error::{AfuseError, ERR_ENOENT};
+use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
 use crate::sha256::{sha256_hex, Sha256};
 use crate::vault::is_ignored_name;
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -60,6 +61,30 @@ pub fn compute_tree_stats_fast(root: &Path) -> Result<(u64, u64), AfuseError> {
 
     walk(root, &mut files, &mut bytes)?;
     Ok((files, bytes))
+}
+
+fn hash_file_streaming(path: &Path) -> Result<String, AfuseError> {
+    let mut f = fs::File::open(path).map_err(|e| {
+        AfuseError::new(
+            e.raw_os_error().unwrap_or(1),
+            format!("open failed on {}: {}", path.display(), e),
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| {
+            AfuseError::new(
+                e.raw_os_error().unwrap_or(1),
+                format!("read failed on {}: {}", path.display(), e),
+            )
+        })?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize_hex())
 }
 
 pub fn compute_tree_manifest(
@@ -121,13 +146,7 @@ pub fn compute_tree_manifest(
             } else if ft.is_file() {
                 *files += 1;
                 *bytes += meta.len();
-                let data = fs::read(&path).map_err(|e| {
-                    AfuseError::new(
-                        e.raw_os_error().unwrap_or(1),
-                        format!("read failed on {}: {}", path.display(), e),
-                    )
-                })?;
-                let fhash = sha256_hex(&data);
+                let fhash = hash_file_streaming(&path)?;
                 map.insert(rel, format!("F:{:04o}:{}:{}", mode, meta.len(), fhash));
             } else if ft.is_fifo() || ft.is_socket() {
                 map.insert(rel, format!("S:{:04o}", mode));
@@ -216,7 +235,7 @@ pub fn json_escape(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
                 use std::fmt::Write;
                 let _ = write!(&mut out, "\\u{:04x}", c as u32);
             }
@@ -226,18 +245,49 @@ pub fn json_escape(s: &str) -> String {
     out
 }
 
+pub fn sanitize_terminal_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                use std::fmt::Write;
+                let _ = write!(&mut out, "\\x{:02x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn sanitize_meta_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\n' | '\r' | '\t' => out.push(' '),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 pub(crate) fn write_meta(meta_path: &Path, m: &SnapshotMeta) -> Result<(), AfuseError> {
     let content = format!(
         "id={}\ncreated_ms={}\nlabel={}\nworkspace={}\nroot_inode={}\nroot_mode={}\nfile_count={}\nlogical_bytes={}\ntree_sha256={}\nelapsed_us={}\n",
-        m.id,
+        sanitize_meta_value(&m.id),
         m.created_ms,
-        m.label.replace('\n', " "),
-        m.workspace.replace('\n', " "),
+        sanitize_meta_value(&m.label),
+        sanitize_meta_value(&m.workspace),
         m.root_inode,
         m.root_mode,
         m.file_count,
         m.logical_bytes,
-        m.tree_sha256,
+        sanitize_meta_value(&m.tree_sha256),
         m.elapsed_us
     );
     fs::write(meta_path, content).map_err(|e| {
@@ -248,47 +298,57 @@ pub(crate) fn write_meta(meta_path: &Path, m: &SnapshotMeta) -> Result<(), Afuse
     })
 }
 
-pub(crate) fn read_meta(meta_path: &Path) -> Result<SnapshotMeta, AfuseError> {
-    let raw = fs::read_to_string(meta_path).map_err(|e| {
-        AfuseError::new(
-            e.raw_os_error().unwrap_or(ERR_ENOENT),
-            format!("failed to read snapshot meta {}: {}", meta_path.display(), e),
-        )
-    })?;
-    let mut kv: BTreeMap<String, String> = BTreeMap::new();
-    for line in raw.lines() {
-        if let Some((k, v)) = line.split_once('=') {
-            kv.insert(k.to_string(), v.to_string());
+impl SnapshotMeta {
+    pub fn read_from(meta_path: &Path) -> Result<SnapshotMeta, AfuseError> {
+        let raw = fs::read_to_string(meta_path).map_err(|e| {
+            AfuseError::new(
+                e.raw_os_error().unwrap_or(ERR_ENOENT),
+                format!("failed to read snapshot meta {}: {}", meta_path.display(), e),
+            )
+        })?;
+        let mut kv: BTreeMap<String, String> = BTreeMap::new();
+        for line in raw.lines() {
+            if let Some((k, v)) = line.split_once('=') {
+                kv.insert(k.to_string(), v.to_string());
+            }
         }
+        let meta = SnapshotMeta {
+            id: kv.get("id").cloned().unwrap_or_default(),
+            created_ms: kv
+                .get("created_ms")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            label: kv.get("label").cloned().unwrap_or_default(),
+            workspace: kv.get("workspace").cloned().unwrap_or_default(),
+            root_inode: kv
+                .get("root_inode")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            root_mode: kv
+                .get("root_mode")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0o755),
+            file_count: kv
+                .get("file_count")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            logical_bytes: kv
+                .get("logical_bytes")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            tree_sha256: kv.get("tree_sha256").cloned().unwrap_or_default(),
+            elapsed_us: kv
+                .get("elapsed_us")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+        };
+        if !meta.id.starts_with("snap-") || meta.tree_sha256.is_empty() || meta.created_ms == 0 {
+            return Err(AfuseError::new(ERR_EINVAL, "corrupted snapshot meta.kv"));
+        }
+        Ok(meta)
     }
-    Ok(SnapshotMeta {
-        id: kv.get("id").cloned().unwrap_or_default(),
-        created_ms: kv
-            .get("created_ms")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0),
-        label: kv.get("label").cloned().unwrap_or_default(),
-        workspace: kv.get("workspace").cloned().unwrap_or_default(),
-        root_inode: kv
-            .get("root_inode")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0),
-        root_mode: kv
-            .get("root_mode")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0o755),
-        file_count: kv
-            .get("file_count")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0),
-        logical_bytes: kv
-            .get("logical_bytes")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0),
-        tree_sha256: kv.get("tree_sha256").cloned().unwrap_or_default(),
-        elapsed_us: kv
-            .get("elapsed_us")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0),
-    })
+}
+
+pub(crate) fn read_meta(meta_path: &Path) -> Result<SnapshotMeta, AfuseError> {
+    SnapshotMeta::read_from(meta_path)
 }

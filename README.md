@@ -12,7 +12,7 @@
 $ afuse guard --max-delete 5 --auto-rollback -- sh -c 'rm -rf src/*'
 ⚡️ FUSE TRIPPED (deleted_entries >= max_delete=5)
    ├─ Process group frozen & reaped (SIGSTOP -> SIGKILL -pgid)
-   ├─ Dirty workspace restored in 7.73 ms (142 files · 0 B CoW at t=0)
+   ├─ Dirty workspace restored in 12.60 ms (142 files · 0 B CoW at t=0)
    └─ Root Inode PRESERVED | Merkle SHA-256 Recovery Receipt VERIFIED
 ```
 
@@ -41,13 +41,13 @@ Measured on a **2015 MacBook Pro (`Intel Core i5-5257U`, 8 GB RAM, `macOS 12.7.6
 
 | Dimension | `git stash -u` | Electron / IDE Checkpoints | **`agent-fuse` (`afuse` v0.5.0)** |
 | :--- | :--- | :--- | :--- |
-| Untracked + dirty files + `.git` index | Partial / touches `.git` lock | Open IDE buffers only | **Full workspace tree + selective path restore (external `.noindex` vault)** |
-| 142-file dirty workspace snap / restore | `50–800 ms` | `200–2,000 ms` | **`6.63 ms` snap / `7.73 ms` restore** |
-| 1,000-file `snap --fast` (hook clone step) | N/A | N/A | **`26.19 ms` (`39.69 ms` with full SHA-256)** |
+| Untracked + dirty files + `.git` index | Partial / touches `.git` lock | Open IDE buffers only | **Full workspace tree + `.git` guard + selective path restore (external `.noindex` vault)** |
+| 142-file dirty workspace snap / restore | `50–800 ms` | `200–2,000 ms` | **`6.46 ms` snap / `12.60 ms` restore (with `auto:pre-restore` + SHA-256 verify)** |
+| 1,000-file `snap --fast` (hook clone step) | N/A | N/A | **`24.15 ms` (`37.99 ms` with full streaming SHA-256)** |
 | Disk allocation at snapshot time (`t=0`) | Object copy | Duplicate copies | **`0 Bytes` CoW (`clonefile(2)`) + Auto-GC cap (`AFUSE_MAX_AUTO_SNAPS=50`)** |
 | Preserves active shell `cwd` root Inode | Yes | Yes | **Yes (`renamex_np` atomic entry swap)** |
 | Kills runaway subshell process groups | No | No | **`SIGSTOP` -> `SIGKILL -pgid` + auto-rollback** |
-| Binary / DMG size & peak RAM | N/A | `500 MB+` Electron | **`< 600 KiB` stripped CLI (`< 2 MiB` peak RSS) · `< 3 MiB` Universal DMG** |
+| Binary / DMG size & peak RAM | N/A | `500 MB+` Electron | **`550 KiB` stripped CLI (`1.73 MiB` 1k-file RSS · `1.20 MiB` 64 MiB-file RSS) · `< 5 MiB` Universal DMG (`~2.7 MiB` single-arch)** |
 
 ---
 
@@ -84,10 +84,10 @@ Automatic `auto:*` checkpoints enforce a rolling ring cap via `AFUSE_MAX_AUTO_SN
 <a id="agentfuse-pro"></a>
 ## **AgentFuse Pro** Native Menu Bar & Control Window App (`$19` / `¥98` One-Time)
 
-Prefer a zero-friction native macOS desktop shield (pure AppKit + QuartzCore + CoreGraphics Swift, `< 400` LOC per module, `< 3 MiB` Universal DMG, `< 300 ms` cold start, `< 5 ms` CPU across a 2s 2-repo idle window)?
+Prefer a zero-friction native macOS desktop shield (pure AppKit + QuartzCore + CoreGraphics Swift, `< 400` LOC per module, `< 5 MiB` Universal DMG / `~2.7 MiB` single-arch, `61.42 ms` cold start, `3.26 ms` CPU across a 2s 2-repo idle window)?
 
-- **Centered `500×410` Dark Vibrancy Control Window + Instant Bilingual (`中文` / `EN`) Toggle**: Launches a `500×410` dark vibrancy `NSWindow` centered on screen (immune to Dozer/Bartender/Notch hiding, re-summoned anytime by reopening `AgentFuse.app` or clicking the menu bar shield icon), featuring SF Pro / PingFang SC typography, a one-click `中文 | EN` segmented toggle, semantic shield status banners, full-window folder drag-and-drop, native `Edit` shortcuts (`⌘V` / `⌘C` / `⌘A` / `⌘W`), and colored diff inspection.
-- **Drag-and-Drop Multi-Repo Watch, Selective File Restore & Native Tripwire Alerts**: Drop up to `5` project folders into the Control Window or onto the menu bar shield icon. Includes `FSEvents` rolling baselines, a `>= 20` file mass-delete tripwire (flips the menu bar shield red with `<N>`, delivers a native macOS banner notification when unfocused, and enables one-click **Instant Rescue**), an interactive **5-Second Safe Demo**, one-click **CLI & Claude Code / Zsh Hook** setup, a **Restore Single File** submenu for surgical per-file recovery, opt-in **Check for Updates**, and an opt-in `--background` **Launch at Login** toggle.
+- **Centered `500×410` Dark Vibrancy Control Window + Instant Bilingual (`中文` / `EN`) Toggle**: Launches a `500×410` dark vibrancy `NSWindow` centered on screen (immune to Dozer/Bartender/Notch hiding, re-summoned anytime by reopening `AgentFuse.app` or clicking the menu bar shield icon), featuring SF Pro / PingFang SC typography, a one-click `中文 | EN` segmented toggle, semantic shield status banners, full-window folder drag-and-drop, native `Edit` + `Actions` shortcuts (`⌘O` bind, `⌘S` snap, `⌘R` restore, `⌘W` / `Esc` dismiss), and colored diff inspection.
+- **Drag-and-Drop Multi-Repo Watch, Selective File Restore & Native Tripwire Alerts**: Drop up to `5` project folders into the Control Window or onto the menu bar shield icon. Includes `FSEvents` rolling baselines, a `>= 20` file mass-delete tripwire (flips the menu bar shield red with `<N>`, delivers a native macOS banner notification when unfocused, and enables asynchronous non-blocking **Instant Rescue**), an interactive **5-Second Safe Demo**, one-click **CLI & Claude Code / Zsh Hook** setup, a **Restore Single File** submenu for surgical deleted/modified/added recovery, opt-in **Check for Updates**, and an opt-in `--background` **Launch at Login** toggle.
 - **Hero Recovery Overlay & Bilingual Recovery Receipt (`1200×630` sRGB PNG)**: Displays a zero-idle-CPU `QuartzCore` gold-pulse recovery overlay with a live preview of your privacy-safe black-and-gold **APFS Recovery Receipt** (zero repo/file names, rendered in `中文` or `English` with Merkle SHA-256 verification status), copied automatically to your clipboard with one-click share actions for `𝕏`, `WeChat`, and `Save PNG`.
 - **Generous Free Edition & Perpetual Pro License**: **Free Edition watches 1 repository forever** with zero countdown timers (`Timeline Restore` is never locked). **AgentFuse Pro (`$19` USD one-time / `¥98` CNY one-time)** unlocks up to `5` concurrent repositories with a **100% offline `Ed25519` license key** (up to 3 Macs, zero telemetry, 14-day refund).
 - **[Download `AgentFuse.app` Universal DMG (GitHub Releases)](https://github.com/topkyo/agent-fuse/releases/latest)** · **Upgrade to AgentFuse Pro (`$19` Global / `¥98` China Mainland) directly from the built-in bilingual license guide inside `AgentFuse.app`**.
@@ -111,7 +111,7 @@ Prefer a zero-friction native macOS desktop shield (pure AppKit + QuartzCore + C
 ## Frequently Asked Questions
 
 1. **Claude Code `/rewind` or `git checkout` did not recover files deleted by `rm -rf`. Can `afuse` restore them?**
-   Yes, provided a snapshot was taken beforehand (manually, via `afuse hook claude`, or via the desktop `FSEvents` watcher). Unlike Claude Code `/rewind`, which ignores shell `Bash` mutations, `afuse` clones the entire working tree (untracked files, `.env`, and `.git`) via APFS `clonefile(2)` (`0 Bytes` at `t=0`) and restores 142 files in `~7.7 ms`, or restores individual paths via `afuse restore latest -- <path>`.
+   Yes, provided a snapshot was taken beforehand (manually, via `afuse hook claude`, or via the desktop `FSEvents` watcher). Unlike Claude Code `/rewind`, which ignores shell `Bash` mutations, `afuse` clones the entire working tree (untracked files, `.env`, and `.git`) via APFS `clonefile(2)` (`0 Bytes` at `t=0`) and restores 142 files in `~12.6 ms`, or restores individual paths via `afuse restore latest -- <path>`.
 2. **How does `afuse` compare to `Provenrail` ($9/mo) or `git stash -u`?**
    `git stash -u` locks `.git/index` and compresses objects. `Provenrail` writes copies into a shadow Git repository (`$9/month`). `afuse` uses kernel APFS `clonefile(2)` with zero Git object overhead, runs an out-of-band `-pgid` circuit breaker (`SIGSTOP` -> `SIGKILL`), and offers an MIT CLI (`$0`) plus a `$19` / `¥98` one-time desktop Pro app.
 3. **Why does `restore` preserve my terminal `cwd` without `cd .. && cd -`?**

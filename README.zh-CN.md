@@ -12,7 +12,7 @@
 $ afuse guard --max-delete 5 --auto-rollback -- sh -c 'rm -rf src/*'
 ⚡️ FUSE TRIPPED (deleted_entries >= max_delete=5)
    ├─ Process group frozen & reaped (SIGSTOP -> SIGKILL -pgid)
-   ├─ Dirty workspace restored in 7.73 ms (142 files · 0 B CoW at t=0)
+   ├─ Dirty workspace restored in 12.60 ms (142 files · 0 B CoW at t=0)
    └─ Root Inode PRESERVED | Merkle SHA-256 Recovery Receipt VERIFIED
 ```
 
@@ -41,13 +41,13 @@ xattr -cr /Applications/AgentFuse.app
 
 | 对比维度 | `git stash -u` | Electron / IDE 内置检查点 | **`agent-fuse` (`afuse` v0.5.0)** |
 | :--- | :--- | :--- | :--- |
-| 未追踪文件 + 脏工作区 + `.git` 索引 | 局部覆盖且争抢 `.git` 锁 | 仅限编辑器已打开文件且漏检 Bash 删除 | **全工作区目录树 + 单文件精准恢复（外部 `.noindex` 隔离保险库）** |
-| 142 文件脏仓库快照 / 恢复耗时 | `50–800 ms` | `200–2,000 ms` | **`6.63 ms` 快照 / `7.73 ms` 原位恢复** |
-| 1,000 文件 `snap --fast`（钩子模式） | 不支持 | 不支持 | **`26.19 ms`（含完整 SHA-256 树哈希为 `39.69 ms`）** |
+| 未追踪文件 + 脏工作区 + `.git` 索引 | 局部覆盖且争抢 `.git` 锁 | 仅限编辑器已打开文件且漏检 Bash 删除 | **全工作区 + `.git` 核心守护 + 单文件精准恢复（外部 `.noindex` 隔离保险库）** |
+| 142 文件脏仓库快照 / 恢复耗时 | `50–800 ms` | `200–2,000 ms` | **`6.46 ms` 快照 / `12.60 ms` 原位恢复（含安全前备与 SHA-256 校验）** |
+| 1,000 文件 `snap --fast`（钩子模式） | 不支持 | 不支持 | **`24.15 ms`（含完整流式 SHA-256 树哈希为 `37.99 ms`）** |
 | 快照瞬间磁盘增量（`t=0`） | 压缩拷贝对象 | 重复文件副本 | **`0 Bytes` 写时复制（`clonefile(2)`）+ 自动配额回收（默认上限 `50`）** |
 | 保持活跃终端 `cwd` 根目录 Inode | 是 | 是 | **是（`renamex_np` 原子目录项交换，无需重进目录）** |
 | 物理阻断失控子进程树 | 否 | 否 | **`SIGSTOP` -> `SIGKILL -pgid` 整组收割并自动回滚** |
-| 二进制 / 安装包体积与峰值内存 | 不适用 | `500 MB+` Electron | **`< 600 KiB` 裁剪后 CLI（峰值内存 `< 2 MiB`）· `< 3 MiB` 双架构 DMG** |
+| 二进制 / 安装包体积与峰值内存 | 不适用 | `500 MB+` Electron | **`550 KiB` 裁剪后 CLI（千文件峰值 RSS `1.73 MiB` · 64 MiB 流式哈希 `1.20 MiB`）· `< 5 MiB` 双架构 DMG（单架构 `~2.7 MiB`）** |
 
 ---
 
@@ -84,10 +84,10 @@ afuse upgrade --check         # 仅在手动执行时查询 GitHub Releases 新�
 <a id="agentfuse-pro"></a>
 ## **AgentFuse Pro** 原生菜单栏与毛玻璃主控桌面端（`¥98` / `$19` 一次买断）
 
-需要零配置成本的原生 macOS 桌面级守护壳（纯手写 AppKit + QuartzCore + CoreGraphics Swift，单模块严格 `< 400` 行，双架构 DMG `< 3 MiB`，冷启动 `< 300 ms`，双仓静默守护 2 秒窗口 CPU 占用 `< 5 ms`）？
+需要零配置成本的原生 macOS 桌面级守护壳（纯手写 AppKit + QuartzCore + CoreGraphics Swift，单模块严格 `< 400` 行，双架构 DMG `< 5 MiB` / 单架构 `~2.7 MiB`，冷启动实测 `61.42 ms`，双仓静默守护 2 秒窗口 CPU 占用 `3.26 ms`）？
 
-- **居中 `500×410` 深色毛玻璃主控台 + 中英双语（`中文` / `EN`）秒切**：启动即呈现屏幕居中的 `500×410` 原生毛玻璃主控窗口（不受刘海屏、Bartender 或 Dozer 折叠影响，重开应用或点击菜单栏护盾图标随时唤回），采用 SF Pro 与苹方舒适排版，支持一键 `中文 | EN` 切换、全窗口拖拽添加项目、原生编辑快捷键（`⌘V` / `⌘C` / `⌘A` / `⌘W`）与彩色文件变更预览。
-- **多项目拖拽守护、新手 5 秒安全演练与单文件精准恢复**：拖入最多 `5` 个项目目录即可开启 `FSEvents` 滚动基线守护。内置 `>= 20` 文件批量误删熔断警戒线（菜单栏护盾图标实时标红告警、后台非焦点状态下推送 macOS 原生横幅与提示音告警、无冲突时支持零弹窗一键极速救回），内置**5 秒误删救回安全演练**、一键安装 **CLI 与 Claude Code / Zsh 钩子**、**单文件精准恢复**子菜单、按需手动**检查更新**与可选 `--background` **开机静默自启**。
+- **居中 `500×410` 深色毛玻璃主控台 + 中英双语（`中文` / `EN`）秒切**：启动即呈现屏幕居中的 `500×410` 原生毛玻璃主控窗口（不受刘海屏、Bartender 或 Dozer 折叠影响，重开应用或点击菜单栏护盾图标随时唤回），采用 SF Pro 与苹方舒适排版，支持一键 `中文 | EN` 切换、全窗口拖拽添加项目、原生编辑与操作快捷键（`⌘O` 绑定、`⌘S` 快照、`⌘R` 恢复、`⌘W` / `Esc` 逐层关闭）与彩色文件变更预览。
+- **多项目拖拽守护、新手 5 秒安全演练与单文件精准恢复**：拖入最多 `5` 个项目目录即可开启 `FSEvents` 滚动基线守护。内置 `>= 20` 文件批量误删熔断警戒线（菜单栏护盾图标实时标红告警、后台非焦点状态下推送 macOS 原生横幅与提示音告警、后台异步非阻塞一键救回不卡主线程），内置**5 秒误删救回安全演练**、一键安装 **CLI 与 Claude Code / Zsh 钩子**、**单文件精准恢复**（涵盖已删、已改与移除新增文件）子菜单、按需手动**检查更新**与可选 `--background` **开机静默自启**。
 - **恢复反馈层与中英双语「APFS 原位恢复凭证」（`1200×630` sRGB PNG）**：救回瞬间呈现零空闲 CPU 占用的 `QuartzCore` 流金脉冲反馈层，实时渲染零隐私泄露的黑金质感**恢复凭证**（不含任何仓库名、文件名或路径，展示恢复耗时、文件数、Inode 保全与 Merkle SHA-256 校验状态），自动写入系统剪贴板并支持一键分享至 `𝕏`、`微信 / 朋友圈` 或导出高清 PNG。
 - **单仓永久免费与终身买断原则**：**社区免费版永久守护 1 个活跃项目**，无试用倒计时，历史时间线恢复永久开放。**AgentFuse Pro 终身买断版（中国大陆 `¥98` 一次买断 · 海外 `$19` 一次买断）** 解锁最多 `5` 个并发守护仓库与 **100% 离线 `Ed25519` 激活码**（支持 3 台本人 Mac，零遥测联网，14 天无理由退款）。
 - **[前往 GitHub Releases 下载 `AgentFuse.app` 双架构 DMG](https://github.com/topkyo/agent-fuse/releases/latest)** · **可直接通过 `AgentFuse.app` 内置离线双语购买指引获取 AgentFuse Pro（`¥98` / `$19` 一次买断）**。
@@ -111,7 +111,7 @@ afuse upgrade --check         # 仅在手动执行时查询 GitHub Releases 新�
 ## 常见问题解答
 
 1. **Claude Code 的 `/rewind` 或 `git checkout` 无法找回被 `rm -rf` 删掉的文件，`afuse` 能救回吗？**
-   只要误删前拍摄过快照（手动执行、挂载 `afuse hook claude` 或开启桌面端 `FSEvents` 守护），即可完整救回。Claude Code `/rewind` 不追踪 Shell `Bash` 命令造成的文件删除；`afuse` 通过 APFS `clonefile(2)` 克隆完整工作树（含未追踪文件、`.env` 与 `.git`），可在 `~7.7 ms` 内还原 142 个文件，或通过 `afuse restore latest -- <路径>` 单独恢复指定文件。
+   只要误删前拍摄过快照（手动执行、挂载 `afuse hook claude` 或开启桌面端 `FSEvents` 守护），即可完整救回。Claude Code `/rewind` 不追踪 Shell `Bash` 命令造成的文件删除；`afuse` 通过 APFS `clonefile(2)` 克隆完整工作树（含未追踪文件、`.env` 与 `.git`），可在 `~12.6 ms` 内还原 142 个文件，或通过 `afuse restore latest -- <路径>` 单独恢复指定文件。
 2. **`afuse` 与 `Provenrail`（`$9/月`）或 `git stash -u` 有何本质区别？**
    `git stash -u` 会锁定 `.git/index` 并进行对象压缩拷贝；`Provenrail` 向影子 Git 仓库复制文件且按月收费（`$108/年`）。`afuse` 直接调用内核 `clonefile(2)` 实现零 Git 对象开销，配备独立进程组熔断器（`SIGSTOP` -> `SIGKILL -pgid`），提供 `$0` MIT CLI 与 `¥98` / `$19` 一次买断的原生桌面端。
 3. **为什么 `afuse restore` 恢复后当前终端不需要重新 `cd .. && cd -`？**

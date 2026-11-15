@@ -2,7 +2,7 @@ use crate::apfs::{
     freeze_kill_reap_pgid, lstat_inode_mode, spawn_in_new_pgroup, statfs_info, try_wait_pid,
 };
 use crate::error::{AfuseError, ERR_EINVAL, EXIT_FUSE_TRIPPED};
-use crate::snapshot::{create_snapshot_with_vault, restore_snapshot_with_vault};
+use crate::snapshot::{create_snapshot_opts_with_vault, restore_snapshot_with_vault};
 use crate::vault::{is_ignored_name, prepare_workspace_vault_with};
 use std::ffi::CString;
 use std::fs;
@@ -29,16 +29,48 @@ pub struct GuardReport {
     pub root_inode_preserved: bool,
     pub verified_sha256: Option<String>,
 }
+
+fn collect_git_critical_paths(git_dir: &Path, out: &mut Vec<PathBuf>) {
+    out.push(git_dir.to_path_buf());
+    for sub in ["HEAD", "config", "index"] {
+        let p = git_dir.join(sub);
+        if fs::symlink_metadata(&p).is_ok() {
+            out.push(p);
+        }
+    }
+    fn walk_sub(cur: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = fs::read_dir(cur) else { return };
+        for entry in rd.flatten() {
+            let p = entry.path();
+            out.push(p.clone());
+            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                walk_sub(&p, out);
+            }
+        }
+    }
+    for sub_dir in ["refs", "logs", "hooks"] {
+        let d = git_dir.join(sub_dir);
+        if fs::symlink_metadata(&d).is_ok() {
+            out.push(d.clone());
+            walk_sub(&d, out);
+        }
+    }
+}
+
 fn collect_baseline_paths(ws: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     fn walk(cur: &Path, out: &mut Vec<PathBuf>) {
         let Ok(rd) = fs::read_dir(cur) else { return };
         for entry in rd.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if is_ignored_name(&name) || name == ".git" {
+            if is_ignored_name(&name) {
                 continue;
             }
             let p = entry.path();
+            if name == ".git" {
+                collect_git_critical_paths(&p, out);
+                continue;
+            }
             out.push(p.clone());
             if let Ok(ft) = entry.file_type() {
                 if ft.is_dir() {
@@ -73,7 +105,8 @@ pub fn run_guarded_command_with_vault(
     }
     let (ws, _ws_vault) = prepare_workspace_vault_with(workspace, vault_override)?;
     let (ino_start, _) = lstat_inode_mode(&ws)?;
-    let baseline = create_snapshot_with_vault(&ws, vault_override, "guard-baseline")?;
+    let baseline =
+        create_snapshot_opts_with_vault(&ws, vault_override, "auto:guard-baseline", true)?;
     let baseline_paths = collect_baseline_paths(&ws);
     let baseline_avail = statfs_info(&ws)?.avail_bytes;
     let max_write_bytes = cfg.max_write_mb.saturating_mul(1024 * 1024);

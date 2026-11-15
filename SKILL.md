@@ -5,7 +5,7 @@ description: >-
   circuit breaker (`afuse`) for macOS coding agents. Activate before executing
   multi-file refactors, destructive shell commands (`rm`, `mv`, `git clean`,
   migrations), or untrusted scripts so uncommitted/untracked files can be
-  restored atomically in single-digit milliseconds (~7.7 ms on a 142-file repo)
+  restored atomically in ~12.6 ms (on a 142-file repo, including safety backup)
   or selectively per path with 100% SHA-256 Merkle parity while preserving the
   active shell's root cwd Inode.
 ---

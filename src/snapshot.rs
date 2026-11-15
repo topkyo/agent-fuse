@@ -208,9 +208,20 @@ pub(crate) fn resolve_snapshot_id(
             .unwrap_or(&all[0])
             .clone());
     }
-    for m in all {
+    for m in &all {
         if m.id == target || m.id.starts_with(target) {
-            return Ok(m);
+            return Ok(m.clone());
+        }
+    }
+    if target != "latest"
+        && !target.is_empty()
+        && !target.contains('/')
+        && !target.contains('\\')
+        && !target.contains("..")
+    {
+        let direct_meta = ws_vault.join("snapshots").join(target).join("meta.kv");
+        if direct_meta.is_file() {
+            return read_meta(&direct_meta);
         }
     }
     Err(AfuseError::new(

@@ -13,6 +13,13 @@ fn json_opt_str(v: &Option<String>) -> String {
         .unwrap_or_else(|| "null".to_string())
 }
 
+fn take_str_flag(rest: &[String], idx: usize, flag: &str, json: bool) -> String {
+    if idx + 1 >= rest.len() {
+        emit_error(json, &AfuseError::new(22, format!("{} requires an argument", flag)));
+    }
+    rest[idx + 1].clone()
+}
+
 pub(crate) fn cmd_hook(workspace: PathBuf, rest: &[String], mut json: bool) {
     let mut target = String::new();
     let mut is_exec = false;
@@ -20,66 +27,50 @@ pub(crate) fn cmd_hook(workspace: PathBuf, rest: &[String], mut json: bool) {
     let mut custom_cwd: Option<PathBuf> = None;
     let mut custom_tool = String::new();
     let mut custom_home: Option<PathBuf> = None;
+    let want_exec = rest.iter().any(|a| a == "--exec");
 
     let mut i = 0usize;
     while i < rest.len() {
         match rest[i].as_str() {
-            "--exec" => {
-                is_exec = true;
-                i += 1;
+            "--help" | "-h" if !want_exec => {
+                println!(
+                    "USAGE:\n  afuse hook <zsh|claude> [--json]\n  afuse hook uninstall [--apply] [--home <DIR>] [--json]"
+                );
+                return;
             }
-            "--apply" => {
-                apply = true;
-                i += 1;
-            }
-            "--json" => {
-                json = true;
-                i += 1;
-            }
+            "--exec" => is_exec = true,
+            "--apply" => apply = true,
+            "--json" => json = true,
             "--cwd" => {
-                if i + 1 < rest.len() {
-                    custom_cwd = Some(PathBuf::from(&rest[i + 1]));
-                    i += 2;
-                } else {
-                    i += 1;
-                }
+                custom_cwd = Some(PathBuf::from(take_str_flag(rest, i, "--cwd", json)));
+                i += 1;
             }
             "--tool" => {
-                if i + 1 < rest.len() {
-                    custom_tool = rest[i + 1].clone();
-                    i += 2;
-                } else {
-                    i += 1;
-                }
+                custom_tool = take_str_flag(rest, i, "--tool", json);
+                i += 1;
             }
             "--home" => {
-                if i + 1 < rest.len() {
-                    custom_home = Some(PathBuf::from(&rest[i + 1]));
-                    i += 2;
-                } else {
-                    i += 1;
+                custom_home = Some(PathBuf::from(take_str_flag(rest, i, "--home", json)));
+                i += 1;
+            }
+            "print" => {}
+            "--claude" | "claude" => target = "claude".to_string(),
+            "--zsh" | "--shell" | "zsh" => target = "zsh".to_string(),
+            "uninstall" => target = "uninstall".to_string(),
+            other if other.starts_with('-') => {
+                if !want_exec {
+                    emit_error(json, &AfuseError::new(22, "unknown hook option"));
                 }
-            }
-            "print" => i += 1,
-            "--claude" | "claude" => {
-                target = "claude".to_string();
-                i += 1;
-            }
-            "--zsh" | "--shell" | "zsh" => {
-                target = "zsh".to_string();
-                i += 1;
-            }
-            "uninstall" => {
-                target = "uninstall".to_string();
-                i += 1;
             }
             other => {
                 if target.is_empty() {
                     target = other.to_string();
+                } else if !want_exec {
+                    emit_error(json, &AfuseError::new(22, "unexpected extra hook argument"));
                 }
-                i += 1;
             }
         }
+        i += 1;
     }
 
     if is_exec {
@@ -164,6 +155,19 @@ pub(crate) fn cmd_hook(workspace: PathBuf, rest: &[String], mut json: bool) {
     }
 }
 
+fn parse_u64_flag(rest: &[String], idx: usize, flag: &str, min_val: u64, json: bool) -> u64 {
+    if idx + 1 >= rest.len() {
+        emit_error(json, &AfuseError::new(22, format!("{} requires an integer", flag)));
+    }
+    match rest[idx + 1].parse::<u64>() {
+        Ok(v) if v >= min_val => v,
+        _ => emit_error(
+            json,
+            &AfuseError::new(22, format!("{} requires integer >= {}", flag, min_val)),
+        ),
+    }
+}
+
 pub(crate) fn cmd_guard(workspace: &Path, rest: &[String], mut json: bool) -> ! {
     let mut cfg = GuardConfig {
         max_delete: 20,
@@ -175,29 +179,24 @@ pub(crate) fn cmd_guard(workspace: &Path, rest: &[String], mut json: bool) -> ! 
     let mut i = 0;
     while i < rest.len() {
         match rest[i].as_str() {
+            "--help" | "-h" => {
+                println!("USAGE: afuse [--workspace <DIR>] [--json] guard [--max-delete N] [--max-write-mb M] [--poll-ms MS] [--auto-rollback] -- <CMD...>");
+                process::exit(0);
+            }
             "--" => {
                 cmd_start = Some(i + 1);
                 break;
             }
             "--max-delete" => {
-                if i + 1 >= rest.len() {
-                    emit_error(json, &AfuseError::new(22, "--max-delete requires N"));
-                }
-                cfg.max_delete = rest[i + 1].parse().unwrap_or(20).max(1);
+                cfg.max_delete = parse_u64_flag(rest, i, "--max-delete", 1, json) as usize;
                 i += 2;
             }
             "--max-write-mb" => {
-                if i + 1 >= rest.len() {
-                    emit_error(json, &AfuseError::new(22, "--max-write-mb requires MB"));
-                }
-                cfg.max_write_mb = rest[i + 1].parse().unwrap_or(256);
+                cfg.max_write_mb = parse_u64_flag(rest, i, "--max-write-mb", 0, json);
                 i += 2;
             }
             "--poll-ms" => {
-                if i + 1 >= rest.len() {
-                    emit_error(json, &AfuseError::new(22, "--poll-ms requires MS"));
-                }
-                cfg.poll_ms = rest[i + 1].parse().unwrap_or(15).max(5);
+                cfg.poll_ms = parse_u64_flag(rest, i, "--poll-ms", 1, json).max(5);
                 i += 2;
             }
             "--auto-rollback" => {
@@ -207,6 +206,9 @@ pub(crate) fn cmd_guard(workspace: &Path, rest: &[String], mut json: bool) -> ! 
             "--json" => {
                 json = true;
                 i += 1;
+            }
+            flag if flag.starts_with('-') => {
+                emit_error(json, &AfuseError::new(22, "unknown guard option"));
             }
             _ => {
                 cmd_start = Some(i);
@@ -253,10 +255,14 @@ pub(crate) fn cmd_doctor(workspace: &Path, rest: &[String], mut json: bool) -> !
     if rest.iter().any(|a| a == "--json") {
         json = true;
     }
-    let (doc_json, doc_ws) = match parse_doctor_args(rest, json) {
+    let (doc_json, doc_ws, want_help) = match parse_doctor_args(rest, json) {
         Ok(v) => v,
         Err(e) => emit_error(json, &e),
     };
+    if want_help {
+        println!("USAGE: afuse [--workspace <DIR>] [--json] doctor [<DIR>]");
+        process::exit(0);
+    }
     json = doc_json;
     let target_ws = doc_ws.as_deref().unwrap_or(workspace);
     match run_doctor(target_ws) {
@@ -264,16 +270,31 @@ pub(crate) fn cmd_doctor(workspace: &Path, rest: &[String], mut json: bool) -> !
             if json {
                 println!("{}", rep.to_json());
             } else {
-                let verdict = if rep.ok {
-                    "Result: [PASS] Ready for zero-overhead agentic protection."
+                let (verdict, fix_hint) = if rep.ok {
+                    ("Result: [PASS] Ready for zero-overhead agentic protection.", None)
+                } else if !rep.apfs_verified || !rep.vault_writable || rep.clonefile_probe_us == 0 {
+                    (
+                        "Result: [FAIL] Environment check failed (require APFS + writable vault).",
+                        Some(if !rep.apfs_verified {
+                            "  Fix: move project and vault onto a macOS APFS volume."
+                        } else {
+                            "  Fix: verify write permissions on ~/.agent-fuse (chmod 700 ~/.agent-fuse) or check AFUSE_VAULT_DIR."
+                        }),
+                    )
                 } else {
-                    "Result: [FAIL] Environment check failed (require APFS + writable vault)."
+                    (
+                        "Result: [FAIL] Workspace path rejected or missing project root marker.",
+                        Some("  Fix: run `afuse doctor .` inside a project root (.git, Cargo.toml, Package.swift, package.json, pyproject.toml, go.mod, or Makefile)."),
+                    )
                 };
                 println!(
-                    "afuse doctor v{} ({}/{})\n  apfs_verified: {}\n  clonefile_probe_us: {} us\n  free_gib: {:.2} GiB\n  vault_writable: {}\n  snapshot_count: {}\n{}",
+                    "afuse doctor v{} ({}/{})\n  apfs_verified: {}\n  clonefile_probe_us: {} us\n  free_gib: {:.2} GiB\n  vault_writable: {}\n  workspace_valid: {}\n  snapshot_count: {}\n{}",
                     rep.version, rep.os, rep.arch, rep.apfs_verified, rep.clonefile_probe_us,
-                    rep.free_gib, rep.vault_writable, rep.snapshot_count, verdict
+                    rep.free_gib, rep.vault_writable, rep.workspace_valid, rep.snapshot_count, verdict
                 );
+                if let Some(hint) = fix_hint {
+                    println!("{}", hint);
+                }
             }
             process::exit(if rep.ok { 0 } else { 1 });
         }
@@ -285,9 +306,13 @@ pub(crate) fn cmd_upgrade(rest: &[String], mut json: bool) {
     let mut check_only = false;
     for arg in rest {
         match arg.as_str() {
+            "--help" | "-h" => {
+                println!("USAGE: afuse [--json] upgrade [--check]");
+                return;
+            }
             "--check" => check_only = true,
             "--json" => json = true,
-            other => emit_error(json, &AfuseError::new(22, format!("unknown upgrade option '{}'", other))),
+            _ => emit_error(json, &AfuseError::new(22, "unknown upgrade option")),
         }
     }
     if check_only {
@@ -330,11 +355,13 @@ pub(crate) fn cmd_upgrade(rest: &[String], mut json: bool) {
 fn parse_doctor_args(
     rest: &[String],
     default_json: bool,
-) -> Result<(bool, Option<PathBuf>), AfuseError> {
+) -> Result<(bool, Option<PathBuf>, bool), AfuseError> {
     let mut json = default_json;
     let mut doc_ws: Option<PathBuf> = None;
+    let mut want_help = false;
     for arg in rest {
         match arg.as_str() {
+            "--help" | "-h" => want_help = true,
             "--json" => json = true,
             flag if flag.starts_with('-') => {
                 return Err(AfuseError::new(22, "unknown doctor option"));
@@ -347,5 +374,5 @@ fn parse_doctor_args(
             }
         }
     }
-    Ok((json, doc_ws))
+    Ok((json, doc_ws, want_help))
 }

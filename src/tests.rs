@@ -747,3 +747,124 @@ struct ScopedDir(PathBuf);
             None => env::remove_var("AFUSE_UPGRADE_ARCHIVE_DIR"),
         }
     }
+
+    #[test]
+    fn corrupted_meta_kv_filtered_in_list_and_rejected_on_explicit_target() {
+        let sandbox = ScopedDir::new("corrupt-meta");
+        let ws = sandbox.0.join("ws");
+        let vault = sandbox.0.join("vault");
+        fs::create_dir_all(&ws).unwrap();
+        fs::write(ws.join("Cargo.toml"), b"[package]\nname=\"demo\"\n").unwrap();
+        fs::write(ws.join("main.rs"), b"fn main() {}\n").unwrap();
+
+        let good = create_snapshot_with_vault(&ws, Some(&vault), "good").unwrap();
+        let bad = create_snapshot_with_vault(&ws, Some(&vault), "to-corrupt").unwrap();
+        let (_, ws_vault) = prepare_workspace_vault_with(&ws, Some(&vault)).unwrap();
+        assert_eq!(list_snapshots_unlocked(&ws_vault).unwrap().len(), 2);
+
+        let bad_meta = ws_vault.join("snapshots").join(&bad.id).join("meta.kv");
+        fs::write(&bad_meta, b"garbage=1\ncreated_ms=notanumber\n").unwrap();
+
+        let listed = list_snapshots_unlocked(&ws_vault).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, good.id);
+        assert!(!listed.iter().any(|m| m.id.is_empty()));
+
+        let diff_err = diff_snapshot_with_vault(&ws, Some(&vault), &bad.id).unwrap_err();
+        assert_eq!(diff_err.code, ERR_EINVAL);
+        assert!(diff_err.message.contains("corrupted snapshot meta.kv"));
+
+        let restore_err =
+            restore_snapshot_with_vault(&ws, Some(&vault), &bad.id, false).unwrap_err();
+        assert_eq!(restore_err.code, ERR_EINVAL);
+        assert!(restore_err.message.contains("corrupted snapshot meta.kv"));
+    }
+
+    #[test]
+    fn utf8_short_hash_backslash_reject_and_unicode_readonly_selective_restore() {
+        assert_eq!(short_hash("中文测试abcd", 2), "中文");
+        let cleaned = sanitize_terminal_text("safe\x1b[31m_text\nline\x7f");
+        assert!(!cleaned.contains('\x1b'));
+        assert!(!cleaned.contains('\n'));
+        assert!(!cleaned.contains('\x7f'));
+
+        let sandbox = ScopedDir::new("utf8-selective");
+        let ws = sandbox.0.join("ws");
+        let vault = sandbox.0.join("vault");
+        fs::create_dir_all(ws.join("子目录 带空格")).unwrap();
+        let rel = "子目录 带空格/配置 文稿.txt";
+        let target = ws.join(rel);
+        fs::write(&target, "初始内容 v1\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o444)).unwrap();
+
+        let snap = create_snapshot_with_vault(&ws, Some(&vault), "utf8-v1").unwrap();
+
+        let backslash_err = restore_snapshot_paths_with_vault(
+            &ws,
+            Some(&vault),
+            &snap.id,
+            false,
+            &[String::from("sub\\file.txt")],
+        )
+        .unwrap_err();
+        assert_eq!(backslash_err.code, ERR_EINVAL);
+
+        let _ = fs::set_permissions(&target, fs::Permissions::from_mode(0o644));
+        fs::write(&target, "被破坏的内容\n").unwrap();
+
+        let rep = restore_snapshot_paths_with_vault(
+            &ws,
+            Some(&vault),
+            &snap.id,
+            true,
+            &[String::from(rel)],
+        )
+        .unwrap();
+        assert_eq!(rep.restored_paths, 1);
+        assert_eq!(fs::read_to_string(&target).unwrap(), "初始内容 v1\n");
+        let mode = fs::symlink_metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o444);
+        let _ = fs::set_permissions(&target, fs::Permissions::from_mode(0o644));
+    }
+
+    #[test]
+    fn git_critical_deletion_trips_guard_and_restores() {
+        let sandbox = ScopedDir::new("guard-git");
+        let ws = sandbox.0.join("ws");
+        let vault = sandbox.0.join("vault");
+        fs::create_dir_all(ws.join(".git/refs/heads")).unwrap();
+        fs::create_dir_all(ws.join("src")).unwrap();
+        fs::write(ws.join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
+        fs::write(ws.join(".git/config"), b"[core]\n\tbare = false\n").unwrap();
+        fs::write(ws.join(".git/refs/heads/main"), b"0123456789abcdef\n").unwrap();
+        fs::write(ws.join("src/lib.rs"), b"pub fn keep() {}\n").unwrap();
+
+        let cfg = GuardConfig {
+            max_delete: 2,
+            max_write_mb: 512,
+            poll_ms: 10,
+            auto_rollback: true,
+        };
+        let cmd = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "rm -rf .git && sleep 2".to_string(),
+        ];
+        let rep = run_guarded_command_with_vault(&ws, Some(&vault), &cfg, &cmd).unwrap();
+        assert!(rep.tripped);
+        assert!(rep.auto_restored);
+        assert_eq!(fs::read_to_string(ws.join(".git/HEAD")).unwrap(), "ref: refs/heads/main\n");
+    }
+
+    #[test]
+    fn doctor_flags_forbidden_home_without_creating_vault_state() {
+        let sandbox = ScopedDir::new("doctor-home");
+        let vault = sandbox.0.join("vault");
+        let real_home = crate::real_home_dir().unwrap();
+        let rep = run_doctor_with_vault(&real_home, Some(&vault)).unwrap();
+        assert!(!rep.workspace_valid);
+        assert!(!rep.ok);
+        if vault.exists() {
+            assert_eq!(fs::read_dir(&vault).unwrap().count(), 0);
+        }
+    }
