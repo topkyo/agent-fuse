@@ -320,6 +320,11 @@ pub(crate) fn cmd_upgrade(rest: &[String], mut json: bool) {
             Ok(rep) => {
                 if json {
                     println!("{}", rep.to_json());
+                } else if rep.release_state == "unpublished" {
+                    println!(
+                        "afuse v{} is installed; no GitHub Release has been published yet.",
+                        rep.current_version
+                    );
                 } else if rep.update_available {
                     println!(
                         "Update available: v{} -> v{}\nRelease: {}\nHomebrew: {}",

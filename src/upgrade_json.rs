@@ -20,6 +20,7 @@ pub struct UpgradeCheckReport {
     pub current_version: String,
     pub latest_version: String,
     pub update_available: bool,
+    pub release_state: String,
     pub release_url: String,
     pub brew_cmd: String,
 }
@@ -38,10 +39,11 @@ pub struct UpgradeApplyReport {
 impl UpgradeCheckReport {
     pub fn to_json(&self) -> String {
         format!(
-            "{{\"ok\":true,\"current_version\":\"{}\",\"latest_version\":\"{}\",\"update_available\":{},\"release_url\":\"{}\",\"brew_cmd\":\"{}\"}}",
+            "{{\"ok\":true,\"current_version\":\"{}\",\"latest_version\":\"{}\",\"update_available\":{},\"release_state\":\"{}\",\"release_url\":\"{}\",\"brew_cmd\":\"{}\"}}",
             json_escape(&self.current_version),
             json_escape(&self.latest_version),
             self.update_available,
+            json_escape(&self.release_state),
             json_escape(&self.release_url),
             json_escape(&self.brew_cmd)
         )

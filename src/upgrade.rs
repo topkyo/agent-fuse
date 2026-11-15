@@ -15,75 +15,74 @@ use std::sync::atomic::Ordering;
 
 pub const DEFAULT_RELEASE_API_URL: &str =
     "https://api.github.com/repos/topkyo/agent-fuse/releases/latest";
+pub const DEFAULT_RELEASES_WEB_URL: &str = "https://github.com/topkyo/agent-fuse/releases";
 pub const BREW_UPGRADE_CMD: &str = "brew upgrade --cask --no-quarantine topkyo/tap/agent-fuse";
 pub const DEFAULT_TARBALL_NAME: &str = "afuse-macos-universal.tar.gz";
 
-fn fetch_text_source(source: &str) -> Result<String, AfuseError> {
-    if let Some(path_part) = source.strip_prefix("file://") {
-        return fs::read_to_string(path_part).map_err(|e| {
-            AfuseError::new(
-                e.raw_os_error().unwrap_or(ERR_ENOENT),
-                format!("failed to read release metadata file: {}", e),
-            )
-        });
-    }
-    if !source.starts_with("http://") && !source.starts_with("https://") {
-        return fs::read_to_string(source).map_err(|e| {
-            AfuseError::new(
-                e.raw_os_error().unwrap_or(ERR_ENOENT),
-                format!("failed to read release metadata path: {}", e),
-            )
-        });
-    }
-    let ua = format!("afuse/{}", env!("CARGO_PKG_VERSION"));
-    let out = Command::new("/usr/bin/curl")
-        .args([
-            "-fsSL",
-            "--max-time",
-            "10",
-            "-H",
-            "Accept: application/vnd.github+json",
-            "-H",
-            &format!("User-Agent: {}", ua),
-            source,
-        ])
-        .output()
-        .map_err(|e| AfuseError::new(1, format!("failed to invoke curl: {}", e)))?;
-    if !out.status.success() {
-        let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(AfuseError::new(
-            1,
-            if msg.is_empty() {
-                "curl failed to fetch latest release metadata".to_string()
-            } else {
-                format!("release check failed: {}", msg)
-            },
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+enum ReleaseFetch {
+    Published(ReleaseInfo),
+    Unpublished,
 }
 
-fn fetch_release_info() -> Result<ReleaseInfo, AfuseError> {
+fn fetch_release_outcome() -> Result<ReleaseFetch, AfuseError> {
     let source = env::var("AFUSE_RELEASE_JSON_URL")
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| DEFAULT_RELEASE_API_URL.to_string());
-    let raw = fetch_text_source(&source)?;
-    parse_release_json(&raw)
+    if !source.starts_with("http://") && !source.starts_with("https://") {
+        let local = source.strip_prefix("file://").unwrap_or(&source);
+        let raw = fs::read_to_string(local).map_err(|e| {
+            AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), format!("failed to read release metadata: {}", e))
+        })?;
+        return Ok(ReleaseFetch::Published(parse_release_json(&raw)?));
+    }
+    let ua = format!("afuse/{}", env!("CARGO_PKG_VERSION"));
+    let out = Command::new("/usr/bin/curl")
+        .args(["-sSL", "--max-time", "10", "-w", "\n%{http_code}", "-H", "Accept: application/vnd.github+json", "-H", &format!("User-Agent: {}", ua), &source])
+        .output()
+        .map_err(|e| AfuseError::new(1, format!("failed to invoke curl: {}", e)))?;
+    if !out.status.success() {
+        let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let detail = if msg.is_empty() { "curl failed to fetch latest release metadata".to_string() } else { format!("release check failed: {}", msg) };
+        return Err(AfuseError::new(1, detail));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let trimmed = stdout.trim_end_matches(['\r', '\n']);
+    let (body, code_str) = trimmed.rsplit_once('\n').unwrap_or(("", trimmed));
+    let status: u16 = code_str.trim().parse().unwrap_or(0);
+    if status == 404 {
+        return Ok(ReleaseFetch::Unpublished);
+    }
+    if !(200..300).contains(&status) {
+        return Err(AfuseError::new(1, format!("release check failed: HTTP {}", status)));
+    }
+    Ok(ReleaseFetch::Published(parse_release_json(body)?))
 }
 
 pub fn check_for_updates() -> Result<UpgradeCheckReport, AfuseError> {
-    let rel = fetch_release_info()?;
     let current = env!("CARGO_PKG_VERSION").to_string();
-    let update_available = is_newer_version(&current, &rel.latest_version);
-    Ok(UpgradeCheckReport {
-        current_version: current,
-        latest_version: rel.latest_version,
-        update_available,
-        release_url: rel.html_url,
-        brew_cmd: BREW_UPGRADE_CMD.to_string(),
-    })
+    match fetch_release_outcome()? {
+        ReleaseFetch::Unpublished => Ok(UpgradeCheckReport {
+            current_version: current.clone(),
+            latest_version: current,
+            update_available: false,
+            release_state: "unpublished".to_string(),
+            release_url: DEFAULT_RELEASES_WEB_URL.to_string(),
+            brew_cmd: BREW_UPGRADE_CMD.to_string(),
+        }),
+        ReleaseFetch::Published(rel) => {
+            let update_available = is_newer_version(&current, &rel.latest_version);
+            Ok(UpgradeCheckReport {
+                current_version: current,
+                latest_version: rel.latest_version,
+                update_available,
+                release_state: "published".to_string(),
+                release_url: rel.html_url,
+                brew_cmd: BREW_UPGRADE_CMD.to_string(),
+            })
+        }
+    }
 }
 
 fn fetch_asset_to_file(source: &str, dest: &Path) -> Result<(), AfuseError> {
@@ -183,8 +182,21 @@ impl Drop for StageCleanup {
 }
 
 pub fn perform_upgrade_on_exe(exe_path: &Path) -> Result<UpgradeApplyReport, AfuseError> {
-    let rel = fetch_release_info()?;
     let current = env!("CARGO_PKG_VERSION").to_string();
+    let rel = match fetch_release_outcome()? {
+        ReleaseFetch::Unpublished => {
+            return Ok(UpgradeApplyReport {
+                current_version: current.clone(),
+                latest_version: current,
+                updated: false,
+                release_url: DEFAULT_RELEASES_WEB_URL.to_string(),
+                brew_cmd: BREW_UPGRADE_CMD.to_string(),
+                verified_sha256: None,
+                target_path: Some(exe_path.to_string_lossy().into_owned()),
+            });
+        }
+        ReleaseFetch::Published(rel) => rel,
+    };
     if !is_newer_version(&current, &rel.latest_version) {
         return Ok(UpgradeApplyReport {
             current_version: current,

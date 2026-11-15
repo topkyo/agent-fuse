@@ -1,7 +1,7 @@
 use crate::apfs::force_remove_all;
 use crate::error::{AfuseError, ERR_EINVAL};
 use crate::snapshot::list_snapshots_unlocked;
-use crate::vault::{lock_vault, prepare_workspace_vault_with};
+use crate::vault::{lock_vault, resolve_workspace_vault_recovery};
 use std::fs;
 use std::path::Path;
 use std::time::SystemTime;
@@ -153,7 +153,10 @@ pub fn prune_snapshots_filtered_with_vault(
     keep_latest: usize,
     label_prefix: Option<&str>,
 ) -> Result<usize, AfuseError> {
-    let (_ws, ws_vault) = prepare_workspace_vault_with(workspace, vault_override)?;
+    let (_ws, ws_vault) = resolve_workspace_vault_recovery(workspace, vault_override)?;
+    if !ws_vault.join("snapshots").is_dir() {
+        return Ok(0);
+    }
     let guard = lock_vault(&ws_vault)?;
     let removed = prune_unlocked(&ws_vault, keep_latest, label_prefix, ORPHAN_MAX_AGE_SECS)?;
     if keep_latest == 0 && label_prefix.map(|s| s.is_empty()).unwrap_or(true) {

@@ -62,17 +62,20 @@ pub use snapshot::{
     create_snapshot, create_snapshot_fast, create_snapshot_if_changed,
     create_snapshot_if_changed_with_vault, create_snapshot_opts_with_vault,
     create_snapshot_with_vault, diff_snapshot, diff_snapshot_with_vault, list_snapshots,
-    DiffReport,
+    list_snapshots_with_vault, DiffReport,
 };
 pub use upgrade::{
     check_for_updates, is_newer_version, parse_release_json, perform_upgrade_on_exe,
     run_upgrade_apply, ReleaseAsset, ReleaseInfo, UpgradeApplyReport, UpgradeCheckReport,
 };
 pub use vault::{
-    is_ignored_name, prepare_workspace_vault, prepare_workspace_vault_with,
-    reject_forbidden_workspace_paths, resolve_vault_base, validate_workspace_binding,
+    is_ignored_name, prepare_live_workspace_vault_with, prepare_workspace_vault,
+    prepare_workspace_vault_with, reject_forbidden_workspace_paths, resolve_vault_base,
+    resolve_workspace_vault_recovery, validate_workspace_binding,
     validate_workspace_binding_with_vault, ValidatedWorkspace,
 };
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_invariants;

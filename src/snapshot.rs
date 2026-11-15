@@ -1,5 +1,5 @@
 use crate::apfs::{force_remove_all, lstat_inode_mode, TMP_SEQ};
-use crate::error::{AfuseError, ERR_ENOENT};
+use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
 use crate::manifest::{
     clone_filtered_tree, compute_tree_manifest, compute_tree_stats_fast, read_meta, write_meta,
     SnapshotMeta,
@@ -8,8 +8,10 @@ pub use crate::restore::{
     restore_snapshot, restore_snapshot_paths, restore_snapshot_paths_with_vault,
     restore_snapshot_with_vault, RestoreReport,
 };
-use crate::vault::{lock_vault, prepare_workspace_vault, prepare_workspace_vault_with};
-use std::collections::BTreeSet;
+use crate::vault::{
+    lock_vault, prepare_live_workspace_vault_with, resolve_workspace_vault_recovery, PROJECT_MARKERS,
+};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -52,7 +54,7 @@ pub fn create_snapshot_opts_with_vault(
     label: &str,
     fast: bool,
 ) -> Result<SnapshotMeta, AfuseError> {
-    let (ws, ws_vault) = prepare_workspace_vault_with(workspace, vault_override)?;
+    let (ws, ws_vault) = prepare_live_workspace_vault_with(workspace, vault_override)?;
     let _guard = lock_vault(&ws_vault)?;
     create_snapshot_unlocked_opts(&ws, &ws_vault, label, fast)
 }
@@ -62,7 +64,7 @@ pub fn create_snapshot_if_changed_with_vault(
     vault_override: Option<&Path>,
     label: &str,
 ) -> Result<(SnapshotMeta, bool), AfuseError> {
-    let (ws, ws_vault) = prepare_workspace_vault_with(workspace, vault_override)?;
+    let (ws, ws_vault) = prepare_live_workspace_vault_with(workspace, vault_override)?;
     let _guard = lock_vault(&ws_vault)?;
     let existing = list_snapshots_unlocked(&ws_vault)?;
     if let Some(latest) = existing.first() {
@@ -118,6 +120,20 @@ pub(crate) fn create_snapshot_unlocked_opts(
         let (sha, fc, lb, _) = compute_tree_manifest(&tree_dir)?;
         (sha, fc, lb)
     };
+    if label.starts_with("auto:") && label != "auto:pre-restore" {
+        let has_marker = PROJECT_MARKERS
+            .iter()
+            .any(|m| fs::symlink_metadata(ws.join(m)).is_ok());
+        if (!has_marker || file_count == 0)
+            && list_snapshots_unlocked(ws_vault)?.iter().any(|m| m.file_count > 0)
+        {
+            let _ = force_remove_all(&snap_dir);
+            return Err(AfuseError::new(
+                ERR_EINVAL,
+                "refusing auto-snapshot of empty or markerless workspace while non-empty history exists",
+            ));
+        }
+    }
 
     let meta = SnapshotMeta {
         id: snap_id,
@@ -163,10 +179,20 @@ fn enforce_auto_snap_quota_unlocked(ws_vault: &Path, label: &str) -> Result<(), 
     Ok(())
 }
 
-pub fn list_snapshots(workspace: &Path) -> Result<Vec<SnapshotMeta>, AfuseError> {
-    let (_ws, ws_vault) = prepare_workspace_vault(workspace)?;
+pub fn list_snapshots_with_vault(
+    workspace: &Path,
+    vault_override: Option<&Path>,
+) -> Result<Vec<SnapshotMeta>, AfuseError> {
+    let (_ws, ws_vault) = resolve_workspace_vault_recovery(workspace, vault_override)?;
+    if !ws_vault.join("snapshots").is_dir() {
+        return Ok(Vec::new());
+    }
     let _guard = lock_vault(&ws_vault)?;
     list_snapshots_unlocked(&ws_vault)
+}
+
+pub fn list_snapshots(workspace: &Path) -> Result<Vec<SnapshotMeta>, AfuseError> {
+    list_snapshots_with_vault(workspace, None)
 }
 
 pub(crate) fn list_snapshots_unlocked(ws_vault: &Path) -> Result<Vec<SnapshotMeta>, AfuseError> {
@@ -239,13 +265,20 @@ pub fn diff_snapshot_with_vault(
     vault_override: Option<&Path>,
     target_id: &str,
 ) -> Result<DiffReport, AfuseError> {
-    let (ws, ws_vault) = prepare_workspace_vault_with(workspace, vault_override)?;
+    let (ws, ws_vault) = resolve_workspace_vault_recovery(workspace, vault_override)?;
+    if !ws_vault.join("snapshots").is_dir() {
+        return Err(AfuseError::new(ERR_ENOENT, "no snapshots exist for this workspace"));
+    }
     let _guard = lock_vault(&ws_vault)?;
     let meta = resolve_snapshot_id(&ws_vault, target_id)?;
     let snap_tree = ws_vault.join("snapshots").join(&meta.id).join("tree");
 
     let (_, _, _, snap_map) = compute_tree_manifest(&snap_tree)?;
-    let (_, _, _, live_map) = compute_tree_manifest(&ws)?;
+    let live_map = if ws.is_dir() {
+        compute_tree_manifest(&ws)?.3
+    } else {
+        BTreeMap::new()
+    };
 
     let mut added = Vec::new();
     let mut modified = Vec::new();
