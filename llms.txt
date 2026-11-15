@@ -1,0 +1,51 @@
+# AgentFuse (`afuse`) v0.5.0
+
+> Millisecond-scale APFS Copy-on-Write workspace time machine, selective path recovery, opt-in agent hooks, and process-group circuit breaker for macOS coding agents (`Claude Code`, `Cursor`, `Codex`, `Aider`, `zsh`).
+
+## Problem Solved
+Autonomous CLI coding agents run `rm -rf`, `mv`, or mass file overwrites on dirty working trees. `git checkout` cannot recover untracked files, `git stash` mutates `.git/index` locks during active agent runs, and IDE checkpoints (`Claude Code /rewind`, `Cursor Checkpoint`) do not track destructive shell `Bash` commands.
+
+## Core Mechanism (macOS 12.0+ APFS)
+1. **0-Byte External CoW Snapshots (`clonefile(2)`) + Auto-GC Cap**: Clones workspace entries into an external same-volume vault (`~/.agent-fuse/vault.noindex`, `chmod 0700`, Spotlight excluded), skipping regenerable caches (`node_modules`, `target`, `.build`, `.venv`, `DerivedData`). Allocates `0 Bytes` of new data blocks at `t=0` and caps `auto:*` snapshots at `AFUSE_MAX_AUTO_SNAPS` (default `50`, with `auto:hook:*` capped at `20`) while preserving manual milestones.
+2. **Root-Inode-Preserving Full & Selective Restore (`renamex_np`)**: Swaps the full workspace via `renamex_np(..., RENAME_SWAP)` or surgically restores individual relative paths (`afuse restore <snap> -- <path>...`) so active terminal shells, `tmux` panes, and LSP servers keep the exact same workspace root `cwd` Inode. Creates an `auto:pre-restore` backup before every restore.
+3. **Out-of-Band Process-Group Circuit Breaker (`afuse guard`)**: Places agents in a dedicated process group (`setpgid(0, 0)`), polls deletion and write deltas every 15 ms, freezes runaway trees with `SIGSTOP -pgid`, reaps with `SIGKILL -pgid`, and rolls back automatically (exit code `99`).
+4. **Zero-Dotfile-Mutation Hooks & Opt-In Verified Upgrade**: `afuse hook zsh | claude` prints auditable snippets to stdout without editing dotfiles. `afuse upgrade [--check]` performs zero background polling and verifies `SHA256SUMS` strictly upon manual invocation.
+
+## Verified Benchmarks (2015 MacBook Pro, Core i5-5257U, 8 GB RAM, macOS 12.7.6 APFS)
+- `afuse` MIT CLI binary: `< 600 KiB` stripped (`0` external Rust crates, links only `libSystem.B.dylib`)
+- `AgentFuse-0.5.0-macos.dmg`: `< 3 MiB` Universal (`arm64 + x86_64` AppKit GUI + Retina `AppIcon.icns` + embedded CLI)
+- Peak RSS (1,000-file chaos test): `< 2.0 MiB` (`1.77 MiB` measured)
+- 142-file dirty repo `snap`: `6.63 ms` | in-place `restore`: `7.73 ms`
+- 1,000-file `snap --fast`: `26.19 ms` (`39.69 ms` with full Merkle SHA-256)
+- `AgentFuse.app` cold start: `< 300 ms` | 2-repo `FSEvents` idle CPU (2s): `< 5 ms` | `APFS Recovery Receipt` PNG render: `< 100 ms`
+
+## Comparison Matrix
+- **vs `git stash -u`**: `afuse` does not touch `.git` locks, protects `.git` itself if deleted, supports single-path restore of untracked files, and finishes in single-digit ms without zlib hashing.
+- **vs `Provenrail` ($9/mo)**: `afuse` uses kernel `clonefile(2)` (`0 B` at `t=0`) instead of shadow Git object copies, adds a `-pgid` process breaker + native AppKit GUI, and costs `$0` (MIT CLI) or `$19` one-time (Pro).
+- **vs `Claude Code /rewind` & `Cursor Checkpoint`**: `afuse` captures shell `Bash` deletions (`rm -rf`), works across multi-agent sessions concurrently, and restores untracked files.
+- **vs `Time Machine` / `Disk Drill` ($89)**: Sub-second CoW granularity immune to SSD `TRIM` after `unlink`.
+
+## Installation & Quickstart
+```bash
+# MIT CLI from source (macOS 12+ APFS, 0 external crates):
+cargo install --git https://github.com/topkyo/agent-fuse.git
+
+# Native AppKit Pro app + embedded afuse CLI (Gatekeeper-clean Homebrew command):
+brew install --cask --no-quarantine topkyo/tap/agent-fuse
+
+# Core CLI workflow:
+afuse snap -m "before-agent"
+afuse guard --max-delete 15 --auto-rollback -- claude "refactor src"
+afuse restore latest
+afuse restore latest -- src/auth.rs
+afuse upgrade --check
+afuse doctor --json
+```
+
+## Licensing & Pricing
+- **MIT Open-Source CLI (`afuse`)**: `$0` forever (bilingual English `README.md` & Simplified Chinese `README.zh-CN.md`).
+- **AgentFuse Pro (macOS AppKit App)**: Free Edition watches 1 repository forever (no countdown timers, Timeline Restore never locked). AgentFuse Pro unlocks up to 5 concurrent repositories, selective single-file menu restore, native mass-delete banner notifications, bilingual `APFS Recovery Receipt` (`1200×630` PNG), up to 3 Macs, `100%` offline `Ed25519` license key, `0` telemetry.
+  - Global One-Time License: `$19 USD` (Creem.io).
+  - China Mainland One-Time License: `¥98 CNY` (Mianbaoduo / WeChat & Alipay).
+  - Releases & Downloads: https://github.com/topkyo/agent-fuse/releases/latest
+  - Source Repo: https://github.com/topkyo/agent-fuse

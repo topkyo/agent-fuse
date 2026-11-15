@@ -1,0 +1,7 @@
+target/
+build/
+*.app/
+*.dmg
+*.priv.hex
+license.key
+.DS_Store

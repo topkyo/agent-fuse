@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 460" width="1200" height="460" role="img" aria-label="AgentFuse 5-second rm -rf conflict and 7.73ms APFS recovery animation">
+  <style>
+    @keyframes phase1 { 0%, 4% { opacity: 0.2; } 8%, 94% { opacity: 1; } 100% { opacity: 0.2; } }
+    @keyframes phase2 { 0%, 26% { opacity: 0; transform: translateY(4px); } 30%, 94% { opacity: 1; transform: translateY(0); } 100% { opacity: 0; } }
+    @keyframes phase3 { 0%, 54% { opacity: 0; transform: scale(0.97); } 60%, 94% { opacity: 1; transform: scale(1); } 100% { opacity: 0; } }
+    @keyframes pulseTrip { 0%, 26% { opacity: 0; } 28%, 54% { opacity: 1; } 58%, 100% { opacity: 0; } }
+    @keyframes progBar { 0% { width: 0px; } 100% { width: 1120px; } }
+    .p1 { animation: phase1 5s infinite; }
+    .p2 { animation: phase2 5s infinite; }
+    .p3 { animation: phase3 5s infinite; }
+    .trip { animation: pulseTrip 5s infinite; }
+    .bar { animation: progBar 5s linear infinite; }
+  </style>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#08090D"/>
+      <stop offset="100%" stop-color="#0F121B"/>
+    </linearGradient>
+    <linearGradient id="goldCard" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0D0D12"/>
+      <stop offset="100%" stop-color="#1E180B"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="1" y="1" width="1198" height="458" rx="16" fill="url(#bg)" stroke="#232838" stroke-width="2"/>
+
+  <!-- Top 5s timeline bar -->
+  <rect x="40" y="20" width="1120" height="4" rx="2" fill="#1C2030"/>
+  <rect x="40" y="20" width="0" height="4" rx="2" fill="#E6BD4C" class="bar"/>
+  <text x="40" y="44" fill="#8B94AA" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">5.0s Uncut Conflict Demo  |  0.0s rm -rf src/*  ->  1.5s Tripwire Alert  ->  3.0s Instant Rescue (7.73 ms)</text>
+
+  <!-- Left Pane: Terminal -->
+  <rect x="40" y="62" width="548" height="366" rx="12" fill="#0B0D13" stroke="#262C3E" stroke-width="1.2"/>
+  <path d="M40 74 a12 12 0 0 1 12 -12 h524 a12 12 0 0 1 12 12 v22 h-548 z" fill="#141824"/>
+  <circle cx="60" cy="79" r="5" fill="#FF5F56"/>
+  <circle cx="78" cy="79" r="5" fill="#FFBD2E"/>
+  <circle cx="96" cy="79" r="5" fill="#27C93F"/>
+  <text x="314" y="83" text-anchor="middle" fill="#7D869C" font-family="ui-monospace,Menlo,monospace" font-size="11">zsh — ~/my-app (142 uncommitted files, APFS)</text>
+
+  <g class="p1">
+    <text x="58" y="128" fill="#34D399" font-family="ui-monospace,Menlo,monospace" font-size="14" font-weight="700">$</text>
+    <text x="74" y="128" fill="#F3F5F9" font-family="ui-monospace,Menlo,monospace" font-size="14" font-weight="700">rm -rf src/*</text>
+    <text x="58" y="152" fill="#F87171" font-family="ui-monospace,Menlo,monospace" font-size="12">× 142 uncommitted files deleted! git checkout cannot help.</text>
+    <text x="58" y="172" fill="#9CA3AF" font-family="ui-monospace,Menlo,monospace" font-size="11.5">$ ls src/ | wc -l  ->  0</text>
+  </g>
+
+  <g class="p2">
+    <rect x="56" y="192" width="516" height="58" rx="8" fill="#221414" stroke="#F87171" stroke-opacity="0.65"/>
+    <text x="70" y="215" fill="#FCA5A5" font-family="ui-monospace,Menlo,monospace" font-size="12" font-weight="700">⚡️ FUSE TRIPPED · SIGSTOP -> SIGKILL -pgid</text>
+    <text x="70" y="236" fill="#E5C07B" font-family="ui-monospace,Menlo,monospace" font-size="11.5">FSEvents frozen · 0 B CoW baseline intact in ~/.agent-fuse</text>
+  </g>
+
+  <g class="p3">
+    <text x="58" y="284" fill="#34D399" font-family="ui-monospace,Menlo,monospace" font-size="14" font-weight="700">$</text>
+    <text x="74" y="284" fill="#F3F5F9" font-family="ui-monospace,Menlo,monospace" font-size="14" font-weight="700">afuse restore latest &amp;&amp; stat -f %i .</text>
+    <rect x="56" y="298" width="516" height="106" rx="8" fill="#0D261B" stroke="#34D399" stroke-opacity="0.7"/>
+    <text x="70" y="322" fill="#6EE7B7" font-family="ui-monospace,Menlo,monospace" font-size="12" font-weight="700">✓ Restored 142 files in 7.73 ms (renamex_np swap)</text>
+    <text x="70" y="346" fill="#A7F3D0" font-family="ui-monospace,Menlo,monospace" font-size="11.5">├─ Root cwd Inode PRESERVED: 12948571 -> 12948571 (shell intact)</text>
+    <text x="70" y="368" fill="#A7F3D0" font-family="ui-monospace,Menlo,monospace" font-size="11.5">├─ Safety backup : auto:pre-restore created (0 B CoW)</text>
+    <text x="70" y="390" fill="#A7F3D0" font-family="ui-monospace,Menlo,monospace" font-size="11.5">└─ Merkle SHA-256: a94f2c10... VERIFIED | $ ls src/ -> 142</text>
+  </g>
+
+  <!-- Right Pane: AgentFuse Pro Control Window + Card -->
+  <rect x="612" y="62" width="548" height="366" rx="12" fill="#12151F" stroke="#2D3347" stroke-width="1.2"/>
+  <rect x="628" y="76" width="516" height="34" rx="8" fill="#181C29" stroke="#2C3246"/>
+  <text x="642" y="98" fill="#F3F5F9" font-family="-apple-system,sans-serif" font-size="13" font-weight="700">● AgentFuse Control Window (500×410)</text>
+  <rect x="1028" y="81" width="106" height="24" rx="6" fill="#2B1C12" stroke="#E6BD4C" stroke-opacity="0.6"/>
+  <text x="1081" y="97" text-anchor="middle" fill="#F8C15C" font-family="ui-monospace,Menlo,monospace" font-size="11.5" font-weight="700" class="trip">⚠️ 142 DEL</text>
+
+  <g class="p2">
+    <rect x="628" y="122" width="516" height="44" rx="8" fill="#32181B" stroke="#F87171" stroke-opacity="0.7"/>
+    <text x="644" y="149" fill="#FFE4E6" font-family="-apple-system,sans-serif" font-size="12.5" font-weight="600">🚨 142 files deleted in bulk! Click Instant Rescue (Return)</text>
+    <rect x="962" y="130" width="168" height="28" rx="6" fill="#28AD70"/>
+    <text x="1046" y="148" text-anchor="middle" fill="#FFFFFF" font-family="-apple-system,sans-serif" font-size="11.5" font-weight="700">⚡️ Instant Rescue (142)</text>
+  </g>
+
+  <g class="p3">
+    <rect x="628" y="180" width="516" height="202" rx="10" fill="url(#goldCard)" stroke="#E6BD4C" stroke-width="1.8"/>
+    <rect x="636" y="188" width="500" height="186" rx="6" fill="none" stroke="#E6BD4C" stroke-opacity="0.32"/>
+    <text x="654" y="216" fill="#E6BD4C" font-family="-apple-system,sans-serif" font-size="12" font-weight="700">AGENTFUSE · CLOSE-CALL RECOVERY RECEIPT</text>
+    <text x="654" y="256" fill="#FFFFFF" font-family="-apple-system,sans-serif" font-size="24" font-weight="800">142 UNCOMMITTED FILES RESTORED</text>
+    <text x="654" y="288" fill="#F3CF68" font-family="ui-monospace,Menlo,monospace" font-size="13">Restored in 7.73 ms · Saved 4.5 hrs est. · 0 B CoW</text>
+    <line x1="654" y1="306" x2="1118" y2="306" stroke="#E6BD4C" stroke-opacity="0.25"/>
+    <text x="654" y="332" fill="#B5BAC7" font-family="ui-monospace,Menlo,monospace" font-size="11.5">Receipt #a94f2c10 · Root cwd Inode Preserved · ⌘V Auto-Copied</text>
+    <text x="654" y="358" fill="#E6BD4C" font-family="-apple-system,sans-serif" font-size="11.5" font-weight="700">&lt; 3 MiB Universal DMG · Free 1-Repo Forever · $19 / ¥98 Pro</text>
+  </g>
+
+  <text x="628" y="408" fill="#9CA3AF" font-family="-apple-system,sans-serif" font-size="11.5">✦ AgentFuse Pro · 100% Offline Ed25519  |  0 Telemetry · macOS 12+ APFS</text>
+</svg>
