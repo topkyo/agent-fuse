@@ -12,9 +12,9 @@ description: >-
 
 # Agent-Fuse (`afuse` v0.5.0) · APFS Workspace Safety Airbag
 
-`afuse` snapshots uncommitted edits, untracked files, and `.git` state on macOS APFS volumes into an external same-volume vault (`~/.agent-fuse/vault.noindex`, `0700` permissions) using kernel `clonefile(2)` (`0 Bytes` at `t=0` until blocks diverge) and `renamex_np(RENAME_SWAP)` root-Inode-preserving rollback. Automatic `auto:*` snapshots enforce a rolling cap via `AFUSE_MAX_AUTO_SNAPS` (default `50`) while preserving manual milestones.
+`afuse` snapshots uncommitted edits, untracked files, plain directories (no `.git` or manifest marker required), single protected files (with sibling-file isolation), and `.git` state on macOS APFS volumes into an external same-volume vault (`~/.agent-fuse/vault.noindex`, `0700` permissions) using kernel `clonefile(2)` (`0 Bytes` at `t=0` until blocks diverge) and `renamex_np(RENAME_SWAP)` in-place rollback (preserving root cwd Inode for folders and purging identical `(fsid, ino)` copies left in `~/.Trash`). Automatic `auto:*` snapshots enforce a rolling cap via `AFUSE_MAX_AUTO_SNAPS` (default `50`) while preserving manual milestones.
 
-## 1. Verify Availability & Safe Project Root
+## 1. Verify Availability & Safe Binding Boundary
 
 ```bash
 command -v afuse && afuse --json --version
@@ -22,7 +22,7 @@ afuse doctor "$PWD" --json
 afuse --workspace "$PWD" --json validate
 ```
 
-Always pass `--json` for deterministic machine parsing. `afuse validate` rejects `/`, `$HOME`, TCC-protected folders (`~/Desktop`, `~/Documents`, `~/Downloads`), non-APFS mounts, and directories without a project root marker (`.git`, `Cargo.toml`, `Package.swift`, `package.json`, `pyproject.toml`, `go.mod`, `Makefile`).
+Always pass `--json` for deterministic machine parsing. `afuse validate` accepts **any plain APFS directory or any single regular file** (including sub-folders and files inside `~/Desktop`, `~/Documents`, or `~/Downloads`), while rejecting `/`, `$HOME`, system roots, top-level TCC container roots (`~/Desktop`, `~/Documents`, `~/Downloads` themselves), symlinks, non-APFS mounts, and vault subdirectories.
 
 ## 2. Core Agent Workflows
 

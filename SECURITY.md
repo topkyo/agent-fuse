@@ -15,7 +15,7 @@
 
 1. **Isolated Local Vault (`0700`)**: Snapshots are stored on the same APFS volume under `~/.agent-fuse/vault.noindex/<repo>-<hash>` with `chmod 0700` owner-only permissions and Spotlight `.noindex` exclusion.
 2. **Path Traversal & Self-Ingestion Guards**:
-   - Workspace validation rejects `/`, `$HOME`, system roots, TCC-protected directories (`~/Desktop`, `~/Documents`, `~/Downloads`), and vault subdirectories.
+   - Workspace validation accepts any plain APFS folder or regular single file (including items inside Desktop/Documents/Downloads), while rejecting `/`, `$HOME`, system roots, top-level TCC container roots (`~/Desktop`, `~/Documents`, `~/Downloads` themselves), symlinks, and vault subdirectories.
    - Selective path restore (`afuse restore <snap> -- <paths>`) rejects absolute paths, `..` parent traversal segments, and internal `.afuse.tmp.*` staging names.
 3. **Zero Background Network Activity**:
    - Neither `afuse` nor `AgentFuse.app` initiates network connections on launch or during background watching.
@@ -50,7 +50,7 @@ Please **do NOT open a public GitHub issue** for exploitable security vulnerabil
 
 1. **外部同卷权限隔离保险库（`0700`）**：所有快照均存储于同卷外部 `~/.agent-fuse/vault.noindex/<repo>-<hash>` 目录，强制 `0700` 仅属主可读写权限，并默认排除 Spotlight 全局索引。
 2. **目录越界与自吞噬拦截**：
-   - 工作区校验器拒绝挂载 `/`、`$HOME`、系统目录、macOS TCC 隐私目录（桌面、文稿、下载）以及保险库自身子目录。
+   - 目标校验器支持任意普通文件夹与单文件（含桌面/文稿/下载内部子目录与文件），同时强制拒绝挂载 `/`、`$HOME`、系统目录、顶级 TCC 容器根目录（`~/Desktop`、`~/Documents`、`~/Downloads` 本身）、符号链接以及保险库自身子目录。
    - 单文件精准恢复（`afuse restore <snap> -- <paths>`）强制拒绝绝对路径、`..` 父目录穿越以及 `.afuse.tmp.*` 内部暂存路径。
 3. **零启动/后台网络请求**：
    - `afuse` 与 `AgentFuse.app` 在启动及守护期间均保持 `0` 联网请求。

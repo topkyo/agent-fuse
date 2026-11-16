@@ -32,7 +32,7 @@ pub struct GuardReport {
 
 fn collect_git_critical_paths(git_dir: &Path, out: &mut Vec<PathBuf>) {
     out.push(git_dir.to_path_buf());
-    for sub in ["HEAD", "config", "index"] {
+    for sub in ["HEAD", "config", "index", "packed-refs"] {
         let p = git_dir.join(sub);
         if fs::symlink_metadata(&p).is_ok() {
             out.push(p);
@@ -48,7 +48,7 @@ fn collect_git_critical_paths(git_dir: &Path, out: &mut Vec<PathBuf>) {
             }
         }
     }
-    for sub_dir in ["refs", "logs", "hooks"] {
+    for sub_dir in ["refs", "logs", "hooks", "objects", "info"] {
         let d = git_dir.join(sub_dir);
         if fs::symlink_metadata(&d).is_ok() {
             out.push(d.clone());
@@ -57,12 +57,29 @@ fn collect_git_critical_paths(git_dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn collect_baseline_paths(ws: &Path) -> Vec<PathBuf> {
+struct BaselineTrack {
+    paths: Vec<PathBuf>,
+    nonempty_files: Vec<PathBuf>,
+}
+
+fn collect_baseline_track(ws: &Path) -> BaselineTrack {
     if ws.is_file() {
-        return vec![ws.to_path_buf()];
+        let mut nonempty_files = Vec::new();
+        if let Ok(m) = fs::symlink_metadata(ws) {
+            if m.is_file() && m.len() > 0 {
+                nonempty_files.push(ws.to_path_buf());
+            }
+        }
+        return BaselineTrack {
+            paths: vec![ws.to_path_buf()],
+            nonempty_files,
+        };
     }
-    let mut paths = Vec::new();
-    fn walk(cur: &Path, out: &mut Vec<PathBuf>) {
+    let mut track = BaselineTrack {
+        paths: Vec::new(),
+        nonempty_files: Vec::new(),
+    };
+    fn walk(cur: &Path, out: &mut BaselineTrack) {
         let Ok(rd) = fs::read_dir(cur) else { return };
         for entry in rd.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -71,19 +88,45 @@ fn collect_baseline_paths(ws: &Path) -> Vec<PathBuf> {
             }
             let p = entry.path();
             if name == ".git" {
-                collect_git_critical_paths(&p, out);
+                collect_git_critical_paths(&p, &mut out.paths);
                 continue;
             }
-            out.push(p.clone());
-            if let Ok(ft) = entry.file_type() {
-                if ft.is_dir() {
+            out.paths.push(p.clone());
+            if let Ok(m) = fs::symlink_metadata(&p) {
+                if m.file_type().is_dir() {
                     walk(&p, out);
+                } else if m.file_type().is_file() && m.len() > 0 {
+                    out.nonempty_files.push(p);
                 }
             }
         }
     }
-    walk(ws, &mut paths);
-    paths
+    walk(ws, &mut track);
+    track
+}
+
+fn check_destruction_threshold(track: &BaselineTrack, threshold: usize) -> Option<(usize, usize)> {
+    let mut missing = 0usize;
+    let mut truncated = 0usize;
+    for p in &track.paths {
+        if fs::symlink_metadata(p).is_err() {
+            missing += 1;
+            if missing >= threshold {
+                return Some((missing, truncated));
+            }
+        }
+    }
+    for p in &track.nonempty_files {
+        if let Ok(m) = fs::symlink_metadata(p) {
+            if m.file_type().is_file() && m.len() == 0 {
+                truncated += 1;
+                if missing + truncated >= threshold {
+                    return Some((missing, truncated));
+                }
+            }
+        }
+    }
+    None
 }
 
 pub fn run_guarded_command(
@@ -107,15 +150,19 @@ pub fn run_guarded_command_with_vault(
         ));
     }
     let (ws, _ws_vault) = prepare_workspace_vault_with(workspace, vault_override)?;
-    let (ino_start, _) = lstat_inode_mode(&ws)?;
-    let stat_dir = if ws.is_dir() {
-        ws.clone()
-    } else {
+    let is_single = ws.is_file();
+    let stat_dir = if is_single {
         ws.parent().unwrap_or(Path::new("/")).to_path_buf()
+    } else {
+        ws.clone()
     };
+    let anchor_path = if is_single { &stat_dir } else { &ws };
+    let (ino_start, _) = lstat_inode_mode(anchor_path)?;
+
     let baseline =
         create_snapshot_opts_with_vault(&ws, vault_override, "auto:guard-baseline", true)?;
-    let baseline_paths = collect_baseline_paths(&ws);
+    let track = collect_baseline_track(&ws);
+    let threshold = if is_single { 1 } else { cfg.max_delete.max(1) };
     let baseline_avail = statfs_info(&stat_dir)?.avail_bytes;
     let max_write_bytes = cfg.max_write_mb.saturating_mul(1024 * 1024);
 
@@ -142,21 +189,12 @@ pub fn run_guarded_command_with_vault(
     let exit_code: i32;
 
     loop {
-        let mut missing = 0usize;
-        for p in &baseline_paths {
-            if fs::symlink_metadata(p).is_err() {
-                missing += 1;
-                if missing >= cfg.max_delete {
-                    break;
-                }
-            }
-        }
-        if missing >= cfg.max_delete {
+        if let Some((missing, truncated)) = check_destruction_threshold(&track, threshold) {
             freeze_kill_reap_pgid(child_pid);
             tripped = true;
             trip_reason = Some(format!(
-                "deleted_entries={} reached threshold max_delete={}",
-                missing, cfg.max_delete
+                "deleted_entries={} truncated_entries={} reached threshold max_delete={}",
+                missing, truncated, threshold
             ));
             exit_code = EXIT_FUSE_TRIPPED;
             break;
@@ -178,21 +216,12 @@ pub fn run_guarded_command_with_vault(
 
         let (wrc, exited, code) = try_wait_pid(child_pid);
         if wrc != 0 || exited != 0 {
-            let mut post_missing = 0usize;
-            for p in &baseline_paths {
-                if fs::symlink_metadata(p).is_err() {
-                    post_missing += 1;
-                    if post_missing >= cfg.max_delete {
-                        break;
-                    }
-                }
-            }
-            if post_missing >= cfg.max_delete {
+            if let Some((missing, truncated)) = check_destruction_threshold(&track, threshold) {
                 freeze_kill_reap_pgid(child_pid);
                 tripped = true;
                 trip_reason = Some(format!(
-                    "deleted_entries={} reached threshold max_delete={} before exit",
-                    post_missing, cfg.max_delete
+                    "deleted_entries={} truncated_entries={} reached threshold max_delete={} before exit",
+                    missing, truncated, threshold
                 ));
                 exit_code = EXIT_FUSE_TRIPPED;
             } else {
@@ -215,7 +244,7 @@ pub fn run_guarded_command_with_vault(
         verified_sha256 = Some(rep.tree_sha256);
     }
 
-    let (ino_end, _) = lstat_inode_mode(&ws)?;
+    let (ino_end, _) = lstat_inode_mode(anchor_path)?;
     Ok(GuardReport {
         baseline_snapshot_id: baseline.id,
         tripped,
@@ -227,4 +256,3 @@ pub fn run_guarded_command_with_vault(
         verified_sha256,
     })
 }
-

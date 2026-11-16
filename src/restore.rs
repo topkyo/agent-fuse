@@ -4,6 +4,11 @@ use crate::apfs::{
 };
 use crate::error::{AfuseError, ERR_EACCES, ERR_EINVAL, ERR_ENOENT};
 use crate::manifest::{compute_single_file_manifest, compute_tree_manifest, SnapshotMeta};
+use crate::restore_tree::{
+    force_unlock_tree_recursive, lock_guard_single_dir, prepare_ancestors_writable,
+    resolve_disk_rel_path, top_level_nfd_key, validate_rel_restore_path,
+    workspace_has_visible_files, NestedIgnoredGuard, UnlockedDirsGuard,
+};
 use crate::snapshot::{create_snapshot_unlocked_opts, resolve_snapshot_id};
 use crate::trash::{purge_trashed_counterparts, TrashCleanupStatus};
 use crate::vault::{is_ignored_name, lock_vault, resolve_workspace_vault_recovery, TargetKind};
@@ -11,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -27,22 +32,6 @@ pub struct RestoreReport {
     pub selective: bool,
     pub restored_paths: usize,
     pub trash_cleanup: TrashCleanupStatus,
-}
-
-fn force_unlock_tree_recursive(p: &Path) {
-    force_unlock(p);
-    if let Ok(meta) = fs::symlink_metadata(p) {
-        if meta.file_type().is_dir() {
-            if let Ok(rd) = fs::read_dir(p) {
-                for entry in rd.flatten() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if !is_ignored_name(&name) {
-                        force_unlock_tree_recursive(&entry.path());
-                    }
-                }
-            }
-        }
-    }
 }
 
 fn verify_snapshot_tree(ws_vault: &Path, target_id: &str) -> Result<(SnapshotMeta, PathBuf, Option<String>), AfuseError> {
@@ -67,9 +56,7 @@ fn verify_snapshot_tree(ws_vault: &Path, target_id: &str) -> Result<(SnapshotMet
 }
 
 fn take_pre_restore_backup(ws: &Path, ws_vault: &Path, safety_backup: bool) -> Result<Option<String>, AfuseError> {
-    if !safety_backup {
-        return Ok(None);
-    }
+    if !safety_backup { return Ok(None); }
     match create_snapshot_unlocked_opts(ws, ws_vault, "auto:pre-restore", true) {
         Ok(m) => Ok(Some(m.id)),
         Err(e) if e.code == ERR_EACCES => {
@@ -78,25 +65,6 @@ fn take_pre_restore_backup(ws: &Path, ws_vault: &Path, safety_backup: bool) -> R
         }
         Err(e) => Err(e),
     }
-}
-
-fn workspace_has_visible_files(ws: &Path) -> bool {
-    let mut stack = vec![ws.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(rd) = fs::read_dir(&dir) else { continue };
-        for entry in rd.flatten() {
-            if is_ignored_name(&entry.file_name().to_string_lossy()) {
-                continue;
-            }
-            let p = entry.path();
-            match fs::symlink_metadata(&p) {
-                Ok(m) if m.file_type().is_dir() => stack.push(p),
-                Ok(_) => return true,
-                Err(_) => {}
-            }
-        }
-    }
-    false
 }
 
 fn prepare_restore_stage(ws: &Path, ws_vault: &Path, safety_backup: bool) -> Result<(u64, Option<String>), AfuseError> {
@@ -130,16 +98,14 @@ fn verify_root_inode(ws: &Path, ino_before: u64) -> Result<u64, AfuseError> {
 
 fn commit_staged_entry(tmp_new: &Path, target: &Path, tmp_old: &Path) -> Result<(), AfuseError> {
     if fs::symlink_metadata(target).is_err() {
-        fs::rename(tmp_new, target).map_err(|e| {
+        return fs::rename(tmp_new, target).map_err(|e| {
             let _ = force_remove_all(tmp_new);
             AfuseError::new(e.raw_os_error().unwrap_or(1), format!("rename failed: {}", e))
-        })?;
-        return Ok(());
+        });
     }
     force_unlock(target);
     if swap_paths(tmp_new, target).is_ok() {
-        force_remove_all(tmp_new)?;
-        return Ok(());
+        return force_remove_all(tmp_new);
     }
     if fs::symlink_metadata(tmp_old).is_ok() {
         force_remove_all(tmp_old)?;
@@ -202,32 +168,36 @@ fn restore_single_file_unlocked(
     ws: &Path, ws_vault: &Path, meta: &SnapshotMeta, snap_tree: &Path,
     vault_hash: Option<&str>, safety_backup: bool, t0: Instant,
 ) -> Result<RestoreReport, AfuseError> {
-    let (ino_before, safety_id) = match fs::symlink_metadata(ws) {
+    let parent = ws.parent().ok_or_else(|| AfuseError::new(ERR_EINVAL, "missing parent directory"))?;
+    let ino_before = if parent.is_dir() {
+        lstat_inode_mode(parent)?.0
+    } else {
+        fs::create_dir_all(parent).map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))?;
+        0
+    };
+    let safety_id = match fs::symlink_metadata(ws) {
         Ok(m) => {
             if m.file_type().is_symlink() || m.file_type().is_dir() {
                 return Err(AfuseError::new(ERR_EINVAL, "target path is a directory or symlink, expected regular file"));
             }
-            let (ino, _) = lstat_inode_mode(ws)?;
+            let sid = take_pre_restore_backup(ws, ws_vault, safety_backup)?;
             force_unlock(ws);
-            (ino, take_pre_restore_backup(ws, ws_vault, safety_backup)?)
+            sid
         }
-        Err(_) => {
-            let parent = ws.parent().ok_or_else(|| AfuseError::new(ERR_EINVAL, "missing parent directory"))?;
-            fs::create_dir_all(parent).map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))?;
-            (0, None)
-        }
+        Err(_) => None,
     };
-    let parent = ws.parent().ok_or_else(|| AfuseError::new(ERR_EINVAL, "missing parent directory"))?;
-    let snap_file = ws.file_name().map(|n| snap_tree.join(n)).filter(|p| p.is_file())
+    let mut parent_guard = lock_guard_single_dir(parent)?;
+    let snap_file = ws.file_name()
+        .and_then(|n| resolve_disk_rel_path(snap_tree, Path::new(n)).ok().flatten())
+        .map(|rel| snap_tree.join(rel))
+        .filter(|p| p.is_file())
         .or_else(|| fs::read_dir(snap_tree).ok()?.flatten().map(|e| e.path()).find(|p| p.is_file()))
         .ok_or_else(|| AfuseError::new(ERR_ENOENT, "snapshot file missing in tree"))?;
     stage_and_replace(parent, "file", &snap_file, ws)?;
     let _ = fs::set_permissions(ws, fs::Permissions::from_mode(meta.root_mode & 0o7777));
-    let (ino_after, _) = lstat_inode_mode(ws)?;
-    finalize_restore_unlocked(
-        ws, TargetKind::SingleFile, ws_vault, meta, ino_before, ino_after,
-        safety_id, false, 0, vault_hash, t0,
-    )
+    parent_guard.restore_all();
+    let ino_after = verify_root_inode(parent, ino_before)?;
+    finalize_restore_unlocked(ws, TargetKind::SingleFile, ws_vault, meta, ino_before, ino_after, safety_id, false, 0, vault_hash, t0)
 }
 
 pub fn restore_snapshot(workspace: &Path, target_id: &str, safety_backup: bool) -> Result<RestoreReport, AfuseError> {
@@ -245,88 +215,44 @@ pub fn restore_snapshot_with_vault(
         return restore_single_file_unlocked(&ws, &ws_vault, &meta, &snap_tree, vault_hash.as_deref(), safety_backup, t0);
     }
     let (ino_before, safety_id) = prepare_restore_stage(&ws, &ws_vault, safety_backup)?;
-    let mut snap_children: BTreeMap<OsString, PathBuf> = BTreeMap::new();
+    let mut nested_guard = NestedIgnoredGuard::preserve(&ws)?;
+    let mut snap_children: BTreeMap<String, (OsString, PathBuf)> = BTreeMap::new();
     for entry in fs::read_dir(&snap_tree).map_err(|e| AfuseError::new(1, e.to_string()))? {
         let entry = entry.map_err(|e| AfuseError::new(1, e.to_string()))?;
         let name = entry.file_name();
         if !is_ignored_name(&name.to_string_lossy()) {
-            snap_children.insert(name, entry.path());
+            snap_children.insert(top_level_nfd_key(&name), (name, entry.path()));
         }
     }
-    let mut ws_children: Vec<OsString> = Vec::new();
+    let mut ws_children: Vec<(String, OsString)> = Vec::new();
     for entry in fs::read_dir(&ws).map_err(|e| AfuseError::new(1, e.to_string()))? {
         let entry = entry.map_err(|e| AfuseError::new(1, e.to_string()))?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
+        if name_str == nested_guard.stage_name { continue; }
         if name_str.starts_with(".afuse.tmp.") {
             let _ = force_remove_all(&entry.path());
         } else if !is_ignored_name(&name_str) {
-            ws_children.push(name);
+            ws_children.push((top_level_nfd_key(&name), name));
         }
     }
-    for (name, snap_child) in &snap_children {
-        stage_and_replace(&ws, "new", snap_child, &ws.join(name))?;
+    for (nfd_k, (snap_name, snap_child)) in &snap_children {
+        for (ws_k, ws_name) in &ws_children {
+            if ws_k == nfd_k && ws_name != snap_name {
+                let _ = force_remove_all(&ws.join(ws_name));
+            }
+        }
+        stage_and_replace(&ws, "new", snap_child, &ws.join(snap_name))?;
     }
-    for name in ws_children {
-        if !snap_children.contains_key(&name) {
-            force_remove_all(&ws.join(name))?;
+    for (nfd_k, ws_name) in ws_children {
+        if !snap_children.contains_key(&nfd_k) {
+            force_remove_all(&ws.join(ws_name))?;
         }
     }
+    nested_guard.restore_back()?;
     let _ = fs::set_permissions(&ws, fs::Permissions::from_mode(meta.root_mode & 0o7777));
     let ino_after = verify_root_inode(&ws, ino_before)?;
-    finalize_restore_unlocked(
-        &ws, TargetKind::Directory, &ws_vault, &meta, ino_before, ino_after,
-        safety_id, false, 0, vault_hash.as_deref(), t0,
-    )
-}
-
-fn validate_rel_restore_path(raw: &str) -> Result<PathBuf, AfuseError> {
-    if raw.contains('\\') {
-        return Err(AfuseError::new(ERR_EINVAL, "selective restore path must not contain backslashes ('\\')"));
-    }
-    if raw.is_empty() || raw.trim().is_empty() || raw.contains('\0') {
-        return Err(AfuseError::new(ERR_EINVAL, "selective restore path must be relative"));
-    }
-    let p = Path::new(raw);
-    if p.is_absolute() {
-        return Err(AfuseError::new(ERR_EINVAL, "selective restore rejects absolute paths"));
-    }
-    let mut clean = PathBuf::new();
-    for comp in p.components() {
-        match comp {
-            Component::Normal(seg) => {
-                let s = seg.to_string_lossy();
-                if s.starts_with(".afuse.tmp.") || is_ignored_name(&s) {
-                    return Err(AfuseError::new(ERR_EINVAL, "rejected internal or ignored segment"));
-                }
-                clean.push(seg);
-            }
-            Component::CurDir => {}
-            _ => return Err(AfuseError::new(ERR_EINVAL, "rejected '..' or root traversal")),
-        }
-    }
-    if clean.as_os_str().is_empty() {
-        return Err(AfuseError::new(ERR_EINVAL, "restore path resolves to workspace root"));
-    }
-    Ok(clean)
-}
-
-fn verify_no_symlink_ancestors(ws: &Path, rel: &Path, create_missing: bool) -> Result<(), AfuseError> {
-    let mut cur = ws.to_path_buf();
-    let comps: Vec<_> = rel.components().collect();
-    for comp in comps.iter().take(comps.len().saturating_sub(1)) {
-        cur.push(comp.as_os_str());
-        match fs::symlink_metadata(&cur) {
-            Ok(m) if m.file_type().is_symlink() || !m.file_type().is_dir() => return Err(AfuseError::new(ERR_EINVAL, "unsafe symlink or file ancestor")),
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && create_missing => {
-                fs::create_dir(&cur).map_err(|ce| AfuseError::new(ce.raw_os_error().unwrap_or(1), ce.to_string()))?;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string())),
-        }
-    }
-    Ok(())
+    finalize_restore_unlocked(&ws, TargetKind::Directory, &ws_vault, &meta, ino_before, ino_after, safety_id, false, 0, vault_hash.as_deref(), t0)
 }
 
 pub fn restore_snapshot_paths(
@@ -345,42 +271,50 @@ pub fn restore_snapshot_paths_with_vault(
     let mut seen = BTreeSet::new();
     for raw in rel_paths {
         let c = validate_rel_restore_path(raw)?;
-        if seen.insert(c.clone()) {
-            clean_paths.push(c);
-        }
+        if seen.insert(c.clone()) { clean_paths.push(c); }
     }
     let (ws, ws_vault) = resolve_workspace_vault_recovery(workspace, vault_override)?;
     let _guard = lock_vault(&ws_vault)?;
     let t0 = Instant::now();
     let (meta, snap_tree, vault_hash) = verify_snapshot_tree(&ws_vault, target_id)?;
     if meta.target_kind == TargetKind::SingleFile {
-        if clean_paths.len() == 1 && ws.file_name().map(|n| Path::new(n) == clean_paths[0].as_path()).unwrap_or(false) {
+        if clean_paths.len() == 1
+            && ws.file_name().map(|n| top_level_nfd_key(n) == top_level_nfd_key(clean_paths[0].as_os_str())).unwrap_or(false)
+        {
             return restore_single_file_unlocked(&ws, &ws_vault, &meta, &snap_tree, vault_hash.as_deref(), safety_backup, t0);
         }
         return Err(AfuseError::new(ERR_EINVAL, "invalid selective path for single-file target"));
     }
+    let mut resolved = Vec::with_capacity(clean_paths.len());
     for rel in &clean_paths {
-        if fs::symlink_metadata(snap_tree.join(rel)).is_err() && fs::symlink_metadata(ws.join(rel)).is_err() {
+        let snap_rel = resolve_disk_rel_path(&snap_tree, rel)?;
+        let live_rel = if ws.is_dir() { resolve_disk_rel_path(&ws, rel)? } else { None };
+        if snap_rel.is_none() && live_rel.is_none() {
             return Err(AfuseError::new(ERR_ENOENT, "requested path does not exist in snapshot or workspace"));
         }
+        resolved.push((snap_rel, live_rel));
     }
+    let mut dir_guard = UnlockedDirsGuard::new();
+    if ws.is_dir() { dir_guard.unlock_if_needed(&ws)?; }
     let (ino_before, safety_id) = prepare_restore_stage(&ws, &ws_vault, safety_backup)?;
-    for rel in &clean_paths {
-        let snap_item = snap_tree.join(rel);
-        let dst_item = ws.join(rel);
-        if fs::symlink_metadata(&snap_item).is_ok() {
-            verify_no_symlink_ancestors(&ws, rel, true)?;
-            stage_and_replace(dst_item.parent().unwrap_or(&ws), "sel", &snap_item, &dst_item)?;
-        } else {
-            verify_no_symlink_ancestors(&ws, rel, false)?;
-            if fs::symlink_metadata(&dst_item).is_ok() {
-                force_remove_all(&dst_item)?;
+    for (snap_rel_opt, live_rel_opt) in resolved {
+        if let Some(snap_rel) = snap_rel_opt {
+            if let Some(live_rel) = live_rel_opt {
+                if live_rel != snap_rel {
+                    prepare_ancestors_writable(&ws, &live_rel, false, &mut dir_guard)?;
+                    let _ = force_remove_all(&ws.join(&live_rel));
+                }
             }
+            prepare_ancestors_writable(&ws, &snap_rel, true, &mut dir_guard)?;
+            let dst_item = ws.join(&snap_rel);
+            stage_and_replace(dst_item.parent().unwrap_or(&ws), "sel", &snap_tree.join(&snap_rel), &dst_item)?;
+        } else if let Some(live_rel) = live_rel_opt {
+            prepare_ancestors_writable(&ws, &live_rel, false, &mut dir_guard)?;
+            let dst_item = ws.join(&live_rel);
+            if fs::symlink_metadata(&dst_item).is_ok() { force_remove_all(&dst_item)?; }
         }
     }
+    dir_guard.restore_all();
     let ino_after = verify_root_inode(&ws, ino_before)?;
-    finalize_restore_unlocked(
-        &ws, TargetKind::Directory, &ws_vault, &meta, ino_before, ino_after,
-        safety_id, true, clean_paths.len(), None, t0,
-    )
+    finalize_restore_unlocked(&ws, TargetKind::Directory, &ws_vault, &meta, ino_before, ino_after, safety_id, true, clean_paths.len(), None, t0)
 }

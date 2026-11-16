@@ -50,24 +50,33 @@ fn print_restore_report(r: &RestoreReport, json: bool) {
             json_escape(&r.snapshot_id), sb, r.root_inode_before, r.root_inode_after,
             r.restored_files, json_escape(&r.tree_sha256), r.elapsed_us, r.trash_cleanup.as_str(), tail
         );
-    } else if r.selective {
-        println!(
-            "RESTORED {} path(s) from {} in {:.3} ms | root_inode={} (PRESERVED) | receipt={}",
-            r.restored_paths,
-            sanitize_terminal_text(&r.snapshot_id),
-            r.elapsed_us as f64 / 1000.0,
-            r.root_inode_after,
-            short_hash(&r.tree_sha256, 16)
-        );
     } else {
-        println!(
-            "RESTORED {} in {:.3} ms | files={} | root_inode={} (PRESERVED) | receipt={}",
-            sanitize_terminal_text(&r.snapshot_id),
-            r.elapsed_us as f64 / 1000.0,
-            r.restored_files,
-            r.root_inode_after,
-            short_hash(&r.tree_sha256, 16)
-        );
+        let ino_tag = if r.root_inode_before != 0 && r.root_inode_before == r.root_inode_after {
+            "PRESERVED"
+        } else {
+            "RECREATED"
+        };
+        if r.selective {
+            println!(
+                "RESTORED {} path(s) from {} in {:.3} ms | root_inode={} ({}) | receipt={}",
+                r.restored_paths,
+                sanitize_terminal_text(&r.snapshot_id),
+                r.elapsed_us as f64 / 1000.0,
+                r.root_inode_after,
+                ino_tag,
+                short_hash(&r.tree_sha256, 16)
+            );
+        } else {
+            println!(
+                "RESTORED {} in {:.3} ms | files={} | root_inode={} ({}) | receipt={}",
+                sanitize_terminal_text(&r.snapshot_id),
+                r.elapsed_us as f64 / 1000.0,
+                r.restored_files,
+                r.root_inode_after,
+                ino_tag,
+                short_hash(&r.tree_sha256, 16)
+            );
+        }
     }
 }
 

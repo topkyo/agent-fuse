@@ -1,5 +1,7 @@
 use crate::apfs::{is_tty_stdin, real_home_dir, statfs_info};
 use crate::error::{AfuseError, ERR_EWOULDBLOCK};
+use crate::hook_json::{extract_bash_candidate_paths, is_supported_claude_tool};
+pub use crate::hook_json::{parse_claude_hook_json, ClaudeHookPayload};
 use crate::manifest::SnapshotMeta;
 use crate::prune::{prune_unlocked, ORPHAN_MAX_AGE_SECS};
 use crate::snapshot::create_snapshot_unlocked_opts;
@@ -16,182 +18,42 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const HOOK_MIN_AVAIL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const HOOK_DEFAULT_THROTTLE_MS: u128 = 5_000;
 const HOOK_MAX_AUTO_SNAPS: usize = 20;
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ClaudeHookPayload {
-    pub cwd: Option<String>,
-    pub tool_name: Option<String>,
-    pub bash_command: Option<String>,
-}
-pub fn parse_claude_hook_json(input: &str) -> ClaudeHookPayload {
-    let bytes = input.as_bytes();
-    let len = bytes.len();
-    let mut i = 0usize;
-    let mut brace_depth = 0i32;
-    let mut bracket_depth = 0i32;
-    let mut in_tool_input = false;
-    let mut expecting_value_for: Option<&'static str> = None;
-    let mut entering_tool_input = false;
-    let mut out = ClaudeHookPayload::default();
-
-    fn parse_json_string(bytes: &[u8], start_quote: usize) -> Option<(String, usize)> {
-        let mut i = start_quote + 1;
-        let mut buf: Vec<u8> = Vec::new();
-        while i < bytes.len() {
-            let b = bytes[i];
-            if b == b'"' {
-                return Some((String::from_utf8_lossy(&buf).into_owned(), i + 1));
-            }
-            if b == b'\\' {
-                i += 1;
-                if i >= bytes.len() {
-                    return None;
-                }
-                match bytes[i] {
-                    b'"' => buf.push(b'"'),
-                    b'\\' => buf.push(b'\\'),
-                    b'/' => buf.push(b'/'),
-                    b'n' => buf.push(b'\n'),
-                    b'r' => buf.push(b'\r'),
-                    b't' => buf.push(b'\t'),
-                    b'b' => buf.push(0x08),
-                    b'f' => buf.push(0x0c),
-                    b'u' => {
-                        if i + 4 < bytes.len() {
-                            if let Ok(hex_str) = std::str::from_utf8(&bytes[i + 1..i + 5]) {
-                                if let Ok(code) = u32::from_str_radix(hex_str, 16) {
-                                    if let Some(ch) = char::from_u32(code) {
-                                        let mut tmp = [0u8; 4];
-                                        buf.extend_from_slice(ch.encode_utf8(&mut tmp).as_bytes());
-                                        i += 4;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    other => buf.push(other),
-                }
-                i += 1;
-            } else {
-                buf.push(b);
-                i += 1;
-            }
-        }
-        None
-    }
-
-    while i < len {
-        let b = bytes[i];
-        match b {
-            b' ' | b'\t' | b'\r' | b'\n' => i += 1,
-            b'{' => {
-                brace_depth += 1;
-                if entering_tool_input && brace_depth == 2 && bracket_depth == 0 {
-                    in_tool_input = true;
-                }
-                entering_tool_input = false;
-                expecting_value_for = None;
-                i += 1;
-            }
-            b'}' => {
-                if in_tool_input && brace_depth == 2 && bracket_depth == 0 {
-                    in_tool_input = false;
-                }
-                brace_depth = (brace_depth - 1).max(0);
-                entering_tool_input = false;
-                expecting_value_for = None;
-                i += 1;
-            }
-            b'[' => {
-                bracket_depth += 1;
-                entering_tool_input = false;
-                expecting_value_for = None;
-                i += 1;
-            }
-            b']' => {
-                bracket_depth = (bracket_depth - 1).max(0);
-                entering_tool_input = false;
-                expecting_value_for = None;
-                i += 1;
-            }
-            b',' => {
-                entering_tool_input = false;
-                expecting_value_for = None;
-                i += 1;
-            }
-            b'"' => {
-                let Some((s, next_i)) = parse_json_string(bytes, i) else {
-                    break;
-                };
-                i = next_i;
-                if let Some(field) = expecting_value_for.take() {
-                    match field {
-                        "cwd" => out.cwd = Some(s),
-                        "tool_name" => out.tool_name = Some(s),
-                        "command" => out.bash_command = Some(s),
-                        _ => {}
-                    }
-                    continue;
-                }
-                while i < len && matches!(bytes[i], b' ' | b'\t' | b'\r' | b'\n') {
-                    i += 1;
-                }
-                if i < len && bytes[i] == b':' {
-                    i += 1;
-                    if brace_depth == 1 && bracket_depth == 0 {
-                        match s.as_str() {
-                            "cwd" => expecting_value_for = Some("cwd"),
-                            "tool_name" => expecting_value_for = Some("tool_name"),
-                            "tool_input" => entering_tool_input = true,
-                            _ => {}
-                        }
-                    } else if in_tool_input && brace_depth == 2 && bracket_depth == 0 && s == "command"
-                    {
-                        expecting_value_for = Some("command");
-                    }
-                }
-            }
-            _ => {
-                expecting_value_for = None;
-                entering_tool_input = false;
-                i += 1;
-            }
-        }
-    }
-    out
-}
 
 pub fn is_readonly_bash_command(cmd: &str) -> bool {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
         return true;
     }
-    if trimmed.bytes().any(|b| {
-        matches!(
-            b,
-            b'>' | b'|' | b';' | b'&' | b'`' | b'$' | b'\n' | b'\r' | b'(' | b')'
-        )
-    }) {
+    if trimmed.contains('|') || trimmed.contains(';') || trimmed.contains('&')
+        || trimmed.contains('\n') || trimmed.contains('`') || trimmed.contains("$(")
+        || trimmed.contains('>') || trimmed.contains('<')
+    {
         return false;
     }
     let mut parts = trimmed.split_whitespace();
-    let Some(first) = parts.next() else {
-        return true;
-    };
-    let second = parts.next().unwrap_or("");
+    let Some(first) = parts.next() else { return true };
+    let rest: Vec<&str> = parts.collect();
     match first {
-        "ls" | "pwd" | "whoami" | "uname" | "cat" | "head" | "tail" | "wc" | "grep" | "rg"
-        | "which" | "type" | "stat" | "file" => true,
+        "ls" | "pwd" | "whoami" | "uname" | "cat" | "head" | "tail" | "wc" | "grep" | "which"
+        | "type" | "stat" | "file" => true,
+        "rg" => !rest.iter().any(|arg| {
+            *arg == "--pre" || arg.starts_with("--pre=")
+                || *arg == "--pre-glob" || arg.starts_with("--pre-glob=")
+        }),
         "git" => {
-            if !matches!(
-                second,
-                "status" | "diff" | "log" | "show" | "branch" | "rev-parse" | "remote"
-            ) {
+            let Some(&second) = rest.first() else { return true };
+            if !matches!(second, "status" | "diff" | "log" | "show" | "branch" | "rev-parse" | "remote") {
                 return false;
             }
-            !parts.any(|arg| {
-                matches!(arg, "-d" | "-D" | "-m" | "-M" | "-f" | "--force" | "--delete" | "-o")
-                    || arg.starts_with("--output")
-                    || (second == "remote" && !matches!(arg, "-v" | "--verbose"))
+            !rest[1..].iter().any(|arg| {
+                matches!(
+                    *arg,
+                    "-d" | "-D" | "-m" | "-M" | "-c" | "-C" | "-f" | "-u" | "--force"
+                        | "--delete" | "--copy" | "--move" | "--set-upstream-to"
+                        | "--unset-upstream" | "--edit-description" | "--create-reflog" | "-o"
+                ) || arg.starts_with("--output")
+                    || arg.starts_with("--set-upstream-to=")
+                    || (second == "remote" && !matches!(*arg, "-v" | "--verbose"))
             })
         }
         _ => false,
@@ -212,25 +74,18 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
             return Some(cur);
         }
         let Some(parent) = cur.parent() else { break };
-        if parent == cur {
-            break;
-        }
+        if parent == cur { break; }
         cur = parent.to_path_buf();
     }
-
     let mut cur = base;
     for _ in 0..64 {
         if !is_skippable(&cur)
-            && PROJECT_MARKERS[1..]
-                .iter()
-                .any(|m| fs::symlink_metadata(cur.join(m)).is_ok())
+            && PROJECT_MARKERS[1..].iter().any(|m| fs::symlink_metadata(cur.join(m)).is_ok())
         {
             return Some(cur);
         }
         let Some(parent) = cur.parent() else { break };
-        if parent == cur {
-            break;
-        }
+        if parent == cur { break; }
         cur = parent.to_path_buf();
     }
     None
@@ -238,6 +93,40 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
 
 pub fn find_git_project_root(start: &Path) -> Option<PathBuf> {
     find_project_root(start)
+}
+
+fn vault_has_committed_snapshots(vault: &Path) -> bool {
+    let Ok(rd) = fs::read_dir(vault.join("snapshots")) else { return false };
+    rd.flatten().any(|ent| {
+        !ent.file_name().to_string_lossy().starts_with(".tmp")
+            && ent.path().join("meta.kv").is_file()
+    })
+}
+
+fn find_existing_bound_target(start: &Path, vault_override: Option<&Path>) -> Option<PathBuf> {
+    let abs = if start.is_absolute() { start.to_path_buf() } else { env::current_dir().ok()?.join(start) };
+    let probe = fs::canonicalize(&abs).unwrap_or(abs);
+    for anc in probe.ancestors() {
+        if anc.parent().is_none() { break; }
+        if let Ok((canon, ws_vault)) = resolve_workspace_vault_recovery(anc, vault_override) {
+            if vault_has_committed_snapshots(&ws_vault)
+                && validate_workspace_binding_with_vault(&canon, vault_override).is_ok()
+            {
+                return Some(canon);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_candidate_path(cwd: &Path, raw: &str) -> PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Ok(home) = real_home_dir() {
+            return home.join(rest);
+        }
+    }
+    let p = Path::new(raw);
+    if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) }
 }
 
 pub fn execute_hook_auto_snap(
@@ -251,26 +140,12 @@ pub fn execute_hook_auto_snap(
     {
         return Ok(None);
     }
-
-    let target_candidate = if let Some(project_root) = find_project_root(start_cwd) {
-        project_root
-    } else if resolve_workspace_vault_recovery(start_cwd, vault_override)
-        .map(|(_, v)| v.join("snapshots").is_dir())
-        .unwrap_or(false)
-    {
-        start_cwd.to_path_buf()
-    } else {
-        return Ok(None);
-    };
-    let validated = validate_workspace_binding_with_vault(&target_candidate, vault_override)?;
-    let ws = validated.canonical_path;
-    let stat_dir = if ws.is_dir() {
-        ws.as_path()
-    } else {
-        ws.parent().unwrap_or(Path::new("/"))
-    };
-    let ws_fs = statfs_info(stat_dir)?;
-    if ws_fs.avail_bytes < HOOK_MIN_AVAIL_BYTES {
+    let target_candidate = find_existing_bound_target(start_cwd, vault_override)
+        .or_else(|| find_project_root(start_cwd));
+    let Some(target_candidate) = target_candidate else { return Ok(None) };
+    let ws = validate_workspace_binding_with_vault(&target_candidate, vault_override)?.canonical_path;
+    let stat_dir = if ws.is_dir() { ws.as_path() } else { ws.parent().unwrap_or(Path::new("/")) };
+    if statfs_info(stat_dir)?.avail_bytes < HOOK_MIN_AVAIL_BYTES {
         return Ok(None);
     }
 
@@ -281,17 +156,12 @@ pub fn execute_hook_auto_snap(
         Err(e) => return Err(e),
     };
 
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
+    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
     let stamp_path = ws_vault.join("hook_last_snap.stamp");
     if throttle_ms > 0 {
-        if let Ok(raw) = fs::read_to_string(&stamp_path) {
-            if let Ok(last_ms) = raw.trim().parse::<u128>() {
-                if now_ms.saturating_sub(last_ms) < throttle_ms {
-                    return Ok(None);
-                }
+        if let Ok(last_ms) = fs::read_to_string(&stamp_path).ok().and_then(|s| s.trim().parse::<u128>().ok()).ok_or(()) {
+            if now_ms.saturating_sub(last_ms) < throttle_ms {
+                return Ok(None);
             }
         }
     }
@@ -305,12 +175,7 @@ pub fn execute_hook_auto_snap(
         format!("auto:hook:{}", label)
     };
     let meta = create_snapshot_unlocked_opts(&ws, &ws_vault, &clean_label, true)?;
-    let _ = prune_unlocked(
-        &ws_vault,
-        HOOK_MAX_AUTO_SNAPS,
-        Some("auto:hook:"),
-        ORPHAN_MAX_AGE_SECS,
-    );
+    let _ = prune_unlocked(&ws_vault, HOOK_MAX_AUTO_SNAPS, Some("auto:hook:"), ORPHAN_MAX_AGE_SECS);
     Ok(Some(meta))
 }
 
@@ -320,56 +185,48 @@ pub fn run_claude_hook_exec_from_reader<R: Read>(
 ) -> Option<SnapshotMeta> {
     let mut buf = Vec::with_capacity(8192);
     let _ = (&mut reader).take(1024 * 1024).read_to_end(&mut buf);
-    // Drain up to 16 MiB into sink with an 8 KiB stack buffer so upstream callers (e.g. Node/Python) never hit EPIPE
     let _ = std::io::copy(&mut reader.take(16 * 1024 * 1024), &mut std::io::sink());
     if buf.is_empty() {
         return None;
     }
-    let text = String::from_utf8_lossy(&buf);
-    let payload = parse_claude_hook_json(&text);
-
+    let payload = parse_claude_hook_json(&String::from_utf8_lossy(&buf));
     let tool = payload.tool_name.as_deref().unwrap_or("");
-    if !tool.is_empty()
-        && !matches!(
-            tool,
-            "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "Bash"
-        )
-    {
+    if !is_supported_claude_tool(tool) {
         return None;
     }
-    if tool == "Bash" {
-        if let Some(cmd) = payload.bash_command.as_deref() {
-            if is_readonly_bash_command(cmd) {
-                return None;
-            }
-        }
+    if tool == "Bash" && payload.bash_command.as_deref().map(is_readonly_bash_command).unwrap_or(false) {
+        return None;
     }
-
-    let cwd_str = payload
-        .cwd
-        .or_else(|| env::var("CLAUDE_PROJECT_DIR").ok())?;
+    let cwd_str = payload.cwd.or_else(|| env::var("CLAUDE_PROJECT_DIR").ok())?;
     if cwd_str.trim().is_empty() {
         return None;
     }
-
+    let cwd_path = Path::new(&cwd_str);
     let throttle_ms = env::var("AFUSE_HOOK_THROTTLE_MS")
         .ok()
         .and_then(|v| v.parse::<u128>().ok())
         .unwrap_or(HOOK_DEFAULT_THROTTLE_MS);
-    let label = if tool.is_empty() {
-        "auto:claude".to_string()
-    } else {
-        format!("auto:claude:{}", tool)
-    };
-    execute_hook_auto_snap(Path::new(&cwd_str), &label, vault_override, throttle_ms)
-        .ok()
-        .flatten()
+    let label = if tool.is_empty() { "auto:claude".to_string() } else { format!("auto:claude:{}", tool) };
+
+    let mut cands = payload.candidate_paths;
+    if tool == "Bash" {
+        if let Some(cmd) = payload.bash_command.as_deref() {
+            for tok in extract_bash_candidate_paths(cmd) {
+                if !cands.contains(&tok) { cands.push(tok); }
+            }
+        }
+    }
+    for raw in cands {
+        let resolved = resolve_candidate_path(cwd_path, &raw);
+        if let Some(bound) = find_existing_bound_target(&resolved, vault_override) {
+            return execute_hook_auto_snap(&bound, &label, vault_override, throttle_ms).ok().flatten();
+        }
+    }
+    execute_hook_auto_snap(cwd_path, &label, vault_override, throttle_ms).ok().flatten()
 }
 
 pub fn run_claude_hook_exec_stdio() {
-    if is_tty_stdin() {
-        return;
-    }
+    if is_tty_stdin() { return; }
     let stdin = std::io::stdin();
     let _ = run_claude_hook_exec_from_reader(stdin.lock(), None);
 }
@@ -379,10 +236,6 @@ pub fn run_zsh_hook_exec(cwd: &Path, tool: &str) {
         .ok()
         .and_then(|v| v.parse::<u128>().ok())
         .unwrap_or(HOOK_DEFAULT_THROTTLE_MS);
-    let label = if tool.trim().is_empty() {
-        "auto:zsh".to_string()
-    } else {
-        format!("auto:zsh:{}", tool.trim())
-    };
+    let label = if tool.trim().is_empty() { "auto:zsh".to_string() } else { format!("auto:zsh:{}", tool.trim()) };
     let _ = execute_hook_auto_snap(cwd, &label, None, throttle_ms);
 }

@@ -376,6 +376,45 @@ fi
 AFUSE_VAULT_DIR="$BIG_VAULT" "$BIN_PATH" --workspace "$BIG_WS" --json prune --keep 0 >/dev/null
 AFUSE_VAULT_DIR="$ADV_VAULT" "$BIN_PATH" --workspace "$ADV_WS" --json prune --keep 0 >/dev/null
 
+P2_WS="$TMP_SANDBOX/p2-cli-ws"
+P2_VAULT="$TMP_SANDBOX/p2-cli-vault"
+mkdir -p "$P2_WS/apps/web/node_modules/pkg" "$P2_VAULT"
+printf "v1\n" > "$P2_WS/apps/web/app.ts"
+printf "keep\n" > "$P2_WS/apps/web/node_modules/pkg/index.js"
+AFUSE_VAULT_DIR="$P2_VAULT" "$BIN_PATH" --workspace "$P2_WS" --json snap -m "p2-base" >/dev/null
+printf "v2\n" > "$P2_WS/apps/web/app.ts"
+AFUSE_VAULT_DIR="$P2_VAULT" "$BIN_PATH" --workspace "$P2_WS" --json restore latest >/dev/null
+[ -f "$P2_WS/apps/web/node_modules/pkg/index.js" ] || { echo "FAIL: nested node_modules lost on CLI restore" >&2; exit 1; }
+
+DOC_HOME_OUT="$("$BIN_PATH" --workspace "$HOME" doctor 2>&1 || true)"
+if printf '%s' "$DOC_HOME_OUT" | grep -qi "project root marker"; then
+  echo "FAIL: doctor output retains stale project root marker hint" >&2
+  exit 1
+fi
+
+P2_FAKE_BIN="$TMP_SANDBOX/p2-fake-bin"
+P2_HOOK_LOG="$TMP_SANDBOX/p2-hook.log"
+mkdir -p "$P2_FAKE_BIN"
+cat > "$P2_FAKE_BIN/afuse" <<SH
+#!/bin/sh
+printf '%s\n' "\$*" >> "$P2_HOOK_LOG"
+SH
+chmod +x "$P2_FAKE_BIN/afuse"
+: > "$P2_HOOK_LOG"
+zsh -fc "
+  PATH=\"$P2_FAKE_BIN:\$PATH\"
+  AFUSE_HOOK_DISABLE=0; AFUSE_GUARDED=0
+  eval \"\$('$BIN_PATH' hook zsh)\"
+  _afuse_preexec 'FOO=1 env BAR=2 npx -y @anthropic-ai/claude-code --help'
+  _afuse_preexec 'command codex --full-auto'
+  _afuse_preexec 'uvx --from aider-chat aider'
+"
+P2_ZSH_CHECK="$(cat "$P2_HOOK_LOG")"
+echo "$P2_ZSH_CHECK" | grep -q -- "--tool claude-code" || { echo "FAIL: zsh wrapper parse claude-code ($P2_ZSH_CHECK)" >&2; exit 1; }
+echo "$P2_ZSH_CHECK" | grep -q -- "--tool codex" || { echo "FAIL: zsh wrapper parse codex ($P2_ZSH_CHECK)" >&2; exit 1; }
+echo "$P2_ZSH_CHECK" | grep -q -- "--tool aider" || { echo "FAIL: zsh wrapper parse aider ($P2_ZSH_CHECK)" >&2; exit 1; }
+AFUSE_VAULT_DIR="$P2_VAULT" "$BIN_PATH" --workspace "$P2_WS" --json prune --keep 0 >/dev/null
+
 "$BIN_PATH" --workspace "$WS" --json prune --keep 0 >/dev/null
 AFUSE_VAULT_DIR="$HOOK_VAULT" "$BIN_PATH" --workspace "$HOOK_REPO" --json prune --keep 0 >/dev/null
 echo "PASS: Gate 2 verified (1,000 files restored, root Inode=$INO_AFTER preserved, binary=${BIN_BYTES}B, RSS=${RSS_BYTES}B, 64MiB_RSS=${BIG_RSS}B, hook & deep-audit suite green)."

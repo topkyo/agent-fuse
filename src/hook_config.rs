@@ -25,9 +25,40 @@ pub fn render_hook_snippet(target: &str) -> Result<String, AfuseError> {
              \x20   autoload -Uz add-zsh-hook\n\
              \x20   _afuse_preexec() {{\n\
              \x20     [[ \"${{AFUSE_HOOK_DISABLE:-0}}\" == \"1\" || \"${{AFUSE_GUARDED:-0}}\" == \"1\" ]] && return 0\n\
+             \x20     [[ -n \"${{1:-}}\" && \"$1\" == *(claude|cursor-agent|codex|aider|gemini|opencode|goose)* ]] || return 0\n\
              \x20     local -a _af_w=(${{=1}})\n\
-             \x20     case \"${{_af_w[1]:t}}\" in\n\
-             \x20       claude|cursor-agent|codex|aider|gemini|opencode|goose)\n\
+             \x20     local _af_i=1 _af_n=${{#_af_w}} _af_pkg=\"\"\n\
+             \x20     while (( _af_i <= _af_n )); do\n\
+             \x20       local _af_tok=\"${{_af_w[$_af_i]}}\"\n\
+             \x20       if [[ \"$_af_tok\" == *=* && \"$_af_tok\" != -* ]]; then\n\
+             \x20         _af_i=$((_af_i + 1))\n\
+             \x20       elif [[ \"$_af_tok\" == (env|command|exec|nohup|time) ]]; then\n\
+             \x20         local _af_wrap=\"$_af_tok\"\n\
+             \x20         _af_i=$((_af_i + 1))\n\
+             \x20         while (( _af_i <= _af_n )) && [[ \"${{_af_w[$_af_i]}}\" == -* ]]; do\n\
+             \x20           [[ \"$_af_wrap\" == \"command\" && \"${{_af_w[$_af_i]}}\" == (-v|-V) ]] && return 0\n\
+             \x20           [[ \"${{_af_w[$_af_i]}}\" == (-u|-S|-C) ]] && _af_i=$((_af_i + 1))\n\
+             \x20           _af_i=$((_af_i + 1))\n\
+             \x20         done\n\
+             \x20       elif [[ \"$_af_tok\" == (npx|bunx|pnpx|uvx) ]]; then\n\
+             \x20         _af_i=$((_af_i + 1))\n\
+             \x20         while (( _af_i <= _af_n )) && [[ \"${{_af_w[$_af_i]}}\" == -* ]]; do\n\
+             \x20           [[ \"${{_af_w[$_af_i]}}\" == (--from|--package|-p|-c) ]] && _af_i=$((_af_i + 1))\n\
+             \x20           _af_i=$((_af_i + 1))\n\
+             \x20         done\n\
+             \x20         if (( _af_i <= _af_n )); then\n\
+             \x20           local _af_p=\"${{_af_w[$_af_i]}}\"\n\
+             \x20           _af_pkg=\"${{${{_af_p:t}}%@*}}\"\n\
+             \x20         fi\n\
+             \x20         break\n\
+             \x20       else\n\
+             \x20         break\n\
+             \x20       fi\n\
+             \x20     done\n\
+             \x20     local _af_raw=\"${{_af_w[$_af_i]:-}}\"\n\
+             \x20     local _af_cmd=\"${{_af_pkg:-${{_af_raw:t}}}}\"\n\
+             \x20     case \"$_af_cmd\" in\n\
+             \x20       claude|cursor-agent|codex|aider|gemini|opencode|goose|claude-code)\n\
              \x20         local _af_bin=\"\"\n\
              \x20         if command -v afuse >/dev/null 2>&1; then\n\
              \x20           _af_bin=\"afuse\"\n\
@@ -36,7 +67,7 @@ pub fn render_hook_snippet(target: &str) -> Result<String, AfuseError> {
              \x20         elif [[ -x \"/Applications/AgentFuse.app/Contents/MacOS/afuse\" ]]; then\n\
              \x20           _af_bin=\"/Applications/AgentFuse.app/Contents/MacOS/afuse\"\n\
              \x20         fi\n\
-             \x20         [[ -n \"$_af_bin\" ]] && command \"$_af_bin\" hook zsh --exec --cwd \"$PWD\" --tool \"${{_af_w[1]:t}}\" >/dev/null 2>&1 || true\n\
+             \x20         [[ -n \"$_af_bin\" ]] && command \"$_af_bin\" hook zsh --exec --cwd \"$PWD\" --tool \"$_af_cmd\" >/dev/null 2>&1 || true\n\
              \x20         ;;\n\
              \x20     esac\n\
              \x20   }}\n\
@@ -52,7 +83,7 @@ pub fn render_hook_snippet(target: &str) -> Result<String, AfuseError> {
              \x20 \"hooks\": {\n\
              \x20   \"PreToolUse\": [\n\
              \x20     {\n\
-             \x20       \"matcher\": \"Write|Edit|MultiEdit|NotebookEdit|Bash\",\n\
+             \x20       \"matcher\": \"Write|Edit|MultiEdit|NotebookEdit|Bash|mcp__.*\",\n\
              \x20       \"hooks\": [\n\
              \x20         {\n\
              \x20           \"type\": \"command\",\n\

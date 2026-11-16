@@ -21,12 +21,15 @@ pub mod error;
 pub mod guard;
 pub mod hook;
 pub mod hook_config;
+pub mod hook_json;
 pub mod manifest;
 pub mod prune;
 pub mod restore;
+pub mod restore_tree;
 pub mod sha256;
 pub mod snapshot;
 pub mod trash;
+pub mod unicode_norm;
 pub mod upgrade;
 pub mod upgrade_json;
 pub mod vault;
@@ -68,7 +71,8 @@ pub use snapshot::{
 pub use trash::{allowed_trash_roots, TrashCleanupStatus};
 pub use upgrade::{
     check_for_updates, is_newer_version, parse_release_json, perform_upgrade_on_exe,
-    run_upgrade_apply, ReleaseAsset, ReleaseInfo, UpgradeApplyReport, UpgradeCheckReport,
+    run_upgrade_apply, validate_release_asset_url, ReleaseAsset, ReleaseInfo, UpgradeApplyReport,
+    UpgradeCheckReport,
 };
 pub use vault::{
     is_ignored_name, prepare_live_workspace_vault_with, prepare_workspace_vault,
@@ -81,5 +85,7 @@ pub use vault::{
 mod tests;
 #[cfg(test)]
 mod tests_invariants;
+#[cfg(test)]
+mod tests_phase2;
 #[cfg(test)]
 mod tests_trash_targets;

@@ -86,17 +86,17 @@ afuse upgrade --check         # 仅在手动执行时查询 GitHub Releases 新�
 
 需要零配置成本的原生 macOS 桌面级守护壳（纯手写 AppKit + QuartzCore + CoreGraphics Swift，单模块严格 `< 400` 行，双架构 DMG `< 5 MiB` / 单架构 `~2.7 MiB`，冷启动实测 `61.42 ms`，双仓静默守护 2 秒窗口 CPU 占用 `3.26 ms`）？
 
-- **居中 `500×410` 深色毛玻璃主控台 + 拖入即守护**：启动即呈现屏幕居中的 `500×410` 原生毛玻璃主控窗口（不受刘海屏、Bartender 或 Dozer 折叠影响，重开应用或点击菜单栏护盾图标随时唤回），采用 SF Pro 与苹方舒适排版，支持 `中文 | EN` 秒切、首屏零术语引导（拖入文件夹即开启 0 字节守护，或体验 **5 秒安全演练**）、原生编辑与操作快捷键（`⌘O` 绑定、`⌘S` 快照、`⌘R` 恢复、`⌘W` / `Esc` 逐层关闭）与彩色文件变更预览。
-- **多项目拖拽守护、单文件精准恢复与可选 AI 事前留档开关**：拖入最多 `5` 个项目目录即可开启 `FSEvents` 滚动基线守护。内置 `>= 20` 文件批量误删熔断警戒线（菜单栏护盾图标实时标红告警、后台非焦点状态下推送 macOS 原生横幅与提示音告警、后台异步非阻塞一键救回），菜单内置**「高级增强：AI 执行前自动留档（可选）」**确认式开关（自动备份并安全开关终端 `claude|cursor-agent|codex|aider|gemini|opencode|goose` 与 Claude Code `PreToolUse`，免手动配置 `PATH` 与手改 JSON）、**单文件精准恢复**子菜单、按需手动**检查更新**与可选 `--background` **开机静默自启**。
-- **恢复反馈层与中英双语「APFS 原位恢复凭证」（`1200×630` sRGB PNG）**：救回瞬间呈现零空闲 CPU 占用的 `QuartzCore` 流金脉冲反馈层，实时渲染零隐私泄露的黑金质感**恢复凭证**（不含任何仓库名、文件名或路径，展示恢复耗时、文件数、Inode 保全与 Merkle SHA-256 校验状态），自动写入系统剪贴板并支持一键分享至 `𝕏`、`微信 / 朋友圈` 或导出高清 PNG。
-- **单仓永久免费与终身买断原则**：**社区免费版永久守护 1 个活跃项目**，无试用倒计时，历史时间线恢复永久开放。**AgentFuse Pro 终身买断版（中国大陆 `¥98` 一次买断 · 海外 `$19` 一次买断）** 解锁最多 `5` 个并发守护仓库与 **100% 离线 `Ed25519` 激活码**（支持 3 台本人 Mac，零遥测联网，14 天无理由退款）。
+- **居中 `500×410` 深色毛玻璃主控台 + 拖入即守护**：启动即呈现屏幕居中的 `500×410` 原生毛玻璃主控窗口（不受刘海屏、Bartender 或 Dozer 折叠影响，重开应用或点击菜单栏护盾图标随时唤回），采用 SF Pro 与苹方舒适排版，支持 `中文 | EN` 秒切、首屏零术语引导（拖入任意普通文件夹或单文件即开启 0 字节守护，或体验 **5 秒安全演练**）、原生编辑与操作快捷键（`⌘O` 绑定、`⌘S` 快照、`⌘R` 恢复、`⌘W` / `Esc` 逐层关闭）与彩色文件变更预览。
+- **任意文件夹/单文件拖拽守护与废纸篓自动清理**：将最多 `5` 个目标直接拖入窗口或菜单栏图标即可开启 `FSEvents` 滚动基线守护：无需 `.git` 或工程标记，直接支持普通文件夹及单个文件（含 `~/Desktop`、`~/Documents`、`~/Downloads` 内部子项），单文件同级兄弟零干扰；通过访达移入 `~/.Trash` 废纸篓触发原位重建后，自动按 `(fsid, ino)` 清理废纸篓副本（受系统隐私权限阻止时优雅保留零破坏）。内置 `>= 20` 文件批量误删熔断（单文件即时拦截）、目录模式**单文件精准恢复**子菜单、按需手动**检查更新**与可选 `--background` **开机静默自启**（Shell 与 Claude Code 钩子由 CLI `afuse hook zsh | claude` 提供）。
+- **恢复反馈层与中英双语「APFS 原位恢复凭证」（`1200×630` sRGB PNG）**：救回瞬间呈现零空闲 CPU 占用的 `QuartzCore` 流金脉冲反馈层，实时渲染零隐私泄露的黑金质感**恢复凭证**（不含任何目标名、文件名或路径，展示恢复耗时、文件数、Inode/隔离与 Merkle SHA-256 校验状态），自动写入系统剪贴板并支持一键分享至 `𝕏`、`微信 / 朋友圈` 或导出高清 PNG。
+- **单目标永久免费与终身买断原则**：**社区免费版永久守护 1 个活跃目标（普通文件夹或单文件）**，无试用倒计时，历史时间线恢复永久开放。**AgentFuse Pro 终身买断版（中国大陆 `¥98` 一次买断 · 海外 `$19` 一次买断）** 解锁最多 `5` 个并发守护目标与 **100% 离线 `Ed25519` 激活码**（支持 3 台本人 Mac，零遥测联网，14 天无理由退款）。
 - **[前往 GitHub Releases 下载 `AgentFuse.app` 双架构 DMG](https://github.com/topkyo/agent-fuse/releases/latest)** · **可直接通过 `AgentFuse.app` 内置离线双语购买指引获取 AgentFuse Pro（`¥98` / `$19` 一次买断）**。
 
 ---
 
 ## 安全架构、双轨签名与免责声明
 
-- **纯本地架构与零遥测铁律**：所有快照仅存于同卷外部隔离保险库（`~/.agent-fuse/vault.noindex/<name>-<hash>`，权限 `0700`，排除 Spotlight 索引，内置自吞噬防御以及 `/`、`$HOME` 与 TCC 隐私目录拦截）。启动与后台运行期间发起 `0` 次网络请求；`afuse upgrade` 仅在用户手动触发时连接 GitHub Releases，并强制校验压缩包 SHA-256 摘要后执行原子替换。详见 [`SECURITY.md`](./SECURITY.md)。
+- **纯本地架构与零遥测铁律**：所有快照仅存于同卷外部隔离保险库（`~/.agent-fuse/vault.noindex/<name>-<hash>`，权限 `0700`，排除 Spotlight 索引，内置自吞噬防御以及 `/`、`$HOME`、系统路径与桌面/文稿/下载顶级容器和符号链接拦截；允许守护其内部的具体子目录或单文件）。启动与后台运行期间发起 `0` 次网络请求；`afuse upgrade` 仅在用户手动触发时连接 GitHub Releases，并强制校验压缩包 SHA-256 摘要后执行原子替换。详见 [`SECURITY.md`](./SECURITY.md)。
 - **macOS Gatekeeper 安装说明**：在切换至 Apple Developer ID 公证证书前，推荐使用 `brew install --cask --no-quarantine topkyo/tap/agent-fuse` 免拦截一键安装；若手动下载 `.dmg` 拖入 `/Applications`，首次运行前请执行一次 `xattr -cr /Applications/AgentFuse.app`。
 - **免责声明**：`agent-fuse` 是本地 APFS 工作区辅助恢复工具，按“原样（AS IS）”提供，不附带任何明示或暗示担保。核心代码资产请务必保持异地 Git 远端备份。
 
@@ -111,9 +111,9 @@ afuse upgrade --check         # 仅在手动执行时查询 GitHub Releases 新�
 ## 常见问题解答
 
 1. **Claude Code 的 `/rewind` 或 `git checkout` 无法找回被 `rm -rf` 删掉的文件，`afuse` 能救回吗？**
-   只要误删前拍摄过快照（手动执行、挂载 `afuse hook claude` 或开启桌面端 `FSEvents` 守护），即可完整救回。Claude Code `/rewind` 不追踪 Shell `Bash` 命令造成的文件删除；`afuse` 通过 APFS `clonefile(2)` 克隆完整工作树（含未追踪文件、`.env` 与 `.git`），可在 `~12.6 ms` 内还原 142 个文件，或通过 `afuse restore latest -- <路径>` 单独恢复指定文件。
+   只要误删前拍摄过快照（手动执行、挂载 `afuse hook claude` 或开启桌面端 `FSEvents` 守护），即可完整救回，且支持无 `.git` 的普通文件夹与单个关键文件。Claude Code `/rewind` 不追踪 Shell `Bash` 命令造成的文件删除；`afuse` 通过 APFS `clonefile(2)` 克隆目标，可在 `~12.6 ms` 内还原 142 个文件、自动按 `(fsid, ino)` 清除 `~/.Trash` 废纸篓同名副本，或通过 `afuse restore latest -- <路径>` 精准恢复指定文件。
 2. **`afuse` 与 `Provenrail`（`$9/月`）或 `git stash -u` 有何本质区别？**
-   `git stash -u` 会锁定 `.git/index` 并进行对象压缩拷贝；`Provenrail` 向影子 Git 仓库复制文件且按月收费（`$108/年`）。`afuse` 直接调用内核 `clonefile(2)` 实现零 Git 对象开销，配备独立进程组熔断器（`SIGSTOP` -> `SIGKILL -pgid`），提供 `$0` MIT CLI 与 `¥98` / `$19` 一次买断的原生桌面端。
+   `git stash -u` 依赖 Git 仓库且争抢 `.git/index` 锁；`Provenrail` 向影子 Git 仓库复制文件且按月收费（`$108/年`）。`afuse` 直接调用内核 `clonefile(2)` 对 Git 仓库、普通目录或单文件实现零 Git 开销守护，配备独立进程组熔断器（`SIGSTOP` -> `SIGKILL -pgid`），提供 `$0` MIT CLI 与 `¥98` / `$19` 一次买断的原生桌面端。
 3. **为什么 `afuse restore` 恢复后当前终端不需要重新 `cd .. && cd -`？**
    `afuse restore` 先在工作区同卷旁路克隆目标条目，再调用 Darwin 内核 `renamex_np(..., RENAME_SWAP)` 原子交换顶层目录项，始终保留工作区根目录本身的 Inode 不变，因此终端会话与语言服务器（LSP）不会悬空失效。
 4. **手动拖拽 `.dmg` 安装为什么会提示“无法验证开发者”？**
@@ -121,4 +121,4 @@ afuse upgrade --check         # 仅在手动执行时查询 GitHub Releases 新�
 5. **`afuse` 会在后台偷偷联网检查更新吗？自动快照会把硬盘塞满吗？**
    均不会。启动与守护全程 `0` 网络请求，仅在用户手动运行 `afuse upgrade` 或点击菜单“检查更新”时按需查询。自动快照默认受 `AFUSE_MAX_AUTO_SNAPS=50` 滚动上限管控，超限自动回收最旧自动快照，手动快照永久保留。
 6. **社区免费版与 `¥98` / `$19` 的 AgentFuse Pro 终身买断版有何区别？**
-   `afuse` 命令行内核采用 MIT 协议完全免费开源（`$0`）。桌面端免费版可永久守护 `1` 个活跃项目，无试用倒计时。AgentFuse Pro（中国大陆 `¥98` / 海外 `$19` 一次买断）解锁最多 `5` 个项目并发守护，支持至多 `3` 台本人 Mac，采用 100% 离线 `Ed25519` 授权验证。可前往 [GitHub Releases](https://github.com/topkyo/agent-fuse/releases/latest) 下载或阅读 [`llms.txt`](./llms.txt)。
+   `afuse` 命令行内核采用 MIT 协议完全免费开源（`$0`）。桌面端免费版可永久守护 `1` 个活跃目标（普通目录或单文件），无试用倒计时。AgentFuse Pro（中国大陆 `¥98` / 海外 `$19` 一次买断）解锁最多 `5` 个并发目标守护，支持至多 `3` 台本人 Mac，采用 100% 离线 `Ed25519` 授权验证。可前往 [GitHub Releases](https://github.com/topkyo/agent-fuse/releases/latest) 下载或阅读 [`llms.txt`](./llms.txt)。

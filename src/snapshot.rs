@@ -9,6 +9,7 @@ pub use crate::restore::{
     restore_snapshot_with_vault, RestoreReport,
 };
 use crate::trash::record_snapshot_inodes;
+use crate::unicode_norm::canonical_rel_key;
 use crate::vault::{
     lock_vault, prepare_live_workspace_vault_with, resolve_workspace_vault_recovery, TargetKind,
 };
@@ -310,16 +311,25 @@ pub fn diff_snapshot_with_vault(
         BTreeMap::new()
     };
 
+    let mut snap_norm = BTreeMap::new();
+    for (k, v) in snap_map {
+        snap_norm.insert(canonical_rel_key(&k), (k, v));
+    }
+    let mut live_norm = BTreeMap::new();
+    for (k, v) in live_map {
+        live_norm.insert(canonical_rel_key(&k), (k, v));
+    }
+
     let mut added = Vec::new();
     let mut modified = Vec::new();
     let mut deleted = Vec::new();
 
-    let all_keys: BTreeSet<&String> = snap_map.keys().chain(live_map.keys()).collect();
+    let all_keys: BTreeSet<&String> = snap_norm.keys().chain(live_norm.keys()).collect();
     for k in all_keys {
-        match (snap_map.get(k), live_map.get(k)) {
-            (None, Some(_)) => added.push(k.clone()),
-            (Some(_), None) => deleted.push(k.clone()),
-            (Some(a), Some(b)) if a != b => modified.push(k.clone()),
+        match (snap_norm.get(k), live_norm.get(k)) {
+            (None, Some((live_k, _))) => added.push(live_k.clone()),
+            (Some((snap_k, _)), None) => deleted.push(snap_k.clone()),
+            (Some((snap_k, sv)), Some((_, lv))) if sv != lv => modified.push(snap_k.clone()),
             _ => {}
         }
     }

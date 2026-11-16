@@ -75,12 +75,13 @@ jobs:
               --password "$APPLE_APP_SPECIFIC_PASSWORD" \
               --wait
             tar -czf dist/afuse-macos-universal.tar.gz -C dist afuse
+            rm -f dist/afuse-macos-universal.zip
           else
             echo "Cold-start track (M8) -> applying deterministic ad-hoc signature..."
             codesign --force --sign - dist/afuse
             tar -czf dist/afuse-macos-universal.tar.gz -C dist afuse
           fi
-          rm -f dist/afuse
+          rm -f dist/afuse dist/afuse-macos-universal.zip
           shasum -a 256 dist/* > dist/SHA256SUMS.txt
           cat dist/SHA256SUMS.txt
 

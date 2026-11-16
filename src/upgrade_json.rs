@@ -274,8 +274,31 @@ fn extract_json_string_field(obj_bytes: &[u8], key: &str) -> Option<String> {
     parse_json_string_at(obj_bytes, vs).map(|(s, _)| s)
 }
 
+fn extract_json_bool_field(obj_bytes: &[u8], key: &str) -> Option<bool> {
+    let (vs, ve) = find_json_field_in_object(obj_bytes, key)?;
+    let slice = obj_bytes.get(vs..ve)?;
+    let text = std::str::from_utf8(slice).ok()?.trim();
+    match text {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
 pub fn parse_release_json(raw: &str) -> Result<ReleaseInfo, AfuseError> {
     let bytes = raw.as_bytes();
+    if extract_json_bool_field(bytes, "draft") == Some(true) {
+        return Err(AfuseError::new(
+            ERR_EINVAL,
+            "draft releases are filtered and not eligible for upgrade",
+        ));
+    }
+    if extract_json_bool_field(bytes, "prerelease") == Some(true) {
+        return Err(AfuseError::new(
+            ERR_EINVAL,
+            "prerelease versions are filtered and not eligible for upgrade",
+        ));
+    }
     let tag_name = extract_json_string_field(bytes, "tag_name").ok_or_else(|| {
         AfuseError::new(ERR_EINVAL, "release metadata missing 'tag_name'")
     })?;
@@ -320,4 +343,22 @@ pub fn parse_release_json(raw: &str) -> Result<ReleaseInfo, AfuseError> {
         html_url,
         assets,
     })
+}
+
+pub fn validate_release_asset_url(url: &str) -> Result<(), AfuseError> {
+    let rest = url.strip_prefix("https://").ok_or_else(|| {
+        AfuseError::new(ERR_EINVAL, "release asset URL must use https://")
+    })?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') {
+        return Err(AfuseError::new(ERR_EINVAL, "invalid release asset authority"));
+    }
+    let host = authority.split(':').next().unwrap_or("").to_ascii_lowercase();
+    if !matches!(
+        host.as_str(),
+        "github.com" | "objects.githubusercontent.com" | "release-assets.githubusercontent.com"
+    ) {
+        return Err(AfuseError::new(ERR_EINVAL, format!("untrusted release asset host: {}", host)));
+    }
+    Ok(())
 }

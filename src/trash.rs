@@ -9,7 +9,7 @@ use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-const MAX_TRACKED_INODES: usize = 4096;
+const MAX_TRACKED_INODES: usize = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrashCleanupStatus {

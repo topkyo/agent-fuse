@@ -283,8 +283,8 @@ pub(crate) fn cmd_doctor(workspace: &Path, rest: &[String], mut json: bool) -> !
                     )
                 } else {
                     (
-                        "Result: [FAIL] Workspace path rejected or missing project root marker.",
-                        Some("  Fix: run `afuse doctor .` inside a project root (.git, Cargo.toml, Package.swift, package.json, pyproject.toml, go.mod, or Makefile)."),
+                        "Result: [FAIL] Workspace path rejected by safety policy.",
+                        Some("  Fix: select a regular file or directory on APFS outside /, $HOME, system roots, container roots (~/Desktop, ~/Documents, ~/Downloads), and ~/.agent-fuse."),
                     )
                 };
                 println!(

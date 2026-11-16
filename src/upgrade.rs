@@ -2,8 +2,8 @@ use crate::apfs::{force_remove_all, TMP_SEQ};
 use crate::error::{AfuseError, ERR_EACCES, ERR_EINVAL, ERR_ENOENT, ERR_USAGE};
 use crate::sha256::Sha256;
 pub use crate::upgrade_json::{
-    is_newer_version, parse_release_json, ReleaseAsset, ReleaseInfo, UpgradeApplyReport,
-    UpgradeCheckReport,
+    is_newer_version, parse_release_json, validate_release_asset_url, ReleaseAsset, ReleaseInfo,
+    UpgradeApplyReport, UpgradeCheckReport,
 };
 use std::env;
 use std::fs::{self, File};
@@ -89,15 +89,13 @@ fn fetch_asset_to_file(source: &str, dest: &Path) -> Result<(), AfuseError> {
     let local = source.strip_prefix("file://").unwrap_or(source);
     if !source.starts_with("http://") && !source.starts_with("https://") {
         fs::copy(local, dest).map_err(|e| {
-            AfuseError::new(
-                e.raw_os_error().unwrap_or(1),
-                format!("failed to copy archive asset: {}", e),
-            )
+            AfuseError::new(e.raw_os_error().unwrap_or(1), format!("failed to copy archive asset: {}", e))
         })?;
         return Ok(());
     }
+    validate_release_asset_url(source)?;
     let out = Command::new("/usr/bin/curl")
-        .args(["-fsSL", "--max-time", "30", "-o"])
+        .args(["-fsSL", "--proto", "=https", "--proto-redir", "=https", "--max-time", "30", "-o"])
         .arg(dest)
         .arg(source)
         .output()
@@ -225,7 +223,9 @@ pub fn perform_upgrade_on_exe(exe_path: &Path) -> Result<UpgradeApplyReport, Afu
         ));
     }
 
-    let parent_dir = exe_path.parent().ok_or_else(|| {
+    let is_symlink_exe = fs::symlink_metadata(exe_path).map(|m| m.file_type().is_symlink()).unwrap_or(false);
+    let install_target = if is_symlink_exe { canon_exe.unwrap_or_else(|| exe_path.to_path_buf()) } else { exe_path.to_path_buf() };
+    let parent_dir = install_target.parent().ok_or_else(|| {
         AfuseError::new(ERR_EINVAL, "cannot determine binary parent directory")
     })?;
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -342,7 +342,7 @@ pub fn perform_upgrade_on_exe(exe_path: &Path) -> Result<UpgradeApplyReport, Afu
         ));
     }
     let _ = fs::set_permissions(&staged_bin, fs::Permissions::from_mode(0o755));
-    if let Err(e) = fs::rename(&staged_bin, exe_path) {
+    if let Err(e) = fs::rename(&staged_bin, &install_target) {
         let _ = force_remove_all(&staged_bin);
         return Err(AfuseError::new(
             e.raw_os_error().unwrap_or(ERR_EACCES),
@@ -357,7 +357,7 @@ pub fn perform_upgrade_on_exe(exe_path: &Path) -> Result<UpgradeApplyReport, Afu
         release_url: rel.html_url,
         brew_cmd: BREW_UPGRADE_CMD.to_string(),
         verified_sha256: Some(actual_sha),
-        target_path: Some(exe_path.to_string_lossy().into_owned()),
+        target_path: Some(install_target.to_string_lossy().into_owned()),
     })
 }
 
