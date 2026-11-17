@@ -183,10 +183,20 @@ pub fn force_remove_all(p: &Path) -> Result<(), AfuseError> {
     };
     force_unlock(p);
     if meta.file_type().is_dir() {
-        if let Ok(entries) = fs::read_dir(p) {
-            for entry in entries.flatten() {
-                force_remove_all(&entry.path())?;
-            }
+        let entries = fs::read_dir(p).map_err(|e| {
+            AfuseError::new(
+                e.raw_os_error().unwrap_or(1),
+                format!("read_dir failed on {}: {}", p.display(), e),
+            )
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|e| {
+                AfuseError::new(
+                    e.raw_os_error().unwrap_or(1),
+                    format!("read_dir entry failed on {}: {}", p.display(), e),
+                )
+            })?;
+            force_remove_all(&entry.path())?;
         }
         fs::remove_dir(p).map_err(|e| {
             AfuseError::new(

@@ -10,6 +10,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 const MAX_TRACKED_INODES: usize = 100_000;
+const MAX_RETAINED_ROOT_INODES: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrashCleanupStatus {
@@ -87,15 +88,63 @@ fn read_inode_file(path: &Path, out: &mut Vec<u64>, seen: &mut BTreeSet<u64>) {
     }
 }
 
+fn update_retained_root_inodes(
+    ws_vault: &Path,
+    prepend: &[u64],
+    remove: &BTreeSet<u64>,
+) -> Vec<u64> {
+    let mut existing = Vec::new();
+    let mut seen = BTreeSet::new();
+    for &ino in prepend {
+        if ino > 0 && !remove.contains(&ino) && seen.insert(ino) {
+            existing.push(ino);
+        }
+    }
+    let path = ws_vault.join("retained_inodes.txt");
+    if let Ok(raw) = fs::read_to_string(&path) {
+        for line in raw.lines() {
+            if let Ok(ino) = line.trim().parse::<u64>() {
+                if ino > 0 && !remove.contains(&ino) && seen.insert(ino) {
+                    existing.push(ino);
+                }
+            }
+        }
+    }
+    existing.truncate(MAX_RETAINED_ROOT_INODES);
+    write_inode_file(&path, &existing);
+    existing
+}
+
+fn write_latest_with_retained(ws: &Path, kind: TargetKind, ws_vault: &Path, retained: &[u64]) -> Vec<u64> {
+    let mut inodes = collect_target_inodes(ws, kind);
+    let mut seen: BTreeSet<u64> = inodes.iter().copied().collect();
+    for &ino in retained {
+        if ino > 0 && seen.insert(ino) {
+            inodes.push(ino);
+        }
+    }
+    write_inode_file(&ws_vault.join("latest_inodes.txt"), &inodes);
+    inodes
+}
+
 pub(crate) fn record_snapshot_inodes(ws: &Path, kind: TargetKind, snap_dir: &Path, ws_vault: &Path) {
     let inodes = collect_target_inodes(ws, kind);
     write_inode_file(&snap_dir.join("inodes.txt"), &inodes);
-    write_inode_file(&ws_vault.join("latest_inodes.txt"), &inodes);
+    let root_ino = lstat_inode_mode(ws).map(|x| x.0).unwrap_or(0);
+    let retained = update_retained_root_inodes(ws_vault, &[root_ino], &BTreeSet::new());
+    let mut latest = inodes;
+    let mut seen: BTreeSet<u64> = latest.iter().copied().collect();
+    for &ino in &retained {
+        if ino > 0 && seen.insert(ino) {
+            latest.push(ino);
+        }
+    }
+    write_inode_file(&ws_vault.join("latest_inodes.txt"), &latest);
 }
 
 pub(crate) fn refresh_latest_inodes(ws: &Path, kind: TargetKind, ws_vault: &Path) {
-    let inodes = collect_target_inodes(ws, kind);
-    write_inode_file(&ws_vault.join("latest_inodes.txt"), &inodes);
+    let retained = update_retained_root_inodes(ws_vault, &[], &BTreeSet::new());
+    let _ = write_latest_with_retained(ws, kind, ws_vault, &retained);
 }
 
 pub fn allowed_trash_roots() -> Vec<PathBuf> {
@@ -159,11 +208,14 @@ pub(crate) fn purge_trashed_counterparts(
         }
     }
     read_inode_file(&ws_vault.join("latest_inodes.txt"), &mut cands, &mut seen);
+    read_inode_file(&ws_vault.join("retained_inodes.txt"), &mut cands, &mut seen);
     read_inode_file(&snap_dir.join("inodes.txt"), &mut cands, &mut seen);
 
     let canon_ws = fs::canonicalize(restored_ws).unwrap_or_else(|_| restored_ws.to_path_buf());
     let mut purged_any = false;
     let mut saw_tcc_denied = false;
+    let mut purged_inos = BTreeSet::new();
+    let mut denied_inos = Vec::new();
 
     for cand_ino in cands {
         if live_inodes.contains(&cand_ino) {
@@ -173,6 +225,7 @@ pub(crate) fn purge_trashed_counterparts(
             Ok(p) => p,
             Err(e) if e.code == ERR_EPERM || e.code == ERR_EACCES => {
                 saw_tcc_denied = true;
+                denied_inos.push(cand_ino);
                 continue;
             }
             Err(_) => continue,
@@ -187,7 +240,15 @@ pub(crate) fn purge_trashed_counterparts(
             continue;
         };
         // Gate 3: Strict lstat inode + fsid match (zero filename heuristics)
-        let Ok((actual_ino, _)) = lstat_inode_mode(&cand_path) else { continue };
+        let actual_ino = match lstat_inode_mode(&cand_path) {
+            Ok((ino, _)) => ino,
+            Err(e) if e.code == ERR_EPERM || e.code == ERR_EACCES => {
+                saw_tcc_denied = true;
+                denied_inos.push(cand_ino);
+                continue;
+            }
+            Err(_) => continue,
+        };
         if actual_ino != cand_ino {
             continue;
         }
@@ -202,17 +263,38 @@ pub(crate) fn purge_trashed_counterparts(
         if let Err(e) = can_write_path(matched_trash).and_then(|_| can_write_path(parent)) {
             if e.code == ERR_EPERM || e.code == ERR_EACCES {
                 saw_tcc_denied = true;
+                denied_inos.push(cand_ino);
             }
             continue;
         }
         match force_remove_all(&cand_path) {
-            Ok(()) => purged_any = true,
-            Err(e) if e.code == ERR_EPERM || e.code == ERR_EACCES => saw_tcc_denied = true,
+            Ok(()) => {
+                purged_any = true;
+                purged_inos.insert(cand_ino);
+            }
+            Err(e) if e.code == ERR_EPERM || e.code == ERR_EACCES => {
+                saw_tcc_denied = true;
+                denied_inos.push(cand_ino);
+            }
             Err(_) => {}
         }
     }
 
-    refresh_latest_inodes(restored_ws, kind, ws_vault);
+    let live_root = lstat_inode_mode(restored_ws).map(|x| x.0).unwrap_or(0);
+    let mut keep_roots = Vec::new();
+    if saw_tcc_denied {
+        keep_roots.extend(denied_inos);
+        if target_meta.root_inode > 0 && !purged_inos.contains(&target_meta.root_inode) {
+            keep_roots.push(target_meta.root_inode);
+        }
+        if live_root > 0 {
+            keep_roots.push(live_root);
+        }
+    } else if live_root > 0 {
+        keep_roots.push(live_root);
+    }
+    let retained = update_retained_root_inodes(ws_vault, &keep_roots, &purged_inos);
+    let _ = write_latest_with_retained(restored_ws, kind, ws_vault, &retained);
     if saw_tcc_denied {
         TrashCleanupStatus::TccDenied
     } else if purged_any {

@@ -102,7 +102,7 @@ struct ScopedDir(PathBuf);
         fs::write(ws.join("app.rs"), b"v1_original").unwrap();
 
         let snap = create_snapshot_opts_with_vault(&ws, Some(&vault), "auto:pro", true).unwrap();
-        assert_eq!(snap.tree_sha256, "fast");
+        assert!(snap.tree_sha256.starts_with("fast:") && snap.tree_sha256.len() == 69);
         assert_eq!(snap.file_count, 1);
 
         fs::write(ws.join("app.rs"), b"v2_mutated").unwrap();
@@ -564,7 +564,7 @@ struct ScopedDir(PathBuf);
         let prev_env = env::var_os("AFUSE_VAULT_DIR");
         env::set_var("AFUSE_VAULT_DIR", &vault);
         let fast_meta = create_snapshot_fast(&ws, "auto:pro:fsevents").unwrap();
-        assert_eq!(fast_meta.tree_sha256, "fast");
+        assert!(fast_meta.tree_sha256.starts_with("fast:") && fast_meta.tree_sha256.len() == 69);
 
         fs::remove_file(ws.join("alpha.txt")).unwrap();
         let rep = restore_snapshot_with_vault(&ws, Some(&vault), &fast_meta.id, true).unwrap();

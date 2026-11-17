@@ -23,6 +23,7 @@ pub mod hook;
 pub mod hook_config;
 pub mod hook_json;
 pub mod manifest;
+mod meta;
 pub mod prune;
 pub mod restore;
 pub mod restore_tree;
@@ -63,7 +64,8 @@ pub use restore::{
     restore_snapshot_with_vault, RestoreReport,
 };
 pub use snapshot::{
-    create_snapshot, create_snapshot_fast, create_snapshot_if_changed,
+    create_snapshot, create_snapshot_fast, create_snapshot_fast_dedup,
+    create_snapshot_fast_dedup_with_vault, create_snapshot_if_changed,
     create_snapshot_if_changed_with_vault, create_snapshot_opts_with_vault,
     create_snapshot_with_vault, diff_snapshot, diff_snapshot_with_vault, list_snapshots,
     list_snapshots_with_vault, DiffReport,

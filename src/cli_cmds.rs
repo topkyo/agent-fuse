@@ -1,6 +1,6 @@
 use agent_fuse::{
-    create_snapshot, create_snapshot_fast, create_snapshot_if_changed, diff_snapshot, json_escape,
-    list_snapshots, parse_prune_args, prune_snapshots_filtered, restore_snapshot,
+    create_snapshot, create_snapshot_fast_dedup, create_snapshot_if_changed, diff_snapshot,
+    json_escape, list_snapshots, parse_prune_args, prune_snapshots_filtered, restore_snapshot,
     restore_snapshot_paths, sanitize_terminal_text, short_hash, validate_workspace_binding,
     AfuseError, RestoreReport,
 };
@@ -46,9 +46,9 @@ fn print_restore_report(r: &RestoreReport, json: bool) {
             String::new()
         };
         println!(
-            "{{\"ok\":true,\"snapshot_id\":\"{}\",\"safety_snapshot_id\":{},\"root_inode_before\":{},\"root_inode_after\":{},\"restored_files\":{},\"tree_sha256\":\"{}\",\"elapsed_us\":{},\"trash_cleanup\":\"{}\"{}}}",
+            "{{\"ok\":true,\"snapshot_id\":\"{}\",\"safety_snapshot_id\":{},\"root_inode_before\":{},\"root_inode_after\":{},\"restored_files\":{},\"project_files\":{},\"tree_sha256\":\"{}\",\"elapsed_us\":{},\"trash_cleanup\":\"{}\"{}}}",
             json_escape(&r.snapshot_id), sb, r.root_inode_before, r.root_inode_after,
-            r.restored_files, json_escape(&r.tree_sha256), r.elapsed_us, r.trash_cleanup.as_str(), tail
+            r.restored_files, r.project_files, json_escape(&r.tree_sha256), r.elapsed_us, r.trash_cleanup.as_str(), tail
         );
     } else {
         let ino_tag = if r.root_inode_before != 0 && r.root_inode_before == r.root_inode_after {
@@ -125,7 +125,7 @@ pub(crate) fn cmd_snap(workspace: &Path, rest: &[String], mut json: bool) {
     let res = if if_changed {
         create_snapshot_if_changed(workspace, &label)
     } else if fast {
-        create_snapshot_fast(workspace, &label).map(|m| (m, false))
+        create_snapshot_fast_dedup(workspace, &label)
     } else {
         create_snapshot(workspace, &label).map(|m| (m, false))
     };

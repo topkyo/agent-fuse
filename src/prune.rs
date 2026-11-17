@@ -154,12 +154,24 @@ pub fn prune_snapshots_filtered_with_vault(
     label_prefix: Option<&str>,
 ) -> Result<usize, AfuseError> {
     let (_ws, ws_vault) = resolve_workspace_vault_recovery(workspace, vault_override)?;
-    if !ws_vault.join("snapshots").is_dir() {
+    if !ws_vault.exists() {
+        return Ok(0);
+    }
+    let snaps_dir = ws_vault.join("snapshots");
+    if !snaps_dir.is_dir() {
+        if keep_latest == 0 {
+            force_remove_all(&ws_vault)?;
+        }
         return Ok(0);
     }
     let guard = lock_vault(&ws_vault)?;
     let removed = prune_unlocked(&ws_vault, keep_latest, label_prefix, ORPHAN_MAX_AGE_SECS)?;
-    if keep_latest == 0 && label_prefix.map(|s| s.is_empty()).unwrap_or(true) {
+    let has_remaining_dirs = fs::read_dir(&snaps_dir)
+        .map(|rd| rd.flatten().any(|e| e.path().is_dir()))
+        .unwrap_or(false);
+    let can_drop_vault = keep_latest == 0
+        && (label_prefix.map(|s| s.is_empty()).unwrap_or(true) || !has_remaining_dirs);
+    if can_drop_vault {
         drop(guard);
         force_remove_all(&ws_vault)?;
     }

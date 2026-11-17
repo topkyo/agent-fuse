@@ -198,14 +198,54 @@ mod tests_trash_targets {
         assert_eq!(r_arch.trash_cleanup, TrashCleanupStatus::NotInTrash);
         assert!(archived.join("code.rs").is_file());
 
-        // Counter-example C: Read-only Trash (0500) simulates TCC denial -> restore succeeds with TccDenied
+        // Counter-example C: Read-only Trash (0500) with non-empty child simulates TCC denial -> restore succeeds with TccDenied & keeps retained inode
         let trashed3 = trash.join("my_folder 23.59.03");
         fs::rename(&ws, &trashed3).unwrap();
+        let (trashed3_ino, _) = lstat_inode_mode(&trashed3).unwrap();
         fs::set_permissions(&trash, fs::Permissions::from_mode(0o500)).unwrap();
         let r_tcc = restore_snapshot_with_vault(&ws, Some(&vault), &snap.id, false).unwrap();
-        fs::set_permissions(&trash, fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(r_tcc.trash_cleanup, TrashCleanupStatus::TccDenied);
         assert!(trashed3.join("code.rs").is_file());
         assert!(ws.join("code.rs").is_file());
+        let (_, ws_vault) = crate::vault::resolve_workspace_vault_recovery(&ws, Some(&vault)).unwrap();
+        assert!(fs::read_to_string(ws_vault.join("latest_inodes.txt")).unwrap().contains(&trashed3_ino.to_string()));
+
+        // Round 3: Restore again after granting permissions (0700) without re-trashing -> retained inode purges trashed3 cleanly
+        fs::set_permissions(&trash, fs::Permissions::from_mode(0o700)).unwrap();
+        let r_purged_later = restore_snapshot_with_vault(&ws, Some(&vault), &snap.id, false).unwrap();
+        assert_eq!(r_purged_later.trash_cleanup, TrashCleanupStatus::Purged);
+        assert!(!trashed3.exists());
+    }
+
+    #[test]
+    fn fast_fsevents_dedup_noop_restore_and_prune_removes_outer_vault() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let sb = ScopedDir::new("fast-dedup-prune");
+        let vault = sb.0.join("vault");
+        let ws = sb.0.join("proj");
+        fs::create_dir_all(ws.join(".git")).unwrap();
+        fs::write(ws.join("main.rs"), b"fn main() {}\n").unwrap();
+
+        let (m1, d1) = crate::create_snapshot_fast_dedup_with_vault(&ws, Some(&vault), "auto:pro:fsevents").unwrap();
+        assert!(!d1 && m1.tree_sha256.starts_with("fast:"));
+        let (m2, d2) = crate::create_snapshot_fast_dedup_with_vault(&ws, Some(&vault), "auto:pro:fsevents").unwrap();
+        assert!(d2 && m2.id == m1.id);
+        assert_eq!(crate::list_snapshots_with_vault(&ws, Some(&vault)).unwrap().len(), 1);
+
+        // Idempotent no-op restore creates zero auto:pre-restore
+        let r_noop = restore_snapshot_with_vault(&ws, Some(&vault), &m1.id, true).unwrap();
+        assert!(r_noop.safety_snapshot_id.is_none());
+        assert_eq!(r_noop.project_files, 1);
+        assert_eq!(crate::list_snapshots_with_vault(&ws, Some(&vault)).unwrap().len(), 1);
+
+        // Selective restore on clean file also creates zero auto:pre-restore
+        let r_sel = crate::restore_snapshot_paths_with_vault(&ws, Some(&vault), &m1.id, true, &["main.rs".into()]).unwrap();
+        assert!(r_sel.safety_snapshot_id.is_none());
+
+        // prune --keep 0 deletes outer ws_vault directory completely
+        let (_, ws_vault) = crate::resolve_workspace_vault_recovery(&ws, Some(&vault)).unwrap();
+        assert!(ws_vault.exists());
+        let _ = crate::prune_snapshots_filtered_with_vault(&ws, Some(&vault), 0, None).unwrap();
+        assert!(!ws_vault.exists());
     }
 }

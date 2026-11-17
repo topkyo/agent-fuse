@@ -1,38 +1,76 @@
 use crate::apfs::{clonefile_nofollow, lstat_inode_mode};
 use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
+pub(crate) use crate::meta::{read_meta, write_meta};
+pub use crate::meta::SnapshotMeta;
 use crate::sha256::{sha256_hex, Sha256};
 use crate::vault::{is_ignored_name, TargetKind};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone)]
-pub struct SnapshotMeta {
-    pub id: String,
-    pub created_ms: u128,
-    pub label: String,
-    pub workspace: String,
-    pub root_inode: u64,
-    pub root_mode: u32,
-    pub file_count: u64,
-    pub logical_bytes: u64,
-    pub tree_sha256: String,
-    pub elapsed_us: u128,
-    pub target_kind: TargetKind,
+fn fast_entry_sig(path: &Path, meta: &fs::Metadata) -> Result<Option<String>, AfuseError> {
+    let ft = meta.file_type();
+    let mode = meta.permissions().mode() & 0o7777;
+    if ft.is_dir() {
+        Ok(Some(format!("D:{:04o}", mode)))
+    } else if ft.is_symlink() {
+        let target = fs::read_link(path).map_err(|e| {
+            AfuseError::new(1, format!("read_link failed on {}: {}", path.display(), e))
+        })?;
+        Ok(Some(format!("L:{}", sha256_hex(target.as_os_str().as_bytes()))))
+    } else if ft.is_file() {
+        Ok(Some(format!(
+            "F:{:04o}:{}:{}:{}",
+            mode,
+            meta.len(),
+            meta.mtime(),
+            meta.mtime_nsec()
+        )))
+    } else if ft.is_fifo() || ft.is_socket() {
+        Ok(Some(format!("S:{:04o}", mode)))
+    } else {
+        Ok(None)
+    }
 }
-pub fn compute_tree_stats_fast(root: &Path) -> Result<(u64, u64), AfuseError> {
-    let mut files: u64 = 0;
-    let mut bytes: u64 = 0;
 
-    fn walk(cur: &Path, files: &mut u64, bytes: &mut u64) -> Result<(), AfuseError> {
+pub fn compute_fast_fingerprint(
+    target: &Path,
+    kind: TargetKind,
+) -> Result<(String, u64, u64), AfuseError> {
+    if kind == TargetKind::SingleFile {
+        let meta = fs::symlink_metadata(target).map_err(|e| {
+            AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), format!("stat failed on {}: {}", target.display(), e))
+        })?;
+        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+            return Err(AfuseError::new(ERR_EINVAL, "target is not a regular file"));
+        }
+        let name = target
+            .file_name()
+            .ok_or_else(|| AfuseError::new(ERR_EINVAL, "missing file name"))?
+            .to_string_lossy()
+            .into_owned();
+        let sig = fast_entry_sig(target, &meta)?.unwrap_or_default();
+        let mut h = Sha256::new();
+        h.update(name.as_bytes());
+        h.update(b"\0");
+        h.update(sig.as_bytes());
+        h.update(b"\n");
+        return Ok((format!("fast:{}", h.finalize_hex()), 1, meta.len()));
+    }
+    let mut entries: BTreeMap<String, String> = BTreeMap::new();
+    let (mut files, mut bytes) = (0u64, 0u64);
+    fn walk(
+        base: &Path,
+        cur: &Path,
+        map: &mut BTreeMap<String, String>,
+        files: &mut u64,
+        bytes: &mut u64,
+    ) -> Result<(), AfuseError> {
         let rd = fs::read_dir(cur).map_err(|e| {
-            AfuseError::new(
-                e.raw_os_error().unwrap_or(1),
-                format!("read_dir failed on {}: {}", cur.display(), e),
-            )
+            AfuseError::new(e.raw_os_error().unwrap_or(1), format!("read_dir failed on {}: {}", cur.display(), e))
         })?;
         for item in rd {
             let item = item.map_err(|e| AfuseError::new(1, e.to_string()))?;
@@ -41,15 +79,16 @@ pub fn compute_tree_stats_fast(root: &Path) -> Result<(u64, u64), AfuseError> {
                 continue;
             }
             let p = item.path();
+            let rel = p.strip_prefix(base).unwrap_or(&p).to_string_lossy().into_owned();
             let meta = fs::symlink_metadata(&p).map_err(|e| {
-                AfuseError::new(
-                    e.raw_os_error().unwrap_or(1),
-                    format!("symlink_metadata failed on {}: {}", p.display(), e),
-                )
+                AfuseError::new(e.raw_os_error().unwrap_or(1), format!("symlink_metadata failed on {}: {}", p.display(), e))
             })?;
+            if let Some(sig) = fast_entry_sig(&p, &meta)? {
+                map.insert(rel, sig);
+            }
             let ft = meta.file_type();
             if ft.is_dir() {
-                walk(&p, files, bytes)?;
+                walk(base, &p, map, files, bytes)?;
             } else if ft.is_symlink() {
                 *files += 1;
             } else if ft.is_file() {
@@ -59,8 +98,43 @@ pub fn compute_tree_stats_fast(root: &Path) -> Result<(u64, u64), AfuseError> {
         }
         Ok(())
     }
+    walk(target, target, &mut entries, &mut files, &mut bytes)?;
+    let mut overall = Sha256::new();
+    for (rel, sig) in &entries {
+        overall.update(rel.as_bytes());
+        overall.update(b"\0");
+        overall.update(sig.as_bytes());
+        overall.update(b"\n");
+    }
+    Ok((format!("fast:{}", overall.finalize_hex()), files, bytes))
+}
 
-    walk(root, &mut files, &mut bytes)?;
+pub fn count_project_files(target: &Path, kind: TargetKind) -> u64 {
+    if kind == TargetKind::SingleFile {
+        return if target.is_file() { 1 } else { 0 };
+    }
+    fn walk_proj(cur: &Path, count: &mut u64) {
+        let Ok(rd) = fs::read_dir(cur) else { return };
+        for item in rd.flatten() {
+            let name = item.file_name().to_string_lossy().into_owned();
+            if name == ".git" || is_ignored_name(&name) {
+                continue;
+            }
+            let Ok(meta) = fs::symlink_metadata(item.path()) else { continue };
+            let ft = meta.file_type();
+            if ft.is_dir() {
+                walk_proj(&item.path(), count);
+            } else if ft.is_file() || ft.is_symlink() {
+                *count += 1;
+            }
+        }
+    }
+    let mut count = 0u64;
+    walk_proj(target, &mut count);
+    count
+}
+pub fn compute_tree_stats_fast(root: &Path) -> Result<(u64, u64), AfuseError> {
+    let (_, files, bytes) = compute_fast_fingerprint(root, TargetKind::Directory)?;
     Ok((files, bytes))
 }
 
@@ -289,72 +363,4 @@ pub fn sanitize_terminal_text(s: &str) -> String {
         }
     }
     out
-}
-
-fn sanitize_meta_value(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '\n' | '\r' | '\t' => out.push(' '),
-            '\\' => out.push_str("\\\\"),
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {}
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-pub(crate) fn write_meta(meta_path: &Path, m: &SnapshotMeta) -> Result<(), AfuseError> {
-    let content = format!(
-        "id={}\ncreated_ms={}\nlabel={}\nworkspace={}\nroot_inode={}\nroot_mode={}\nfile_count={}\nlogical_bytes={}\ntree_sha256={}\nelapsed_us={}\ntarget_kind={}\n",
-        sanitize_meta_value(&m.id),
-        m.created_ms,
-        sanitize_meta_value(&m.label),
-        sanitize_meta_value(&m.workspace),
-        m.root_inode,
-        m.root_mode,
-        m.file_count,
-        m.logical_bytes,
-        sanitize_meta_value(&m.tree_sha256),
-        m.elapsed_us,
-        m.target_kind.as_str()
-    );
-    fs::write(meta_path, content).map_err(|e| {
-        AfuseError::new(e.raw_os_error().unwrap_or(1), format!("failed to write meta {}: {}", meta_path.display(), e))
-    })
-}
-
-impl SnapshotMeta {
-    pub fn read_from(meta_path: &Path) -> Result<SnapshotMeta, AfuseError> {
-        let raw = fs::read_to_string(meta_path).map_err(|e| {
-            AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), format!("failed to read snapshot meta {}: {}", meta_path.display(), e))
-        })?;
-        let mut kv: BTreeMap<String, String> = BTreeMap::new();
-        for line in raw.lines() {
-            if let Some((k, v)) = line.split_once('=') {
-                kv.insert(k.to_string(), v.to_string());
-            }
-        }
-        let meta = SnapshotMeta {
-            id: kv.get("id").cloned().unwrap_or_default(),
-            created_ms: kv.get("created_ms").and_then(|v| v.parse().ok()).unwrap_or(0),
-            label: kv.get("label").cloned().unwrap_or_default(),
-            workspace: kv.get("workspace").cloned().unwrap_or_default(),
-            root_inode: kv.get("root_inode").and_then(|v| v.parse().ok()).unwrap_or(0),
-            root_mode: kv.get("root_mode").and_then(|v| v.parse().ok()).unwrap_or(0o755),
-            file_count: kv.get("file_count").and_then(|v| v.parse().ok()).unwrap_or(0),
-            logical_bytes: kv.get("logical_bytes").and_then(|v| v.parse().ok()).unwrap_or(0),
-            tree_sha256: kv.get("tree_sha256").cloned().unwrap_or_default(),
-            elapsed_us: kv.get("elapsed_us").and_then(|v| v.parse().ok()).unwrap_or(0),
-            target_kind: kv.get("target_kind").map(|s| TargetKind::parse_str(s)).unwrap_or(TargetKind::Directory),
-        };
-        if !meta.id.starts_with("snap-") || meta.tree_sha256.is_empty() || meta.created_ms == 0 {
-            return Err(AfuseError::new(ERR_EINVAL, "corrupted snapshot meta.kv"));
-        }
-        Ok(meta)
-    }
-}
-
-pub(crate) fn read_meta(meta_path: &Path) -> Result<SnapshotMeta, AfuseError> {
-    SnapshotMeta::read_from(meta_path)
 }
