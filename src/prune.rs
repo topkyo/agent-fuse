@@ -1,12 +1,89 @@
 use crate::apfs::force_remove_all;
 use crate::error::{AfuseError, ERR_EINVAL};
+use crate::manifest::{
+    compute_fast_fingerprint, count_project_files, read_meta, write_meta, SnapshotMeta,
+};
 use crate::snapshot::list_snapshots_unlocked;
-use crate::vault::{lock_vault, resolve_workspace_vault_recovery};
+use crate::vault::{lock_vault, resolve_workspace_vault_recovery, TargetKind};
 use std::fs;
 use std::path::Path;
 use std::time::SystemTime;
 
 pub(crate) const ORPHAN_MAX_AGE_SECS: u64 = 60;
+
+pub(crate) fn snap_tree_fast_fp(ws_vault: &Path, meta: &SnapshotMeta) -> Option<String> {
+    if meta.tree_sha256.starts_with("fast:") {
+        return Some(meta.tree_sha256.clone());
+    }
+    let tree_dir = ws_vault.join("snapshots").join(&meta.id).join("tree");
+    if meta.target_kind == TargetKind::SingleFile {
+        let f = fs::read_dir(&tree_dir)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.is_file())?;
+        return compute_fast_fingerprint(&f, TargetKind::SingleFile)
+            .ok()
+            .map(|x| x.0);
+    }
+    compute_fast_fingerprint(&tree_dir, TargetKind::Directory)
+        .ok()
+        .map(|x| x.0)
+}
+
+pub(crate) fn calibrate_legacy_meta_if_needed(snap_dir: &Path, meta: &mut SnapshotMeta) {
+    let meta_p = snap_dir.join("meta.kv");
+    let has_pf = fs::read_to_string(&meta_p)
+        .map(|raw| raw.lines().any(|l| l.starts_with("project_files=")))
+        .unwrap_or(false);
+    if has_pf && meta.tree_sha256 != "fast" {
+        return;
+    }
+    let tree_dir = snap_dir.join("tree");
+    if !tree_dir.is_dir() {
+        return;
+    }
+    let fp_target = if meta.target_kind == TargetKind::SingleFile {
+        fs::read_dir(&tree_dir)
+            .ok()
+            .and_then(|rd| rd.flatten().map(|e| e.path()).find(|p| p.is_file()))
+            .unwrap_or_else(|| tree_dir.clone())
+    } else {
+        tree_dir.clone()
+    };
+    meta.project_files = count_project_files(&fp_target, meta.target_kind);
+    if meta.tree_sha256 == "fast" {
+        if let Ok((fp, fc, lb)) = compute_fast_fingerprint(&fp_target, meta.target_kind) {
+            meta.tree_sha256 = fp;
+            meta.file_count = fc;
+            meta.logical_bytes = lb;
+        }
+    }
+    let _ = write_meta(&meta_p, meta);
+}
+
+pub(crate) fn dedup_and_calibrate_history_unlocked(ws_vault: &Path) -> Result<usize, AfuseError> {
+    let mut all = list_snapshots_unlocked(ws_vault)?;
+    for m in &mut all {
+        calibrate_legacy_meta_if_needed(&ws_vault.join("snapshots").join(&m.id), m);
+    }
+    let mut prev_fp: Option<String> = None;
+    let mut removed = 0usize;
+    for m in all {
+        if m.label == "auto:pre-restore" {
+            continue;
+        }
+        let cur_fp = snap_tree_fast_fp(ws_vault, &m);
+        if m.label.starts_with("auto:") && prev_fp.is_some() && cur_fp == prev_fp {
+            if force_remove_all(&ws_vault.join("snapshots").join(&m.id)).is_ok() {
+                removed += 1;
+            }
+        } else if cur_fp.is_some() {
+            prev_fp = cur_fp;
+        }
+    }
+    Ok(removed)
+}
 
 pub(crate) fn cleanup_orphan_snapshots_unlocked(ws_vault: &Path, min_age_secs: u64) -> usize {
     let snaps_dir = ws_vault.join("snapshots");
@@ -20,15 +97,21 @@ pub(crate) fn cleanup_orphan_snapshots_unlocked(ws_vault: &Path, min_age_secs: u
         if !p.is_dir() {
             continue;
         }
-        if p.join("meta.kv").is_file() {
+        let meta_p = p.join("meta.kv");
+        let tree_ok = p.join("tree").is_dir();
+        let meta_ok = meta_p.is_file() && read_meta(&meta_p).is_ok();
+        if tree_ok && meta_ok {
             continue;
         }
-        let is_stale = fs::symlink_metadata(&p)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|mt| now.duration_since(mt).ok())
-            .map(|age| age.as_secs() >= min_age_secs)
-            .unwrap_or(false);
+        let corrupt_zombie = meta_p.is_file();
+        let is_stale = corrupt_zombie
+            || min_age_secs == 0
+            || fs::symlink_metadata(&p)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|mt| now.duration_since(mt).ok())
+                .map(|age| age.as_secs() >= min_age_secs)
+                .unwrap_or(false);
         if is_stale && force_remove_all(&p).is_ok() {
             cleaned += 1;
         }
@@ -51,6 +134,9 @@ pub(crate) fn prune_unlocked(
         }
     }
     let mut removed = cleanup_orphan_snapshots_unlocked(ws_vault, orphan_min_age_secs);
+    if !(keep_latest == 0 && label_prefix.is_none()) {
+        removed += dedup_and_calibrate_history_unlocked(ws_vault)?;
+    }
     let all = list_snapshots_unlocked(ws_vault)?;
     match label_prefix {
         Some(pfx) => {

@@ -13,7 +13,7 @@ fn print_usage() {
         "afuse {} — Millisecond-scale APFS CoW workspace time machine & runaway agent circuit breaker\n\
          \n\
          USAGE:\n\
-           afuse [--workspace <DIR>] [--json] <SUBCOMMAND> [OPTIONS]\n\
+           afuse [-w | --workspace <DIR>] [--json] <SUBCOMMAND> [OPTIONS]\n\
          \n\
          SUBCOMMANDS:\n\
            snap [-m <LABEL>] [--fast] [--if-changed]\n\
@@ -55,6 +55,7 @@ fn main() {
     }
 
     let mut workspace = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut explicit_workspace = false;
     let mut json = false;
     let mut idx = 0usize;
 
@@ -64,11 +65,12 @@ fn main() {
                 json = true;
                 idx += 1;
             }
-            "--workspace" | "-C" => {
+            "--workspace" | "-w" | "-C" => {
                 if idx + 1 >= raw_args.len() {
                     emit_error(json, &AfuseError::new(22, "--workspace requires a path"));
                 }
                 workspace = PathBuf::from(&raw_args[idx + 1]);
+                explicit_workspace = true;
                 idx += 2;
             }
             "--help" | "-h" => {
@@ -93,7 +95,34 @@ fn main() {
     }
 
     let sub = raw_args[idx].as_str();
-    let rest = &raw_args[idx + 1..];
+    let raw_rest = &raw_args[idx + 1..];
+    let allow_post_global = !(sub == "hook" && raw_rest.iter().any(|a| a == "--exec"));
+    let mut rest_owned: Vec<String> = Vec::with_capacity(raw_rest.len());
+    let mut r_idx = 0usize;
+    while r_idx < raw_rest.len() {
+        let tok = raw_rest[r_idx].as_str();
+        if tok == "--" {
+            rest_owned.extend_from_slice(&raw_rest[r_idx..]);
+            break;
+        }
+        if allow_post_global && (tok == "--workspace" || tok == "-w" || tok == "-C") {
+            if r_idx + 1 >= raw_rest.len() {
+                emit_error(json, &AfuseError::new(22, "-w/--workspace requires a path"));
+            }
+            workspace = PathBuf::from(&raw_rest[r_idx + 1]);
+            explicit_workspace = true;
+            r_idx += 2;
+            continue;
+        }
+        if allow_post_global && tok == "--json" {
+            json = true;
+            r_idx += 1;
+            continue;
+        }
+        rest_owned.push(raw_rest[r_idx].clone());
+        r_idx += 1;
+    }
+    let rest = &rest_owned;
 
     match sub {
         "snap" => cli_cmds::cmd_snap(&workspace, rest, json),
@@ -104,7 +133,7 @@ fn main() {
         "prune" => cli_cmds::cmd_prune(&workspace, rest, json),
         "hook" => cli_ops::cmd_hook(workspace, rest, json),
         "guard" => cli_ops::cmd_guard(&workspace, rest, json),
-        "doctor" => cli_ops::cmd_doctor(&workspace, rest, json),
+        "doctor" => cli_ops::cmd_doctor(&workspace, explicit_workspace, rest, json),
         "upgrade" => cli_ops::cmd_upgrade(rest, json),
         other => emit_error(
             json,

@@ -3,6 +3,8 @@ use crate::apfs::{
 };
 use crate::error::{AfuseError, ERR_EACCES, ERR_EINVAL, ERR_ENOENT, ERR_ENOTSUP, ERR_EXDEV};
 use crate::sha256::sha256_hex;
+pub use crate::vault_policy::reject_forbidden_workspace_paths;
+use crate::vault_policy::{enforce_vault_target_kind, lexical_normalize_path};
 use std::env;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
@@ -77,48 +79,6 @@ pub(crate) const PROJECT_MARKERS: &[&str] = &[
     ".git", "Cargo.toml", "Package.swift", "package.json", "pyproject.toml", "go.mod", "Makefile",
 ];
 
-fn resolve_norm_or_canon(p: &Path) -> PathBuf {
-    fs::canonicalize(p).unwrap_or_else(|_| lexical_normalize_path(p).unwrap_or_else(|_| p.to_path_buf()))
-}
-
-pub fn reject_forbidden_workspace_paths(ws: &Path) -> Result<PathBuf, AfuseError> {
-    let real_home = real_home_dir()?;
-    let env_home = env::var("HOME").ok().map(|s| resolve_norm_or_canon(Path::new(&s)));
-    let forbidden_exact = [
-        PathBuf::from("/"), PathBuf::from("/Users"), PathBuf::from("/Volumes"),
-        PathBuf::from("/tmp"), PathBuf::from("/private/tmp"),
-        PathBuf::from("/var"), PathBuf::from("/private/var"),
-        real_home.clone(), real_home.join("Desktop"), real_home.join("Documents"), real_home.join("Downloads"),
-    ];
-    if env_home.as_deref() == Some(ws)
-        || forbidden_exact.iter().any(|ex| ws == ex || ws == &resolve_norm_or_canon(ex))
-    {
-        return Err(AfuseError::new(ERR_EINVAL, "binding system root, HOME, or top-level Desktop/Documents/Downloads folder itself is forbidden"));
-    }
-    let forbidden_subtrees = vec![
-        PathBuf::from("/System"), PathBuf::from("/Library"), PathBuf::from("/Applications"),
-        PathBuf::from("/bin"), PathBuf::from("/sbin"), PathBuf::from("/usr"),
-        PathBuf::from("/dev"), PathBuf::from("/etc"), PathBuf::from("/private/etc"), PathBuf::from("/cores"),
-        real_home.join(".agent-fuse"), real_home.join(".Trash"), real_home.join("Library"),
-    ];
-    let env_paths: Vec<PathBuf> = ["AFUSE_TRASH_DIR"]
-        .iter()
-        .filter_map(|k| env::var(k).ok().filter(|s| !s.trim().is_empty()).map(|s| PathBuf::from(s.trim())))
-        .collect();
-    for sub in forbidden_subtrees.iter().chain(env_paths.iter()) {
-        let canon_sub = resolve_norm_or_canon(sub);
-        if ws == sub || ws.starts_with(sub) || ws == &canon_sub || ws.starts_with(&canon_sub) {
-            return Err(AfuseError::new(ERR_EINVAL, "binding protected/system/trash subtree is forbidden"));
-        }
-    }
-    if let Some(v_canon) = env::var("AFUSE_VAULT_DIR").ok().filter(|s| !s.trim().is_empty()).map(|s| resolve_norm_or_canon(Path::new(s.trim()))) {
-        if ws == &v_canon || ws.starts_with(&v_canon) || v_canon.starts_with(ws) {
-            return Err(AfuseError::new(ERR_EINVAL, "self-ingestion forbidden: vault and target must not overlap"));
-        }
-    }
-    Ok(real_home)
-}
-
 fn strip_trailing_slashes(candidate: &Path) -> PathBuf {
     let raw = candidate.as_os_str().as_bytes();
     let trimmed = if raw.len() > 1 {
@@ -190,31 +150,6 @@ pub fn validate_workspace_binding_with_vault(
 
 pub fn validate_workspace_binding(candidate: &Path) -> Result<ValidatedWorkspace, AfuseError> {
     validate_workspace_binding_with_vault(candidate, None)
-}
-
-fn lexical_normalize_path(path: &Path) -> Result<PathBuf, AfuseError> {
-    let abs = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        env::current_dir()
-            .map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))?
-            .join(path)
-    };
-    let mut parts: Vec<std::ffi::OsString> = Vec::new();
-    for comp in abs.components() {
-        match comp {
-            std::path::Component::ParentDir => {
-                parts.pop();
-            }
-            std::path::Component::Normal(s) => parts.push(s.to_os_string()),
-            _ => {}
-        }
-    }
-    let mut out = PathBuf::from("/");
-    for part in parts {
-        out.push(part);
-    }
-    Ok(out)
 }
 
 fn resolve_via_existing_ancestor(path: &Path) -> Result<(PathBuf, PathBuf), AfuseError> {
@@ -324,7 +259,14 @@ pub fn prepare_live_workspace_vault_with(
     if !ft.is_dir() && !ft.is_file() {
         return Err(AfuseError::new(ERR_EINVAL, "target must be a regular directory or regular file"));
     }
-    workspace_vault_common(&ws, stat_dir_for(&ws), vault_override, true)
+    let live_kind = if ft.is_file() {
+        TargetKind::SingleFile
+    } else {
+        TargetKind::Directory
+    };
+    let (resolved_ws, ws_vault) = workspace_vault_common(&ws, stat_dir_for(&ws), vault_override, true)?;
+    enforce_vault_target_kind(&ws_vault, live_kind)?;
+    Ok((resolved_ws, ws_vault))
 }
 
 pub fn prepare_workspace_vault_with(

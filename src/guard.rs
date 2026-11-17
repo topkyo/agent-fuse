@@ -57,7 +57,9 @@ fn collect_git_critical_paths(git_dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+#[derive(Debug, Clone)]
 struct BaselineTrack {
+    is_single_file: bool,
     paths: Vec<PathBuf>,
     nonempty_files: Vec<PathBuf>,
 }
@@ -71,11 +73,13 @@ fn collect_baseline_track(ws: &Path) -> BaselineTrack {
             }
         }
         return BaselineTrack {
+            is_single_file: true,
             paths: vec![ws.to_path_buf()],
             nonempty_files,
         };
     }
     let mut track = BaselineTrack {
+        is_single_file: false,
         paths: Vec::new(),
         nonempty_files: Vec::new(),
     };
@@ -106,6 +110,16 @@ fn collect_baseline_track(ws: &Path) -> BaselineTrack {
 }
 
 fn check_destruction_threshold(track: &BaselineTrack, threshold: usize) -> Option<(usize, usize)> {
+    if track.is_single_file {
+        if let Some(p) = track.paths.first() {
+            let intact = fs::symlink_metadata(p)
+                .map(|m| !m.file_type().is_symlink() && m.file_type().is_file())
+                .unwrap_or(false);
+            if !intact {
+                return Some((1, 0));
+            }
+        }
+    }
     let mut missing = 0usize;
     let mut truncated = 0usize;
     for p in &track.paths {

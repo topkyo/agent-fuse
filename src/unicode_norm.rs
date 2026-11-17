@@ -201,3 +201,8 @@ pub fn canonical_rel_key(rel: &str) -> String {
 pub fn components_equal_canonical(a: &Path, b: &Path) -> bool {
     to_nfd(&a.to_string_lossy()) == to_nfd(&b.to_string_lossy())
 }
+
+/// Checks case-insensitive Unicode NFD equality between two path components.
+pub fn components_equal_casefold_nfd(a: &Path, b: &Path) -> bool {
+    to_nfd(&a.to_string_lossy()).to_lowercase() == to_nfd(&b.to_string_lossy()).to_lowercase()
+}

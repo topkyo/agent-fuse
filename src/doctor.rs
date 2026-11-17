@@ -48,36 +48,58 @@ pub fn format_doctor_json(rep: &DoctorReport) -> String {
 }
 
 pub fn run_doctor(workspace: &Path) -> Result<DoctorReport, AfuseError> {
-    run_doctor_with_vault(workspace, None)
+    run_doctor_with_opts(workspace, None, false)
 }
 
 pub fn run_doctor_with_vault(
     workspace: &Path,
     vault_override: Option<&Path>,
 ) -> Result<DoctorReport, AfuseError> {
-    if !workspace.exists() {
-        return Err(AfuseError::new(
-            ERR_ENOENT,
-            "target path does not exist",
-        ));
-    }
-    let sym = fs::symlink_metadata(workspace).map_err(|e| {
-        AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), e.to_string())
-    })?;
-    if sym.file_type().is_symlink() || (!sym.file_type().is_dir() && !sym.file_type().is_file()) {
-        return Err(AfuseError::new(
-            ERR_EINVAL,
-            "target path must be a regular directory or regular file",
-        ));
-    }
-    let target_ws = fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-    let workspace_valid = check_workspace_path_rules(&target_ws).is_ok();
-    let stat_target = if target_ws.is_dir() {
-        target_ws.as_path()
+    run_doctor_with_opts(workspace, vault_override, false)
+}
+
+pub fn run_doctor_with_opts(
+    workspace: &Path,
+    vault_override: Option<&Path>,
+    skip_workspace_check: bool,
+) -> Result<DoctorReport, AfuseError> {
+    let mut target_ws = workspace.to_path_buf();
+    let workspace_valid;
+    let stat_dir: std::path::PathBuf;
+    if skip_workspace_check {
+        workspace_valid = true;
+        let vault_hint = vault_override
+            .map(|v| v.to_path_buf())
+            .or_else(|| resolve_vault_base().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("/"));
+        let mut probe_p = vault_hint.clone();
+        while !probe_p.exists() && probe_p.pop() {}
+        stat_dir = if probe_p.exists() { probe_p } else { workspace.to_path_buf() };
     } else {
-        target_ws.parent().unwrap_or(Path::new("/"))
-    };
-    let fs_info = statfs_info(stat_target)
+        if !workspace.exists() {
+            return Err(AfuseError::new(
+                ERR_ENOENT,
+                "target path does not exist",
+            ));
+        }
+        let sym = fs::symlink_metadata(workspace).map_err(|e| {
+            AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), e.to_string())
+        })?;
+        if sym.file_type().is_symlink() || (!sym.file_type().is_dir() && !sym.file_type().is_file()) {
+            return Err(AfuseError::new(
+                ERR_EINVAL,
+                "target path must be a regular directory or regular file",
+            ));
+        }
+        target_ws = fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+        workspace_valid = check_workspace_path_rules(&target_ws).is_ok();
+        stat_dir = if target_ws.is_dir() {
+            target_ws.clone()
+        } else {
+            target_ws.parent().unwrap_or(Path::new("/")).to_path_buf()
+        };
+    }
+    let fs_info = statfs_info(&stat_dir)
         .map_err(|e| AfuseError::new(e.code, "statfs probe failed on target workspace"))?;
     let apfs_verified = fs_info.fstype.eq_ignore_ascii_case("apfs");
     let free_gib = (fs_info.avail_bytes as f64) / (1024.0 * 1024.0 * 1024.0);
@@ -111,7 +133,7 @@ pub fn run_doctor_with_vault(
             }
         }
 
-        if vault_writable && workspace_valid {
+        if !skip_workspace_check && vault_writable && workspace_valid {
             snapshot_count = resolve_workspace_vault_recovery(&target_ws, Some(&probe_root))
                 .and_then(|(_, ws_vault)| {
                     if ws_vault.join("snapshots").is_dir() {

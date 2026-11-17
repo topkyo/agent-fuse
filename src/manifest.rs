@@ -1,7 +1,8 @@
-use crate::apfs::{clonefile_nofollow, lstat_inode_mode};
+use crate::apfs::lstat_inode_mode;
 use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
+use crate::fs_guard::{clonefile_readable, TempPermGuard};
 pub(crate) use crate::meta::{read_meta, write_meta};
-pub use crate::meta::SnapshotMeta;
+pub use crate::meta::{json_escape, sanitize_terminal_text, SnapshotMeta};
 use crate::sha256::{sha256_hex, Sha256};
 use crate::vault::{is_ignored_name, TargetKind};
 use std::collections::BTreeMap;
@@ -68,6 +69,7 @@ pub fn compute_fast_fingerprint(
         files: &mut u64,
         bytes: &mut u64,
     ) -> Result<(), AfuseError> {
+        let _dir_guard = TempPermGuard::ensure(cur, 0o500);
         let rd = fs::read_dir(cur).map_err(|e| {
             AfuseError::new(e.raw_os_error().unwrap_or(1), format!("read_dir failed on {}: {}", cur.display(), e))
         })?;
@@ -116,6 +118,7 @@ pub fn count_project_files(target: &Path, kind: TargetKind) -> u64 {
         return if target.is_file() { 1 } else { 0 };
     }
     fn walk_proj(cur: &Path, count: &mut u64) {
+        let _dir_guard = TempPermGuard::ensure(cur, 0o500);
         let Ok(rd) = fs::read_dir(cur) else { return };
         for item in rd.flatten() {
             let name = item.file_name().to_string_lossy().into_owned();
@@ -141,6 +144,7 @@ pub fn compute_tree_stats_fast(root: &Path) -> Result<(u64, u64), AfuseError> {
 }
 
 fn hash_file_streaming(path: &Path) -> Result<String, AfuseError> {
+    let _file_guard = TempPermGuard::ensure(path, 0o400);
     let mut f = fs::File::open(path).map_err(|e| {
         AfuseError::new(
             e.raw_os_error().unwrap_or(1),
@@ -205,6 +209,7 @@ pub fn compute_tree_manifest(
         files: &mut u64,
         bytes: &mut u64,
     ) -> Result<(), AfuseError> {
+        let _dir_guard = TempPermGuard::ensure(cur, 0o500);
         let mut children: Vec<(String, PathBuf)> = Vec::new();
         let rd = fs::read_dir(cur).map_err(|e| {
             AfuseError::new(
@@ -283,10 +288,17 @@ pub(crate) fn clone_filtered_tree(src_dir: &Path, dst_dir: &Path) -> Result<(), 
         )
     })?;
     let (_, src_mode) = lstat_inode_mode(src_dir)?;
+    let _src_guard = TempPermGuard::ensure(src_dir, 0o500);
     // Keep u+rwx writable while cloning children into dst_dir; apply final mode afterward.
     let _ = fs::set_permissions(dst_dir, fs::Permissions::from_mode((src_mode & 0o7777) | 0o700));
 
     fn needs_filtered_walk(dir: &Path) -> bool {
+        if let Ok(dm) = fs::symlink_metadata(dir) {
+            if !dm.file_type().is_symlink() && (dm.permissions().mode() & 0o500) != 0o500 {
+                return true;
+            }
+        }
+        let _g = TempPermGuard::ensure(dir, 0o500);
         let Ok(rd) = fs::read_dir(dir) else {
             return false;
         };
@@ -297,7 +309,11 @@ pub(crate) fn clone_filtered_tree(src_dir: &Path, dst_dir: &Path) -> Result<(), 
             }
             if let Ok(m) = fs::symlink_metadata(entry.path()) {
                 let ft = m.file_type();
+                let mode = m.permissions().mode() & 0o7777;
                 if !ft.is_file() && !ft.is_dir() && !ft.is_symlink() {
+                    return true;
+                }
+                if !ft.is_symlink() && ((ft.is_file() && (mode & 0o400) == 0) || (ft.is_dir() && (mode & 0o500) != 0o500)) {
                     return true;
                 }
                 if ft.is_dir() && name != ".git" && needs_filtered_walk(&entry.path()) {
@@ -332,46 +348,9 @@ pub(crate) fn clone_filtered_tree(src_dir: &Path, dst_dir: &Path) -> Result<(), 
         if ft.is_dir() && name != ".git" && needs_filtered_walk(&s_child) {
             clone_filtered_tree(&s_child, &d_child)?;
         } else {
-            clonefile_nofollow(&s_child, &d_child)?;
+            clonefile_readable(&s_child, &d_child)?;
         }
     }
     let _ = fs::set_permissions(dst_dir, fs::Permissions::from_mode(src_mode & 0o7777));
     Ok(())
-}
-
-pub fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 4);
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
-                use std::fmt::Write;
-                let _ = write!(&mut out, "\\u{:04x}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-pub fn sanitize_terminal_text(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
-                use std::fmt::Write;
-                let _ = write!(&mut out, "\\x{:02x}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out
 }

@@ -231,11 +231,16 @@ pub(crate) fn cmd_list(workspace: &Path, rest: &[String], mut json: bool) {
 
 pub(crate) fn cmd_diff(workspace: &Path, rest: &[String], mut json: bool) {
     let mut target: Option<String> = None;
+    let mut end_of_opts = false;
     for a in rest {
-        if handle_common_sub_flag(a, "diff", &mut json) {
+        if !end_of_opts && a == "--" {
+            end_of_opts = true;
             continue;
         }
-        if a.starts_with('-') {
+        if !end_of_opts && handle_common_sub_flag(a, "diff", &mut json) {
+            continue;
+        }
+        if !end_of_opts && a.starts_with('-') {
             crate::emit_error(json, &AfuseError::new(22, "unknown diff option"));
         }
         if target.is_some() {

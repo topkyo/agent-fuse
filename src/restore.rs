@@ -1,18 +1,21 @@
 use crate::apfs::{
-    clonefile_nofollow, force_remove_all, force_unlock, lstat_inode_mode, statfs_info, swap_paths,
-    TMP_SEQ,
+    force_remove_all, force_unlock, lstat_inode_mode, statfs_info, swap_paths, TMP_SEQ,
 };
 use crate::error::{AfuseError, ERR_EACCES, ERR_EINVAL, ERR_ENOENT};
+use crate::fs_guard::clonefile_readable;
 use crate::manifest::{
     compute_single_file_manifest, compute_tree_manifest, count_project_files, SnapshotMeta,
 };
 use crate::restore_tree::{
-    clear_heterogeneous_path_if_needed, force_unlock_tree_recursive, lock_guard_single_dir,
-    prepare_ancestors_writable, resolve_disk_rel_path, top_level_nfd_key,
-    validate_rel_restore_path, workspace_has_visible_files, NestedIgnoredGuard, UnlockedDirsGuard,
+    align_ancestor_case, clear_heterogeneous_path_if_needed, find_single_snap_file,
+    force_unlock_tree_recursive, lock_guard_single_dir, prepare_ancestors_writable,
+    resolve_disk_rel_path, same_disk_entry, selective_differs, top_level_nfd_key,
+    validate_rel_restore_path, workspace_differs_full, workspace_has_visible_files,
+    NestedIgnoredGuard, UnlockedDirsGuard,
 };
 use crate::snapshot::{create_snapshot_unlocked_opts, resolve_snapshot_id};
 use crate::trash::{purge_trashed_counterparts, TrashCleanupStatus};
+use crate::unicode_norm::components_equal_casefold_nfd;
 use crate::vault::{is_ignored_name, lock_vault, resolve_workspace_vault_recovery, TargetKind};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -56,59 +59,6 @@ fn verify_snapshot_tree(ws_vault: &Path, target_id: &str) -> Result<(SnapshotMet
         Some(vh)
     };
     Ok((meta, snap_tree, vault_hash))
-}
-
-fn find_single_snap_file(ws: &Path, snap_tree: &Path) -> Option<PathBuf> {
-    ws.file_name()
-        .and_then(|n| resolve_disk_rel_path(snap_tree, Path::new(n)).ok().flatten())
-        .map(|rel| snap_tree.join(rel))
-        .filter(|p| p.is_file())
-        .or_else(|| fs::read_dir(snap_tree).ok()?.flatten().map(|e| e.path()).find(|p| p.is_file()))
-}
-
-fn workspace_differs_full(
-    ws: &Path,
-    kind: TargetKind,
-    snap_tree: &Path,
-    vault_hash: Option<&str>,
-) -> bool {
-    if kind == TargetKind::SingleFile {
-        let Some(sf) = find_single_snap_file(ws, snap_tree) else { return true };
-        let Ok((lw, _, _, _)) = compute_single_file_manifest(ws) else { return true };
-        let Ok((ls, _, _, _)) = compute_single_file_manifest(&sf) else { return true };
-        return lw != ls;
-    }
-    if !fs::symlink_metadata(ws).map(|m| !m.file_type().is_symlink() && m.file_type().is_dir()).unwrap_or(false) {
-        return true;
-    }
-    let Ok((lw, _, _, _)) = compute_tree_manifest(ws) else { return true };
-    if let Some(vh) = vault_hash {
-        return lw != vh;
-    }
-    compute_tree_manifest(snap_tree).map(|t| t.0 != lw).unwrap_or(true)
-}
-
-fn selective_differs(ws: &Path, snap_tree: &Path, resolved: &[(Option<PathBuf>, Option<PathBuf>)]) -> bool {
-    for (snap_opt, live_opt) in resolved {
-        match (snap_opt, live_opt) {
-            (Some(sr), Some(lr)) if sr == lr => {
-                let (sp, lp) = (snap_tree.join(sr), ws.join(lr));
-                if sp.is_file() && lp.is_file() {
-                    let s_h = compute_single_file_manifest(&sp).map(|t| t.0).ok();
-                    let l_h = compute_single_file_manifest(&lp).map(|t| t.0).ok();
-                    if s_h != l_h { return true; }
-                } else if sp.is_dir() && lp.is_dir() {
-                    let s_h = compute_tree_manifest(&sp).map(|t| t.0).ok();
-                    let l_h = compute_tree_manifest(&lp).map(|t| t.0).ok();
-                    if s_h != l_h { return true; }
-                } else {
-                    return true;
-                }
-            }
-            _ => return true,
-        }
-    }
-    false
 }
 
 fn take_pre_restore_backup(ws: &Path, ws_vault: &Path, safety_backup: bool) -> Result<Option<String>, AfuseError> {
@@ -180,7 +130,7 @@ fn stage_and_replace(parent: &Path, tag: &str, snap_item: &Path, target: &Path) 
     if fs::symlink_metadata(&tmp_new).is_ok() {
         force_remove_all(&tmp_new)?;
     }
-    clonefile_nofollow(snap_item, &tmp_new)?;
+    clonefile_readable(snap_item, &tmp_new)?;
     let tmp_old = parent.join(format!(".afuse.tmp.old.{}.{}", pid, seq));
     commit_staged_entry(&tmp_new, target, &tmp_old)
 }
@@ -283,16 +233,24 @@ pub fn restore_snapshot_with_vault(
             ws_children.push((top_level_nfd_key(&name), name));
         }
     }
+    let mut handled_aliases: BTreeSet<OsString> = BTreeSet::new();
     for (nfd_k, (snap_name, snap_child)) in &snap_children {
         for (ws_k, ws_name) in &ws_children {
-            if ws_k == nfd_k && ws_name != snap_name {
+            let is_alias = ws_name != snap_name
+                && (ws_k == nfd_k
+                    || (components_equal_casefold_nfd(Path::new(ws_name), Path::new(snap_name))
+                        && same_disk_entry(&ws.join(ws_name), &ws.join(snap_name))));
+            if is_alias {
+                handled_aliases.insert(ws_name.clone());
                 let _ = force_remove_all(&ws.join(ws_name));
             }
         }
         stage_and_replace(&ws, "new", snap_child, &ws.join(snap_name))?;
     }
     for (nfd_k, ws_name) in ws_children {
-        if !snap_children.contains_key(&nfd_k) {
+        let points_to_restored = handled_aliases.contains(&ws_name)
+            || snap_children.values().any(|(sn, _)| same_disk_entry(&ws.join(&ws_name), &ws.join(sn)));
+        if !snap_children.contains_key(&nfd_k) && !points_to_restored {
             force_remove_all(&ws.join(ws_name))?;
         }
     }
@@ -357,6 +315,7 @@ pub fn restore_snapshot_paths_with_vault(
                     let _ = force_remove_all(&ws.join(&live_rel));
                 }
             }
+            align_ancestor_case(&ws, &snap_rel, &mut dir_guard)?;
             prepare_ancestors_writable(&ws, &snap_rel, true, &mut dir_guard)?;
             let dst_item = ws.join(&snap_rel);
             stage_and_replace(dst_item.parent().unwrap_or(&ws), "sel", &snap_tree.join(&snap_rel), &dst_item)?;

@@ -414,6 +414,11 @@ P2_ZSH_CHECK="$(cat "$P2_HOOK_LOG")"
 echo "$P2_ZSH_CHECK" | grep -q -- "--tool claude-code" || { echo "FAIL: zsh wrapper parse claude-code ($P2_ZSH_CHECK)" >&2; exit 1; }
 echo "$P2_ZSH_CHECK" | grep -q -- "--tool codex" || { echo "FAIL: zsh wrapper parse codex ($P2_ZSH_CHECK)" >&2; exit 1; }
 echo "$P2_ZSH_CHECK" | grep -q -- "--tool aider" || { echo "FAIL: zsh wrapper parse aider ($P2_ZSH_CHECK)" >&2; exit 1; }
+AFUSE_VAULT_DIR="$P2_VAULT" "$BIN_PATH" list -w "$P2_WS" --json | grep -q '"snapshots"' || { echo "FAIL: list -w trailing flag" >&2; exit 1; }
+AFUSE_VAULT_DIR="$P2_VAULT" "$BIN_PATH" diff -w "$P2_WS" --json -- latest | grep -q '"snapshot_id"' || { echo "FAIL: diff -w -- failed" >&2; exit 1; }
+AFUSE_VAULT_DIR="$P2_VAULT" "$BIN_PATH" validate -w "$P2_WS" --json | grep -q '"ok":true' || { echo "FAIL: validate -w failed" >&2; exit 1; }
+DOC_SYS_JSON="$(cd / && AFUSE_VAULT_DIR="$P2_VAULT" "$BIN_PATH" --json doctor)"
+printf '%s' "$DOC_SYS_JSON" | grep -q '"ok":true' || { echo "FAIL: doctor from cwd=/ failed: $DOC_SYS_JSON" >&2; exit 1; }
 AFUSE_VAULT_DIR="$P2_VAULT" "$BIN_PATH" --workspace "$P2_WS" --json prune --keep 0 >/dev/null
 
 "$BIN_PATH" --workspace "$WS" --json prune --keep 0 >/dev/null

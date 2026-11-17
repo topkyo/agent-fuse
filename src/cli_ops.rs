@@ -1,8 +1,8 @@
 use crate::emit_error;
 use agent_fuse::{
-    check_for_updates, json_escape, render_hook_snippet, run_claude_hook_exec_stdio, run_doctor,
-    run_guarded_command, run_upgrade_apply, run_zsh_hook_exec, uninstall_hooks, AfuseError,
-    GuardConfig,
+    check_for_updates, json_escape, render_hook_snippet, run_claude_hook_exec_stdio,
+    run_doctor_with_opts, run_guarded_command, run_upgrade_apply, run_zsh_hook_exec,
+    uninstall_hooks, AfuseError, GuardConfig,
 };
 use std::path::{Path, PathBuf};
 use std::process;
@@ -251,21 +251,20 @@ pub(crate) fn cmd_guard(workspace: &Path, rest: &[String], mut json: bool) -> ! 
     }
 }
 
-pub(crate) fn cmd_doctor(workspace: &Path, rest: &[String], mut json: bool) -> ! {
-    if rest.iter().any(|a| a == "--json") {
-        json = true;
-    }
+pub(crate) fn cmd_doctor(workspace: &Path, explicit_ws: bool, rest: &[String], mut json: bool) -> ! {
+    if rest.iter().any(|a| a == "--json") { json = true; }
     let (doc_json, doc_ws, want_help) = match parse_doctor_args(rest, json) {
         Ok(v) => v,
         Err(e) => emit_error(json, &e),
     };
     if want_help {
-        println!("USAGE: afuse [--workspace <DIR>] [--json] doctor [<DIR>]");
+        println!("USAGE: afuse [-w | --workspace <DIR>] [--json] doctor [<DIR>]");
         process::exit(0);
     }
     json = doc_json;
     let target_ws = doc_ws.as_deref().unwrap_or(workspace);
-    match run_doctor(target_ws) {
+    let skip_ws_check = doc_ws.is_none() && !explicit_ws && target_ws == Path::new("/");
+    match run_doctor_with_opts(target_ws, None, skip_ws_check) {
         Ok(rep) => {
             if json {
                 println!("{}", rep.to_json());

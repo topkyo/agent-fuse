@@ -3,127 +3,96 @@
 
 use crate::apfs::{force_remove_all, force_unlock, TMP_SEQ};
 use crate::error::{AfuseError, ERR_EINVAL};
-use crate::unicode_norm::{components_equal_canonical, to_nfd};
-use crate::vault::is_ignored_name;
+pub use crate::fs_guard::{
+    force_unlock_tree_recursive, lock_guard_single_dir, prepare_ancestors_writable,
+    UnlockedDirsGuard,
+};
+use crate::manifest::{compute_single_file_manifest, compute_tree_manifest};
+use crate::unicode_norm::{components_equal_canonical, components_equal_casefold_nfd, to_nfd};
+use crate::vault::{is_ignored_name, TargetKind};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::Ordering;
 
-pub struct UnlockedDirsGuard {
-    saved_modes: Vec<(PathBuf, u32)>,
+pub fn same_disk_entry(a: &Path, b: &Path) -> bool {
+    let Ok(ma) = fs::symlink_metadata(a) else { return false };
+    let Ok(mb) = fs::symlink_metadata(b) else { return false };
+    ma.dev() == mb.dev() && ma.ino() == mb.ino()
 }
 
-impl UnlockedDirsGuard {
-    pub fn new() -> Self {
-        Self {
-            saved_modes: Vec::new(),
-        }
-    }
-
-    pub fn unlock_if_needed(&mut self, dir: &Path) -> Result<(), AfuseError> {
-        let meta = fs::symlink_metadata(dir)
-            .map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))?;
-        if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
-            return Err(AfuseError::new(
-                ERR_EINVAL,
-                "unsafe symlink or non-directory ancestor",
-            ));
-        }
-        let mode = meta.permissions().mode() & 0o7777;
-        if (mode & 0o700) != 0o700 {
-            if !self.saved_modes.iter().any(|(p, _)| p == dir) {
-                self.saved_modes.push((dir.to_path_buf(), mode));
-            }
-            fs::set_permissions(dir, fs::Permissions::from_mode(mode | 0o700))
-                .map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))?;
-        }
-        Ok(())
-    }
-
-    pub fn restore_all(&mut self) {
-        while let Some((dir, mode)) = self.saved_modes.pop() {
-            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(mode));
-        }
-    }
-}
-
-impl Drop for UnlockedDirsGuard {
-    fn drop(&mut self) {
-        self.restore_all();
-    }
-}
-
-pub fn prepare_ancestors_writable(
+pub fn align_ancestor_case(
     ws: &Path,
     rel: &Path,
-    create_missing: bool,
     guard: &mut UnlockedDirsGuard,
 ) -> Result<(), AfuseError> {
-    guard.unlock_if_needed(ws)?;
     let mut cur = ws.to_path_buf();
     let comps: Vec<_> = rel.components().collect();
     for comp in comps.iter().take(comps.len().saturating_sub(1)) {
-        cur.push(comp.as_os_str());
-        match fs::symlink_metadata(&cur) {
-            Ok(m) if m.file_type().is_symlink() || !m.file_type().is_dir() => {
-                return Err(AfuseError::new(
-                    ERR_EINVAL,
-                    "unsafe symlink or file ancestor",
-                ));
-            }
-            Ok(_) => {
+        let seg = comp.as_os_str();
+        let Ok(rd) = fs::read_dir(&cur) else { break };
+        let entries: Vec<_> = rd.flatten().map(|e| e.file_name()).collect();
+        let target = cur.join(seg);
+        if let Some(real_name) = entries.iter().find(|n| {
+            n.as_os_str() != seg
+                && components_equal_casefold_nfd(Path::new(n), Path::new(seg))
+                && same_disk_entry(&cur.join(n), &target)
+        }) {
+            let live_ancestor = cur.join(real_name);
+            if fs::symlink_metadata(&live_ancestor).map(|m| m.file_type().is_dir() && !m.file_type().is_symlink()).unwrap_or(false) {
                 guard.unlock_if_needed(&cur)?;
+                guard.unlock_if_needed(&live_ancestor)?;
+                fs::rename(&live_ancestor, &target)
+                    .map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))?;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && create_missing => {
-                fs::create_dir(&cur)
-                    .map_err(|ce| AfuseError::new(ce.raw_os_error().unwrap_or(1), ce.to_string()))?;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string())),
         }
+        cur = target;
     }
     Ok(())
 }
 
-/// Resolves a relative path inside `base` matching APFS NFD/NFC equivalent names,
+/// Resolves a relative path inside `base` matching APFS NFD/NFC or case-insensitive equivalent names,
 /// returning the exact on-disk directory entry relative path when present.
 pub fn resolve_disk_rel_path(base: &Path, rel: &Path) -> Result<Option<PathBuf>, AfuseError> {
-    if rel.to_string_lossy().is_ascii() && fs::symlink_metadata(base.join(rel)).is_ok() {
-        return Ok(Some(rel.to_path_buf()));
-    }
     let mut disk_cur = base.to_path_buf();
     let mut disk_rel = PathBuf::new();
-    for comp in rel.components() {
+    let comps: Vec<_> = rel.components().collect();
+    for (idx, comp) in comps.iter().enumerate() {
         let Component::Normal(seg) = comp else {
             return Ok(None);
         };
-        if seg.to_string_lossy().is_ascii() {
-            let exact = disk_cur.join(seg);
-            if fs::symlink_metadata(&exact).is_ok() {
-                disk_cur = exact;
-                disk_rel.push(seg);
-                continue;
-            }
-            return Ok(None);
-        }
         let Ok(rd) = fs::read_dir(&disk_cur) else {
             return Ok(None);
         };
         let entries: Vec<_> = rd.flatten().map(|e| e.file_name()).collect();
         let matched = entries
             .iter()
-            .find(|name| name.as_os_str() == seg)
+            .find(|name| name.as_os_str() == *seg)
             .or_else(|| {
                 entries
                     .iter()
                     .find(|name| components_equal_canonical(Path::new(name), Path::new(seg)))
+            })
+            .or_else(|| {
+                let candidate = disk_cur.join(seg);
+                entries.iter().find(|name| {
+                    components_equal_casefold_nfd(Path::new(name), Path::new(seg))
+                        && same_disk_entry(&disk_cur.join(name), &candidate)
+                })
             });
         let Some(real_name) = matched else {
             return Ok(None);
         };
         disk_cur.push(real_name);
         disk_rel.push(real_name);
+        if idx + 1 < comps.len() {
+            let Ok(m) = fs::symlink_metadata(&disk_cur) else {
+                return Ok(None);
+            };
+            if m.file_type().is_symlink() || !m.file_type().is_dir() {
+                return Ok(None);
+            }
+        }
     }
     Ok(Some(disk_rel))
 }
@@ -172,6 +141,7 @@ fn collect_and_move_nested(
         let rel = rel_prefix.join(&name);
         if depth >= 1 && is_ignored_name(&name_str) {
             guard.unlock_if_needed(dir)?;
+            force_unlock(&path);
             let staged = stage_root.join(format!("item-{}", moved.len()));
             fs::rename(&path, &staged).map_err(|e| {
                 AfuseError::new(e.raw_os_error().unwrap_or(1), format!("preserve ignored subtree: {}", e))
@@ -259,26 +229,67 @@ pub fn top_level_nfd_key(name: &std::ffi::OsStr) -> String {
     to_nfd(&name.to_string_lossy())
 }
 
-/// Temporarily grants `0o700` on `dir` if needed and restores original mode on drop.
-pub fn lock_guard_single_dir(dir: &Path) -> Result<UnlockedDirsGuard, AfuseError> {
-    let mut g = UnlockedDirsGuard::new();
-    g.unlock_if_needed(dir)?;
-    Ok(g)
+pub(crate) fn find_single_snap_file(ws: &Path, snap_tree: &Path) -> Option<PathBuf> {
+    ws.file_name()
+        .and_then(|n| resolve_disk_rel_path(snap_tree, Path::new(n)).ok().flatten())
+        .map(|rel| snap_tree.join(rel))
+        .filter(|p| p.is_file())
+        .or_else(|| fs::read_dir(snap_tree).ok()?.flatten().map(|e| e.path()).find(|p| p.is_file()))
 }
 
-pub fn force_unlock_tree_recursive(p: &Path) {
-    force_unlock(p);
-    if let Ok(meta) = fs::symlink_metadata(p) {
-        if meta.file_type().is_dir() {
-            if let Ok(rd) = fs::read_dir(p) {
-                for entry in rd.flatten() {
-                    if !is_ignored_name(&entry.file_name().to_string_lossy()) {
-                        force_unlock_tree_recursive(&entry.path());
+pub(crate) fn workspace_differs_full(
+    ws: &Path,
+    kind: TargetKind,
+    snap_tree: &Path,
+    vault_hash: Option<&str>,
+) -> bool {
+    if kind == TargetKind::SingleFile {
+        let Some(sf) = find_single_snap_file(ws, snap_tree) else { return true };
+        let Ok((lw, _, _, _)) = compute_single_file_manifest(ws) else { return true };
+        let Ok((ls, _, _, _)) = compute_single_file_manifest(&sf) else { return true };
+        return lw != ls;
+    }
+    if !fs::symlink_metadata(ws).map(|m| !m.file_type().is_symlink() && m.file_type().is_dir()).unwrap_or(false) {
+        return true;
+    }
+    let Ok((lw, _, _, _)) = compute_tree_manifest(ws) else { return true };
+    if let Some(vh) = vault_hash {
+        return lw != vh;
+    }
+    compute_tree_manifest(snap_tree).map(|t| t.0 != lw).unwrap_or(true)
+}
+
+pub(crate) fn selective_differs(
+    ws: &Path,
+    snap_tree: &Path,
+    resolved: &[(Option<PathBuf>, Option<PathBuf>)],
+) -> bool {
+    for (snap_opt, live_opt) in resolved {
+        match (snap_opt, live_opt) {
+            (Some(sr), Some(lr)) if sr == lr => {
+                let (sp, lp) = (snap_tree.join(sr), ws.join(lr));
+                let (Ok(sm), Ok(lm)) = (fs::symlink_metadata(&sp), fs::symlink_metadata(&lp)) else { return true };
+                let (sft, lft) = (sm.file_type(), lm.file_type());
+                if sft.is_symlink() || lft.is_symlink() {
+                    if !sft.is_symlink() || !lft.is_symlink() || fs::read_link(&sp).ok() != fs::read_link(&lp).ok() {
+                        return true;
                     }
+                } else if sft.is_file() && lft.is_file() {
+                    if compute_single_file_manifest(&sp).map(|t| t.0).ok() != compute_single_file_manifest(&lp).map(|t| t.0).ok() {
+                        return true;
+                    }
+                } else if sft.is_dir() && lft.is_dir() {
+                    if compute_tree_manifest(&sp).map(|t| t.0).ok() != compute_tree_manifest(&lp).map(|t| t.0).ok() {
+                        return true;
+                    }
+                } else {
+                    return true;
                 }
             }
+            _ => return true,
         }
     }
+    false
 }
 
 pub fn workspace_has_visible_files(ws: &Path) -> bool {

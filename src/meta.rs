@@ -100,3 +100,40 @@ impl SnapshotMeta {
 pub(crate) fn read_meta(meta_path: &Path) -> Result<SnapshotMeta, AfuseError> {
     SnapshotMeta::read_from(meta_path)
 }
+
+pub fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                use std::fmt::Write;
+                let _ = write!(&mut out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+pub fn sanitize_terminal_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                use std::fmt::Write;
+                let _ = write!(&mut out, "\\x{:02x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}

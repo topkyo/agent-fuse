@@ -19,6 +19,7 @@ pub mod apfs;
 pub mod diff;
 pub mod doctor;
 pub mod error;
+pub(crate) mod fs_guard;
 pub mod guard;
 pub mod hook;
 pub mod hook_config;
@@ -35,12 +36,15 @@ pub mod unicode_norm;
 pub mod upgrade;
 pub mod upgrade_json;
 pub mod vault;
+mod vault_policy;
 
 pub use apfs::{
     clonefile_nofollow, force_remove_all, fsgetpath, lstat_inode_mode, real_home_dir, short_hash,
     statfs_info, StatFsInfo,
 };
-pub use doctor::{format_doctor_json, run_doctor, run_doctor_with_vault, DoctorReport};
+pub use doctor::{
+    format_doctor_json, run_doctor, run_doctor_with_opts, run_doctor_with_vault, DoctorReport,
+};
 pub use error::{
     AfuseError, ERR_EACCES, ERR_EEXIST, ERR_EINVAL, ERR_ENOENT, ERR_ENOTSUP, ERR_EPERM,
     ERR_USAGE, ERR_EWOULDBLOCK, ERR_EXDEV, EXIT_FUSE_TRIPPED,
@@ -90,5 +94,7 @@ mod tests;
 mod tests_invariants;
 #[cfg(test)]
 mod tests_phase2;
+#[cfg(test)]
+mod tests_round3;
 #[cfg(test)]
 mod tests_trash_targets;

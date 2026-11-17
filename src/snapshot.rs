@@ -1,10 +1,12 @@
-use crate::apfs::{clonefile_nofollow, force_remove_all, lstat_inode_mode, TMP_SEQ};
+use crate::apfs::{force_remove_all, lstat_inode_mode, TMP_SEQ};
 use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
 pub use crate::diff::{diff_snapshot, diff_snapshot_with_vault, DiffReport};
+use crate::fs_guard::clonefile_readable;
 use crate::manifest::{
     clone_filtered_tree, compute_fast_fingerprint, compute_single_file_manifest,
     compute_tree_manifest, count_project_files, read_meta, write_meta, SnapshotMeta,
 };
+use crate::prune::{dedup_and_calibrate_history_unlocked, snap_tree_fast_fp};
 pub use crate::restore::{
     restore_snapshot, restore_snapshot_paths, restore_snapshot_paths_with_vault,
     restore_snapshot_with_vault, RestoreReport,
@@ -72,18 +74,6 @@ pub fn create_snapshot_opts_with_vault(
     create_snapshot_unlocked_opts(&ws, &ws_vault, label, false)
 }
 
-fn snap_tree_fast_fp(ws_vault: &Path, meta: &SnapshotMeta) -> Option<String> {
-    if meta.tree_sha256.starts_with("fast:") {
-        return Some(meta.tree_sha256.clone());
-    }
-    let tree_dir = ws_vault.join("snapshots").join(&meta.id).join("tree");
-    if meta.target_kind == TargetKind::SingleFile {
-        let f = fs::read_dir(&tree_dir).ok()?.flatten().map(|e| e.path()).find(|p| p.is_file())?;
-        return compute_fast_fingerprint(&f, TargetKind::SingleFile).ok().map(|x| x.0);
-    }
-    compute_fast_fingerprint(&tree_dir, TargetKind::Directory).ok().map(|x| x.0)
-}
-
 pub(crate) fn create_snapshot_fast_dedup_unlocked(
     ws: &Path,
     ws_vault: &Path,
@@ -124,7 +114,7 @@ pub fn create_snapshot_if_changed_with_vault(
     let (ws, ws_vault) = prepare_live_workspace_vault_with(workspace, vault_override)?;
     let _guard = lock_vault(&ws_vault)?;
     let existing = list_snapshots_unlocked(&ws_vault)?;
-    if let Some(latest) = existing.first() {
+    if let Some(latest) = existing.iter().find(|m| m.label != "auto:pre-restore") {
         let (live_sha, _, _, _) = if ws.is_file() {
             compute_single_file_manifest(&ws)?
         } else {
@@ -180,7 +170,7 @@ pub(crate) fn create_snapshot_unlocked_opts(
                 let fname = ws
                     .file_name()
                     .ok_or_else(|| AfuseError::new(ERR_EINVAL, "missing single-file name"))?;
-                clonefile_nofollow(ws, &tree_dir.join(fname))
+                clonefile_readable(ws, &tree_dir.join(fname))
             })
     } else {
         clone_filtered_tree(ws, &tree_dir)
@@ -202,25 +192,25 @@ pub(crate) fn create_snapshot_unlocked_opts(
         let (sha, fc, lb, _) = compute_tree_manifest(&tree_dir)?;
         (sha, fc, lb)
     };
-    if label.starts_with("auto:")
-        && label != "auto:pre-restore"
-        && target_kind == TargetKind::Directory
-        && file_count == 0
-        && list_snapshots_unlocked(ws_vault)?.iter().any(|m| m.file_count > 0)
-    {
-        let _ = force_remove_all(&snap_dir);
-        return Err(AfuseError::new(
-            ERR_EINVAL,
-            "refusing auto-snapshot of empty directory while non-empty history exists",
-        ));
-    }
-
-    record_snapshot_inodes(ws, target_kind, &snap_dir, ws_vault);
     let project_files = if target_kind == TargetKind::SingleFile {
         1
     } else {
         count_project_files(&tree_dir, TargetKind::Directory)
     };
+    if label.starts_with("auto:") && label != "auto:pre-restore" && target_kind == TargetKind::Directory {
+        let prior = list_snapshots_unlocked(ws_vault)?;
+        let empty_tree = file_count == 0 && prior.iter().any(|m| m.file_count > 0 || m.project_files > 0);
+        let empty_proj = project_files == 0 && prior.iter().any(|m| m.project_files > 0);
+        if empty_tree || empty_proj {
+            let _ = force_remove_all(&snap_dir);
+            return Err(AfuseError::new(
+                ERR_EINVAL,
+                "refusing auto-snapshot of empty directory while non-empty history exists",
+            ));
+        }
+    }
+
+    record_snapshot_inodes(ws, target_kind, &snap_dir, ws_vault);
 
     let meta = SnapshotMeta {
         id: snap_id,
@@ -261,6 +251,7 @@ fn enforce_auto_snap_quota_unlocked(ws_vault: &Path, label: &str) -> Result<(), 
     if !label.starts_with("auto:") {
         return Ok(());
     }
+    let _ = dedup_and_calibrate_history_unlocked(ws_vault)?;
     let max_keep = std::env::var("AFUSE_MAX_AUTO_SNAPS").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(50);
     if max_keep == 0 {
         return Ok(());
@@ -292,8 +283,9 @@ pub(crate) fn list_snapshots_unlocked(ws_vault: &Path) -> Result<Vec<SnapshotMet
     let mut out = Vec::new();
     if let Ok(rd) = fs::read_dir(ws_vault.join("snapshots")) {
         for entry in rd.flatten() {
-            let meta_path = entry.path().join("meta.kv");
-            if meta_path.is_file() {
+            let snap_dir = entry.path();
+            let meta_path = snap_dir.join("meta.kv");
+            if meta_path.is_file() && snap_dir.join("tree").is_dir() {
                 if let Ok(m) = read_meta(&meta_path) {
                     out.push(m);
                 }
@@ -333,8 +325,9 @@ pub(crate) fn resolve_snapshot_id(
         && !target.contains('\\')
         && !target.contains("..")
     {
-        let direct_meta = ws_vault.join("snapshots").join(target).join("meta.kv");
-        if direct_meta.is_file() {
+        let snap_dir = ws_vault.join("snapshots").join(target);
+        let direct_meta = snap_dir.join("meta.kv");
+        if direct_meta.is_file() && snap_dir.join("tree").is_dir() {
             return read_meta(&direct_meta);
         }
     }
