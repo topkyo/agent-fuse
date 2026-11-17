@@ -147,6 +147,15 @@ pub(crate) fn refresh_latest_inodes(ws: &Path, kind: TargetKind, ws_vault: &Path
     let _ = write_latest_with_retained(ws, kind, ws_vault, &retained);
 }
 
+pub(crate) fn record_live_target_inode_if_new(ws: &Path, kind: TargetKind, ws_vault: &Path) {
+    let Ok((live_ino, _)) = lstat_inode_mode(ws) else { return };
+    if live_ino == 0 {
+        return;
+    }
+    let retained = update_retained_root_inodes(ws_vault, &[live_ino], &BTreeSet::new());
+    let _ = write_latest_with_retained(ws, kind, ws_vault, &retained);
+}
+
 pub fn allowed_trash_roots() -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut push_if_ok = |p: PathBuf| {

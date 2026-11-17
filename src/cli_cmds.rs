@@ -133,9 +133,9 @@ pub(crate) fn cmd_snap(workspace: &Path, rest: &[String], mut json: bool) {
         Ok((m, dedup)) => {
             if json {
                 println!(
-                    "{{\"ok\":true,\"id\":\"{}\",\"label\":\"{}\",\"deduplicated\":{},\"created_ms\":{},\"root_inode\":{},\"file_count\":{},\"logical_bytes\":{},\"tree_sha256\":\"{}\",\"elapsed_us\":{}}}",
+                    "{{\"ok\":true,\"id\":\"{}\",\"label\":\"{}\",\"deduplicated\":{},\"created_ms\":{},\"root_inode\":{},\"file_count\":{},\"project_files\":{},\"logical_bytes\":{},\"tree_sha256\":\"{}\",\"elapsed_us\":{}}}",
                     json_escape(&m.id), json_escape(&m.label), dedup, m.created_ms,
-                    m.root_inode, m.file_count, m.logical_bytes, json_escape(&m.tree_sha256), m.elapsed_us
+                    m.root_inode, m.file_count, m.project_files, m.logical_bytes, json_escape(&m.tree_sha256), m.elapsed_us
                 );
             } else if dedup {
                 println!(
@@ -156,11 +156,16 @@ pub(crate) fn cmd_snap(workspace: &Path, rest: &[String], mut json: bool) {
 
 pub(crate) fn cmd_validate(workspace: &Path, rest: &[String], mut json: bool) {
     let mut candidate: Option<PathBuf> = None;
+    let mut end_of_opts = false;
     for a in rest {
-        if handle_common_sub_flag(a, "validate", &mut json) {
+        if !end_of_opts && a == "--" {
+            end_of_opts = true;
             continue;
         }
-        if a.starts_with('-') {
+        if !end_of_opts && handle_common_sub_flag(a, "validate", &mut json) {
+            continue;
+        }
+        if !end_of_opts && a.starts_with('-') {
             crate::emit_error(json, &AfuseError::new(22, "unknown validate option"));
         }
         if candidate.is_some() {
@@ -201,9 +206,9 @@ pub(crate) fn cmd_list(workspace: &Path, rest: &[String], mut json: bool) {
                     .iter()
                     .map(|m| {
                         format!(
-                            "{{\"id\":\"{}\",\"label\":\"{}\",\"created_ms\":{},\"file_count\":{},\"logical_bytes\":{},\"tree_sha256\":\"{}\",\"elapsed_us\":{}}}",
+                            "{{\"id\":\"{}\",\"label\":\"{}\",\"created_ms\":{},\"file_count\":{},\"project_files\":{},\"logical_bytes\":{},\"tree_sha256\":\"{}\",\"elapsed_us\":{}}}",
                             json_escape(&m.id), json_escape(&m.label), m.created_ms,
-                            m.file_count, m.logical_bytes, json_escape(&m.tree_sha256), m.elapsed_us
+                            m.file_count, m.project_files, m.logical_bytes, json_escape(&m.tree_sha256), m.elapsed_us
                         )
                     })
                     .collect();

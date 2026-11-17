@@ -1,30 +1,31 @@
 use crate::apfs::{clonefile_nofollow, force_remove_all, lstat_inode_mode, TMP_SEQ};
 use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
+pub use crate::diff::{diff_snapshot, diff_snapshot_with_vault, DiffReport};
 use crate::manifest::{
     clone_filtered_tree, compute_fast_fingerprint, compute_single_file_manifest,
-    compute_tree_manifest, read_meta, write_meta, SnapshotMeta,
+    compute_tree_manifest, count_project_files, read_meta, write_meta, SnapshotMeta,
 };
 pub use crate::restore::{
     restore_snapshot, restore_snapshot_paths, restore_snapshot_paths_with_vault,
     restore_snapshot_with_vault, RestoreReport,
 };
-use crate::trash::record_snapshot_inodes;
-use crate::unicode_norm::canonical_rel_key;
+use crate::trash::{record_live_target_inode_if_new, record_snapshot_inodes};
 use crate::vault::{
     lock_vault, prepare_live_workspace_vault_with, resolve_workspace_vault_recovery, TargetKind,
+    VaultLock,
 };
-use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone)]
-pub struct DiffReport {
-    pub snapshot_id: String,
-    pub added: Vec<String>,
-    pub modified: Vec<String>,
-    pub deleted: Vec<String>,
+pub(crate) fn lock_vault_and_resolve(
+    workspace: &Path,
+    vault_override: Option<&Path>,
+) -> Result<(PathBuf, PathBuf, VaultLock), AfuseError> {
+    let (ws, ws_vault) = resolve_workspace_vault_recovery(workspace, vault_override)?;
+    let guard = lock_vault(&ws_vault)?;
+    Ok((ws, ws_vault, guard))
 }
 
 pub fn create_snapshot(workspace: &Path, label: &str) -> Result<SnapshotMeta, AfuseError> {
@@ -83,6 +84,28 @@ fn snap_tree_fast_fp(ws_vault: &Path, meta: &SnapshotMeta) -> Option<String> {
     compute_fast_fingerprint(&tree_dir, TargetKind::Directory).ok().map(|x| x.0)
 }
 
+pub(crate) fn create_snapshot_fast_dedup_unlocked(
+    ws: &Path,
+    ws_vault: &Path,
+    label: &str,
+) -> Result<(SnapshotMeta, bool), AfuseError> {
+    let kind = if ws.is_file() { TargetKind::SingleFile } else { TargetKind::Directory };
+    if label.starts_with("auto:") && label != "auto:pre-restore" {
+        if let Ok((cur_fp, _, _)) = compute_fast_fingerprint(ws, kind) {
+            let existing = list_snapshots_unlocked(ws_vault)?;
+            if let Some(latest) = existing.iter().find(|m| m.label != "auto:pre-restore") {
+                if snap_tree_fast_fp(ws_vault, latest).as_deref() == Some(cur_fp.as_str()) {
+                    if kind == TargetKind::SingleFile {
+                        record_live_target_inode_if_new(ws, kind, ws_vault);
+                    }
+                    return Ok((latest.clone(), true));
+                }
+            }
+        }
+    }
+    Ok((create_snapshot_unlocked_opts(ws, ws_vault, label, true)?, false))
+}
+
 pub fn create_snapshot_fast_dedup_with_vault(
     workspace: &Path,
     vault_override: Option<&Path>,
@@ -90,18 +113,7 @@ pub fn create_snapshot_fast_dedup_with_vault(
 ) -> Result<(SnapshotMeta, bool), AfuseError> {
     let (ws, ws_vault) = prepare_live_workspace_vault_with(workspace, vault_override)?;
     let _guard = lock_vault(&ws_vault)?;
-    let kind = if ws.is_file() { TargetKind::SingleFile } else { TargetKind::Directory };
-    if label == "auto:pro:fsevents" {
-        if let Ok((cur_fp, _, _)) = compute_fast_fingerprint(&ws, kind) {
-            let existing = list_snapshots_unlocked(&ws_vault)?;
-            if let Some(latest) = existing.iter().find(|m| m.label != "auto:pre-restore") {
-                if snap_tree_fast_fp(&ws_vault, latest).as_deref() == Some(cur_fp.as_str()) {
-                    return Ok((latest.clone(), true));
-                }
-            }
-        }
-    }
-    Ok((create_snapshot_unlocked_opts(&ws, &ws_vault, label, true)?, false))
+    create_snapshot_fast_dedup_unlocked(&ws, &ws_vault, label)
 }
 
 pub fn create_snapshot_if_changed_with_vault(
@@ -204,6 +216,11 @@ pub(crate) fn create_snapshot_unlocked_opts(
     }
 
     record_snapshot_inodes(ws, target_kind, &snap_dir, ws_vault);
+    let project_files = if target_kind == TargetKind::SingleFile {
+        1
+    } else {
+        count_project_files(&tree_dir, TargetKind::Directory)
+    };
 
     let meta = SnapshotMeta {
         id: snap_id,
@@ -217,6 +234,7 @@ pub(crate) fn create_snapshot_unlocked_opts(
         root_inode,
         root_mode: root_mode & 0o7777,
         file_count,
+        project_files,
         logical_bytes,
         tree_sha256,
         elapsed_us: clone_elapsed_us,
@@ -227,8 +245,20 @@ pub(crate) fn create_snapshot_unlocked_opts(
     Ok(meta)
 }
 
+const MAX_PRE_RESTORE_SNAPS: usize = 10;
+
 fn enforce_auto_snap_quota_unlocked(ws_vault: &Path, label: &str) -> Result<(), AfuseError> {
-    if !label.starts_with("auto:") || label == "auto:pre-restore" {
+    if label == "auto:pre-restore" {
+        for m in list_snapshots_unlocked(ws_vault)?
+            .into_iter()
+            .filter(|m| m.label == "auto:pre-restore")
+            .skip(MAX_PRE_RESTORE_SNAPS)
+        {
+            force_remove_all(&ws_vault.join("snapshots").join(&m.id))?;
+        }
+        return Ok(());
+    }
+    if !label.starts_with("auto:") {
         return Ok(());
     }
     let max_keep = std::env::var("AFUSE_MAX_AUTO_SNAPS").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(50);
@@ -312,66 +342,4 @@ pub(crate) fn resolve_snapshot_id(
         ERR_ENOENT,
         format!("snapshot '{}' not found", target),
     ))
-}
-
-pub fn diff_snapshot(workspace: &Path, target_id: &str) -> Result<DiffReport, AfuseError> {
-    diff_snapshot_with_vault(workspace, None, target_id)
-}
-
-pub fn diff_snapshot_with_vault(
-    workspace: &Path,
-    vault_override: Option<&Path>,
-    target_id: &str,
-) -> Result<DiffReport, AfuseError> {
-    let (ws, ws_vault) = resolve_workspace_vault_recovery(workspace, vault_override)?;
-    if !ws_vault.join("snapshots").is_dir() {
-        return Err(AfuseError::new(ERR_ENOENT, "no snapshots exist for this workspace"));
-    }
-    let _guard = lock_vault(&ws_vault)?;
-    let meta = resolve_snapshot_id(&ws_vault, target_id)?;
-    let snap_tree = ws_vault.join("snapshots").join(&meta.id).join("tree");
-
-    let (_, _, _, snap_map) = compute_tree_manifest(&snap_tree)?;
-    let live_map = if meta.target_kind == TargetKind::SingleFile {
-        match fs::symlink_metadata(&ws) {
-            Ok(m) if !m.file_type().is_symlink() && m.file_type().is_file() => {
-                compute_single_file_manifest(&ws)?.3
-            }
-            _ => BTreeMap::new(),
-        }
-    } else if ws.is_dir() {
-        compute_tree_manifest(&ws)?.3
-    } else {
-        BTreeMap::new()
-    };
-
-    let mut snap_norm = BTreeMap::new();
-    for (k, v) in snap_map {
-        snap_norm.insert(canonical_rel_key(&k), (k, v));
-    }
-    let mut live_norm = BTreeMap::new();
-    for (k, v) in live_map {
-        live_norm.insert(canonical_rel_key(&k), (k, v));
-    }
-
-    let mut added = Vec::new();
-    let mut modified = Vec::new();
-    let mut deleted = Vec::new();
-
-    let all_keys: BTreeSet<&String> = snap_norm.keys().chain(live_norm.keys()).collect();
-    for k in all_keys {
-        match (snap_norm.get(k), live_norm.get(k)) {
-            (None, Some((live_k, _))) => added.push(live_k.clone()),
-            (Some((snap_k, _)), None) => deleted.push(snap_k.clone()),
-            (Some((snap_k, sv)), Some((_, lv))) if sv != lv => modified.push(snap_k.clone()),
-            _ => {}
-        }
-    }
-
-    Ok(DiffReport {
-        snapshot_id: meta.id,
-        added,
-        modified,
-        deleted,
-    })
 }

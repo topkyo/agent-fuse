@@ -16,6 +16,7 @@
 //! - `upgrade_json` / `upgrade`: Opt-in manual release check & SHA-256 verified self-upgrade.
 
 pub mod apfs;
+pub mod diff;
 pub mod doctor;
 pub mod error;
 pub mod guard;
@@ -63,12 +64,12 @@ pub use restore::{
     restore_snapshot, restore_snapshot_paths, restore_snapshot_paths_with_vault,
     restore_snapshot_with_vault, RestoreReport,
 };
+pub use diff::{diff_snapshot, diff_snapshot_with_vault, DiffReport};
 pub use snapshot::{
     create_snapshot, create_snapshot_fast, create_snapshot_fast_dedup,
     create_snapshot_fast_dedup_with_vault, create_snapshot_if_changed,
     create_snapshot_if_changed_with_vault, create_snapshot_opts_with_vault,
-    create_snapshot_with_vault, diff_snapshot, diff_snapshot_with_vault, list_snapshots,
-    list_snapshots_with_vault, DiffReport,
+    create_snapshot_with_vault, list_snapshots, list_snapshots_with_vault,
 };
 pub use trash::{allowed_trash_roots, TrashCleanupStatus};
 pub use upgrade::{

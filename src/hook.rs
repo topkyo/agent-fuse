@@ -4,7 +4,7 @@ use crate::hook_json::{extract_bash_candidate_paths, is_supported_claude_tool};
 pub use crate::hook_json::{parse_claude_hook_json, ClaudeHookPayload};
 use crate::manifest::SnapshotMeta;
 use crate::prune::{prune_unlocked, ORPHAN_MAX_AGE_SECS};
-use crate::snapshot::create_snapshot_unlocked_opts;
+use crate::snapshot::create_snapshot_fast_dedup_unlocked;
 use crate::vault::{
     prepare_workspace_vault_with, resolve_workspace_vault_recovery, try_lock_vault,
     validate_workspace_binding_with_vault, PROJECT_MARKERS,
@@ -174,7 +174,7 @@ pub fn execute_hook_auto_snap(
     } else {
         format!("auto:hook:{}", label)
     };
-    let meta = create_snapshot_unlocked_opts(&ws, &ws_vault, &clean_label, true)?;
+    let (meta, _) = create_snapshot_fast_dedup_unlocked(&ws, &ws_vault, &clean_label)?;
     let _ = prune_unlocked(&ws_vault, HOOK_MAX_AUTO_SNAPS, Some("auto:hook:"), ORPHAN_MAX_AGE_SECS);
     Ok(Some(meta))
 }

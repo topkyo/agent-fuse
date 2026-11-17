@@ -95,29 +95,25 @@ pub fn reject_forbidden_workspace_paths(ws: &Path) -> Result<PathBuf, AfuseError
     {
         return Err(AfuseError::new(ERR_EINVAL, "binding system root, HOME, or top-level Desktop/Documents/Downloads folder itself is forbidden"));
     }
-    let mut forbidden_subtrees = vec![
+    let forbidden_subtrees = vec![
         PathBuf::from("/System"), PathBuf::from("/Library"), PathBuf::from("/Applications"),
         PathBuf::from("/bin"), PathBuf::from("/sbin"), PathBuf::from("/usr"),
         PathBuf::from("/dev"), PathBuf::from("/etc"), PathBuf::from("/private/etc"), PathBuf::from("/cores"),
         real_home.join(".agent-fuse"), real_home.join(".Trash"), real_home.join("Library"),
     ];
-    if let Ok(tdir) = env::var("AFUSE_TRASH_DIR") {
-        if !tdir.trim().is_empty() {
-            forbidden_subtrees.push(PathBuf::from(tdir.trim()));
-        }
-    }
-    for sub in &forbidden_subtrees {
+    let env_paths: Vec<PathBuf> = ["AFUSE_TRASH_DIR"]
+        .iter()
+        .filter_map(|k| env::var(k).ok().filter(|s| !s.trim().is_empty()).map(|s| PathBuf::from(s.trim())))
+        .collect();
+    for sub in forbidden_subtrees.iter().chain(env_paths.iter()) {
         let canon_sub = resolve_norm_or_canon(sub);
         if ws == sub || ws.starts_with(sub) || ws == &canon_sub || ws.starts_with(&canon_sub) {
             return Err(AfuseError::new(ERR_EINVAL, "binding protected/system/trash subtree is forbidden"));
         }
     }
-    if let Ok(vdir) = env::var("AFUSE_VAULT_DIR") {
-        if !vdir.trim().is_empty() {
-            let v_canon = resolve_norm_or_canon(Path::new(vdir.trim()));
-            if ws == &v_canon || ws.starts_with(&v_canon) || v_canon.starts_with(ws) {
-                return Err(AfuseError::new(ERR_EINVAL, "self-ingestion forbidden: vault and target must not overlap"));
-            }
+    if let Some(v_canon) = env::var("AFUSE_VAULT_DIR").ok().filter(|s| !s.trim().is_empty()).map(|s| resolve_norm_or_canon(Path::new(s.trim()))) {
+        if ws == &v_canon || ws.starts_with(&v_canon) || v_canon.starts_with(ws) {
+            return Err(AfuseError::new(ERR_EINVAL, "self-ingestion forbidden: vault and target must not overlap"));
         }
     }
     Ok(real_home)
@@ -182,7 +178,7 @@ pub fn validate_workspace_binding_with_vault(
     vault_override: Option<&Path>,
 ) -> Result<ValidatedWorkspace, AfuseError> {
     let (ws, meta, marker, kind) = check_workspace_path_rules(candidate)?;
-    let (_, _ws_vault) = prepare_live_workspace_vault_with(&ws, vault_override)?;
+    let (_, _ws_vault) = workspace_vault_common(&ws, stat_dir_for(&ws), vault_override, false)?;
     Ok(ValidatedWorkspace {
         canonical_path: ws,
         dev: meta.dev(),
@@ -338,17 +334,33 @@ pub fn prepare_workspace_vault_with(
     prepare_live_workspace_vault_with(workspace, vault_override)
 }
 
+fn resolve_parent_keep_leaf(trimmed: &Path) -> Result<(PathBuf, PathBuf), AfuseError> {
+    let norm = lexical_normalize_path(trimmed)?;
+    let Some(name) = norm.file_name().map(|n| n.to_os_string()) else {
+        return Err(AfuseError::new(ERR_EINVAL, "target path has no leaf component"));
+    };
+    let parent = norm.parent().unwrap_or(Path::new("/"));
+    let canon_parent = fs::canonicalize(parent).map_err(|e| {
+        AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), "workspace ancestor path is inaccessible")
+    })?;
+    Ok((canon_parent.join(name), canon_parent))
+}
+
 pub fn resolve_workspace_vault_recovery(
     workspace: &Path,
     vault_override: Option<&Path>,
 ) -> Result<(PathBuf, PathBuf), AfuseError> {
     let trimmed = strip_trailing_slashes(workspace);
-    if fs::symlink_metadata(&trimmed).is_ok() {
-        let (_, _) = verify_leaf_regular_or_dir(&trimmed)?;
-        let ws = fs::canonicalize(&trimmed).map_err(|e| {
-            AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), "target path does not exist or is inaccessible")
-        })?;
-        return workspace_vault_common(&ws, stat_dir_for(&ws), vault_override, false);
+    if let Ok(sym) = fs::symlink_metadata(&trimmed) {
+        let ft = sym.file_type();
+        if !ft.is_symlink() && (ft.is_dir() || ft.is_file()) {
+            let ws = fs::canonicalize(&trimmed).map_err(|e| {
+                AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), "target path does not exist or is inaccessible")
+            })?;
+            return workspace_vault_common(&ws, stat_dir_for(&ws), vault_override, false);
+        }
+        let (ws, stat_dir) = resolve_parent_keep_leaf(&trimmed)?;
+        return workspace_vault_common(&ws, &stat_dir, vault_override, false);
     }
     let (ws, stat_dir) = resolve_via_existing_ancestor(workspace)?;
     workspace_vault_common(&ws, &stat_dir, vault_override, false)

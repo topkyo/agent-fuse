@@ -149,6 +149,7 @@ HOOK_VAULT="$TMP_SANDBOX/hook-vault"
 mkdir -p "$HOOK_REPO/.git" "$HOOK_REPO/src" "$HOOK_VAULT"
 echo "hello" > "$HOOK_REPO/src/a.rs"
 AFUSE_VAULT_DIR="$HOOK_VAULT" "$BIN_PATH" --workspace "$HOOK_REPO" snap -m "manual-milestone" >/dev/null
+echo "pending-edit" > "$HOOK_REPO/src/pending.rs"
 
 for idx in $(seq 1 50); do
   printf '{"cwd":"%s","tool_name":"Write","tool_input":{"file_path":"src/a.rs"}}' "$HOOK_REPO" \

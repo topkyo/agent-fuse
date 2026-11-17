@@ -357,27 +357,25 @@ pub(crate) fn cmd_upgrade(rest: &[String], mut json: bool) {
     }
 }
 
-fn parse_doctor_args(
-    rest: &[String],
-    default_json: bool,
-) -> Result<(bool, Option<PathBuf>, bool), AfuseError> {
-    let mut json = default_json;
-    let mut doc_ws: Option<PathBuf> = None;
-    let mut want_help = false;
+fn parse_doctor_args(rest: &[String], default_json: bool) -> Result<(bool, Option<PathBuf>, bool), AfuseError> {
+    let (mut json, mut doc_ws, mut want_help, mut end_opts) = (default_json, None, false, false);
     for arg in rest {
-        match arg.as_str() {
-            "--help" | "-h" => want_help = true,
-            "--json" => json = true,
-            flag if flag.starts_with('-') => {
-                return Err(AfuseError::new(22, "unknown doctor option"));
-            }
-            dir => {
-                if doc_ws.is_some() {
-                    return Err(AfuseError::new(22, "doctor accepts at most one [<DIR>] argument"));
-                }
-                doc_ws = Some(PathBuf::from(dir));
+        if !end_opts && arg == "--" {
+            end_opts = true;
+            continue;
+        }
+        if !end_opts {
+            match arg.as_str() {
+                "--help" | "-h" => { want_help = true; continue; }
+                "--json" => { json = true; continue; }
+                flag if flag.starts_with('-') => return Err(AfuseError::new(22, "unknown doctor option")),
+                _ => {}
             }
         }
+        if doc_ws.is_some() {
+            return Err(AfuseError::new(22, "doctor accepts at most one [<DIR>] argument"));
+        }
+        doc_ws = Some(PathBuf::from(arg));
     }
     Ok((json, doc_ws, want_help))
 }

@@ -214,6 +214,10 @@ mod tests_phase2 {
         assert!(run_claude_hook_exec_from_reader(Cursor::new(json_ro), Some(&vault)).is_none());
 
         let json_mcp_w = format!(r#"{{"cwd":"{}","tool_name":"mcp__filesystem__write_file","tool_input":{{"file_path":"important.md"}}}}"#, docs.display());
+        let deduped = run_claude_hook_exec_from_reader(Cursor::new(&json_mcp_w), Some(&vault)).expect("deduped mcp write");
+        assert!(deduped.workspace.ends_with("important.md"));
+        assert_eq!(list_snapshots_with_vault(&target, Some(&vault)).unwrap().len(), 1);
+        fs::write(&target, b"modified-doc").unwrap();
         let snapped = run_claude_hook_exec_from_reader(Cursor::new(json_mcp_w), Some(&vault)).expect("bound subfile via mcp write");
         assert!(snapped.workspace.ends_with("important.md"));
         assert_eq!(list_snapshots_with_vault(&target, Some(&vault)).unwrap().len(), 2);

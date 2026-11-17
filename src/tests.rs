@@ -831,7 +831,7 @@ struct ScopedDir(PathBuf);
 
         let snap = create_snapshot_with_vault(&ws, Some(&vault), "utf8-v1").unwrap();
 
-        let backslash_err = restore_snapshot_paths_with_vault(
+        let missing_bs = restore_snapshot_paths_with_vault(
             &ws,
             Some(&vault),
             &snap.id,
@@ -839,7 +839,7 @@ struct ScopedDir(PathBuf);
             &[String::from("sub\\file.txt")],
         )
         .unwrap_err();
-        assert_eq!(backslash_err.code, ERR_EINVAL);
+        assert_eq!(missing_bs.code, ERR_ENOENT);
 
         let _ = fs::set_permissions(&target, fs::Permissions::from_mode(0o644));
         fs::write(&target, "被破坏的内容\n").unwrap();
@@ -899,4 +899,114 @@ struct ScopedDir(PathBuf);
         if vault.exists() {
             assert_eq!(fs::read_dir(&vault).unwrap().count(), 0);
         }
+    }
+
+    #[test]
+    fn blindspot_01_to_09_kernel_regressions() {
+        let sandbox = ScopedDir::new("blindspots");
+        let vault = sandbox.0.join("vault");
+
+        // BLINDSPOT-01: selective restore on subtree preserves nested ignored dirs
+        let ws1 = sandbox.0.join("ws1");
+        fs::create_dir_all(ws1.join("packages/app/node_modules/pkg")).unwrap();
+        fs::write(ws1.join("packages/app/node_modules/pkg/index.js"), b"keep-nm\n").unwrap();
+        fs::write(ws1.join("packages/app/src.rs"), b"v1\n").unwrap();
+        let s1 = create_snapshot_with_vault(&ws1, Some(&vault), "v1").unwrap();
+        fs::write(ws1.join("packages/app/src.rs"), b"corrupt\n").unwrap();
+        restore_snapshot_paths_with_vault(&ws1, Some(&vault), &s1.id, true, &["packages/app".to_string()]).unwrap();
+        assert_eq!(fs::read_to_string(ws1.join("packages/app/src.rs")).unwrap(), "v1\n");
+        assert_eq!(fs::read_to_string(ws1.join("packages/app/node_modules/pkg/index.js")).unwrap(), "keep-nm\n");
+
+        // BLINDSPOT-02 & 03: FIFO pipe + 0o555 readonly dir filtered snapshot, restore & prune
+        let ws2 = sandbox.0.join("ws2");
+        let ro_sub = ws2.join("ro_dir");
+        fs::create_dir_all(ro_sub.join("target")).unwrap();
+        fs::write(ro_sub.join("target/junk.o"), b"ignored").unwrap();
+        fs::write(ro_sub.join("keep.txt"), b"readonly-ok\n").unwrap();
+        let st_fifo = std::process::Command::new("mkfifo").arg(ro_sub.join("pipe.fifo")).status().unwrap();
+        assert!(st_fifo.success());
+        fs::set_permissions(&ro_sub, fs::Permissions::from_mode(0o555)).unwrap();
+        let (s2, _) = create_snapshot_fast_dedup_with_vault(&ws2, Some(&vault), "auto:pro:init").unwrap();
+        let diff2 = diff_snapshot_with_vault(&ws2, Some(&vault), &s2.id).unwrap();
+        assert!(diff2.added.is_empty() && diff2.deleted.is_empty());
+        let ro_vault_mode = fs::symlink_metadata(
+            prepare_live_workspace_vault_with(&ws2, Some(&vault)).unwrap().1
+                .join("snapshots").join(&s2.id).join("tree/ro_dir"),
+        ).unwrap().permissions().mode() & 0o777;
+        assert_eq!(ro_vault_mode, 0o555);
+        prune_snapshots_filtered_with_vault(&ws2, Some(&vault), 0, None).unwrap();
+        let _ = fs::set_permissions(&ro_sub, fs::Permissions::from_mode(0o755));
+
+        // BLINDSPOT-04: heterogeneous / symlink replacement on bound dir & single file
+        let ws3 = sandbox.0.join("ws3_dir");
+        let decoy = sandbox.0.join("decoy_dir");
+        fs::create_dir_all(&ws3).unwrap();
+        fs::create_dir_all(&decoy).unwrap();
+        fs::write(ws3.join("real.txt"), b"real-dir-v1").unwrap();
+        fs::write(decoy.join("decoy.txt"), b"decoy").unwrap();
+        let _ = create_snapshot_with_vault(&ws3, Some(&vault), "v1").unwrap();
+        fs::remove_dir_all(&ws3).unwrap();
+        std::os::unix::fs::symlink(&decoy, &ws3).unwrap();
+        let d_sym = diff_snapshot_with_vault(&ws3, Some(&vault), "latest").unwrap();
+        assert!(d_sym.deleted.iter().any(|p| p == "real.txt"));
+        restore_snapshot_with_vault(&ws3, Some(&vault), "latest", true).unwrap();
+        assert!(!fs::symlink_metadata(&ws3).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(ws3.join("real.txt")).unwrap(), "real-dir-v1");
+
+        let sf = sandbox.0.join("single_a\\b.txt");
+        fs::write(&sf, b"single-ok").unwrap();
+        create_snapshot_with_vault(&sf, Some(&vault), "sf1").unwrap();
+        fs::remove_file(&sf).unwrap();
+        std::os::unix::fs::symlink("/etc/hosts", &sf).unwrap();
+        restore_snapshot_with_vault(&sf, Some(&vault), "latest", true).unwrap();
+        assert_eq!(fs::read_to_string(&sf).unwrap(), "single-ok");
+
+        // BLINDSPOT-05 & 06: project_files ignores .git objects & validate/doctor create 0 vault subdirs
+        let ws5 = sandbox.0.join("ws5_git");
+        fs::create_dir_all(ws5.join(".git/objects")).unwrap();
+        fs::write(ws5.join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
+        for k in 0..5 {
+            fs::write(ws5.join(format!(".git/objects/o{}", k)), b"obj").unwrap();
+        }
+        fs::write(ws5.join("main.rs"), b"fn main() {}\n").unwrap();
+        let s5 = create_snapshot_with_vault(&ws5, Some(&vault), "v5").unwrap();
+        assert_eq!(s5.project_files, 1);
+        let r5 = restore_snapshot_with_vault(&ws5, Some(&vault), "latest", false).unwrap();
+        assert_eq!(r5.project_files, 1);
+
+        let unbound = sandbox.0.join("unbound_check");
+        fs::create_dir_all(&unbound).unwrap();
+        let v_clean = sandbox.0.join("vault_clean");
+        fs::create_dir_all(&v_clean).unwrap();
+        let _ = validate_workspace_binding_with_vault(&unbound, Some(&v_clean)).unwrap();
+        let _ = run_doctor_with_vault(&unbound, Some(&v_clean)).unwrap();
+        assert_eq!(fs::read_dir(&v_clean).unwrap().count(), 0);
+
+        // BLINDSPOT-07 & 09: auto:init dedup, pre-restore quota cap=10, backslash selective path
+        let (_, init_dedup) = create_snapshot_fast_dedup_with_vault(&ws5, Some(&vault), "auto:pro:init").unwrap();
+        assert!(init_dedup);
+        for k in 0..14 {
+            fs::write(ws5.join("main.rs"), format!("fn main() {{ /* {} */ }}\n", k)).unwrap();
+            let _ = create_snapshot_opts_with_vault(&ws5, Some(&vault), "auto:pre-restore", true).unwrap();
+        }
+        let (_, ws5_v) = resolve_workspace_vault_recovery(&ws5, Some(&vault)).unwrap();
+        let pre_left = list_snapshots_unlocked(&ws5_v).unwrap().iter().filter(|m| m.label == "auto:pre-restore").count();
+        assert!(pre_left <= 10);
+        assert!(crate::restore_tree::validate_rel_restore_path("dir\\file.txt").is_ok());
+
+        // BLINDSPOT-08: guard without auto_rollback when workspace is deleted exits 77 cleanly
+        let ws8_parent = sandbox.0.join("ws8_host");
+        let ws8 = ws8_parent.join("target");
+        fs::create_dir_all(&ws8).unwrap();
+        fs::write(ws8.join("code.rs"), b"important\n").unwrap();
+        let gcfg = GuardConfig { max_delete: 1, max_write_mb: 128, poll_ms: 10, auto_rollback: false };
+        let grep = run_guarded_command_with_vault(
+            &ws8,
+            Some(&vault),
+            &gcfg,
+            &["sh".to_string(), "-c".to_string(), format!("rm -rf '{}' && sleep 1", ws8.display())],
+        ).unwrap();
+        assert!(grep.tripped);
+        assert_eq!(grep.exit_code, EXIT_FUSE_TRIPPED);
+        assert!(!grep.root_inode_preserved);
     }

@@ -298,10 +298,28 @@ pub fn workspace_has_visible_files(ws: &Path) -> bool {
     false
 }
 
-pub fn validate_rel_restore_path(raw: &str) -> Result<PathBuf, AfuseError> {
-    if raw.contains('\\') {
-        return Err(AfuseError::new(ERR_EINVAL, "selective restore path must not contain backslashes ('\\')"));
+pub(crate) fn clear_heterogeneous_path_if_needed(p: &Path, expect_dir: bool) -> Result<bool, AfuseError> {
+    let Ok(m) = fs::symlink_metadata(p) else {
+        return Ok(false);
+    };
+    let ft = m.file_type();
+    let matches_kind = !ft.is_symlink() && if expect_dir { ft.is_dir() } else { ft.is_file() };
+    if matches_kind {
+        return Ok(false);
     }
+    let mut guard = UnlockedDirsGuard::new();
+    if let Some(parent) = p.parent() {
+        if fs::symlink_metadata(parent).is_ok() {
+            let _ = guard.unlock_if_needed(parent);
+        }
+    }
+    let res = force_remove_all(p);
+    guard.restore_all();
+    res?;
+    Ok(true)
+}
+
+pub fn validate_rel_restore_path(raw: &str) -> Result<PathBuf, AfuseError> {
     if raw.is_empty() || raw.trim().is_empty() || raw.contains('\0') {
         return Err(AfuseError::new(ERR_EINVAL, "selective restore path must be relative"));
     }

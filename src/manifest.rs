@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 fn fast_entry_sig(path: &Path, meta: &fs::Metadata) -> Result<Option<String>, AfuseError> {
@@ -29,9 +29,8 @@ fn fast_entry_sig(path: &Path, meta: &fs::Metadata) -> Result<Option<String>, Af
             meta.mtime(),
             meta.mtime_nsec()
         )))
-    } else if ft.is_fifo() || ft.is_socket() {
-        Ok(Some(format!("S:{:04o}", mode)))
     } else {
+        // Safely skip FIFO pipes, sockets, and device nodes to prevent EINVAL/hangs
         Ok(None)
     }
 }
@@ -83,10 +82,13 @@ pub fn compute_fast_fingerprint(
             let meta = fs::symlink_metadata(&p).map_err(|e| {
                 AfuseError::new(e.raw_os_error().unwrap_or(1), format!("symlink_metadata failed on {}: {}", p.display(), e))
             })?;
+            let ft = meta.file_type();
+            if !ft.is_file() && !ft.is_dir() && !ft.is_symlink() {
+                continue;
+            }
             if let Some(sig) = fast_entry_sig(&p, &meta)? {
                 map.insert(rel, sig);
             }
-            let ft = meta.file_type();
             if ft.is_dir() {
                 walk(base, &p, map, files, bytes)?;
             } else if ft.is_symlink() {
@@ -250,9 +252,8 @@ pub fn compute_tree_manifest(
                 *bytes += meta.len();
                 let fhash = hash_file_streaming(&path)?;
                 map.insert(rel, format!("F:{:04o}:{}:{}", mode, meta.len(), fhash));
-            } else if ft.is_fifo() || ft.is_socket() {
-                map.insert(rel, format!("S:{:04o}", mode));
             }
+            // Skip FIFO pipes, sockets, and special devices safely
         }
         Ok(())
     }
@@ -282,9 +283,10 @@ pub(crate) fn clone_filtered_tree(src_dir: &Path, dst_dir: &Path) -> Result<(), 
         )
     })?;
     let (_, src_mode) = lstat_inode_mode(src_dir)?;
-    let _ = fs::set_permissions(dst_dir, fs::Permissions::from_mode(src_mode & 0o7777));
+    // Keep u+rwx writable while cloning children into dst_dir; apply final mode afterward.
+    let _ = fs::set_permissions(dst_dir, fs::Permissions::from_mode((src_mode & 0o7777) | 0o700));
 
-    fn has_ignored_descendant(dir: &Path) -> bool {
+    fn needs_filtered_walk(dir: &Path) -> bool {
         let Ok(rd) = fs::read_dir(dir) else {
             return false;
         };
@@ -293,8 +295,12 @@ pub(crate) fn clone_filtered_tree(src_dir: &Path, dst_dir: &Path) -> Result<(), 
             if is_ignored_name(&name) {
                 return true;
             }
-            if let Ok(m) = entry.file_type() {
-                if m.is_dir() && name != ".git" && has_ignored_descendant(&entry.path()) {
+            if let Ok(m) = fs::symlink_metadata(entry.path()) {
+                let ft = m.file_type();
+                if !ft.is_file() && !ft.is_dir() && !ft.is_symlink() {
+                    return true;
+                }
+                if ft.is_dir() && name != ".git" && needs_filtered_walk(&entry.path()) {
                     return true;
                 }
             }
@@ -316,15 +322,20 @@ pub(crate) fn clone_filtered_tree(src_dir: &Path, dst_dir: &Path) -> Result<(), 
         }
         let s_child = entry.path();
         let d_child = dst_dir.join(&entry.file_name());
-        let ft = entry
-            .file_type()
-            .map_err(|e| AfuseError::new(1, e.to_string()))?;
-        if ft.is_dir() && name != ".git" && has_ignored_descendant(&s_child) {
+        let meta = fs::symlink_metadata(&s_child).map_err(|e| {
+            AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string())
+        })?;
+        let ft = meta.file_type();
+        if !ft.is_file() && !ft.is_dir() && !ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() && name != ".git" && needs_filtered_walk(&s_child) {
             clone_filtered_tree(&s_child, &d_child)?;
         } else {
             clonefile_nofollow(&s_child, &d_child)?;
         }
     }
+    let _ = fs::set_permissions(dst_dir, fs::Permissions::from_mode(src_mode & 0o7777));
     Ok(())
 }
 

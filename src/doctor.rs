@@ -3,7 +3,7 @@ use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
 use crate::manifest::json_escape;
 use crate::snapshot::list_snapshots_unlocked;
 use crate::vault::{
-    check_workspace_path_rules, prepare_workspace_vault_with, resolve_vault_base,
+    check_workspace_path_rules, resolve_vault_base, resolve_workspace_vault_recovery,
 };
 use std::env;
 use std::fs;
@@ -70,7 +70,7 @@ pub fn run_doctor_with_vault(
             "target path must be a regular directory or regular file",
         ));
     }
-    let target_ws = workspace.to_path_buf();
+    let target_ws = fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     let workspace_valid = check_workspace_path_rules(&target_ws).is_ok();
     let stat_target = if target_ws.is_dir() {
         target_ws.as_path()
@@ -112,8 +112,14 @@ pub fn run_doctor_with_vault(
         }
 
         if vault_writable && workspace_valid {
-            snapshot_count = prepare_workspace_vault_with(&target_ws, Some(&probe_root))
-                .and_then(|(_, ws_vault)| list_snapshots_unlocked(&ws_vault))
+            snapshot_count = resolve_workspace_vault_recovery(&target_ws, Some(&probe_root))
+                .and_then(|(_, ws_vault)| {
+                    if ws_vault.join("snapshots").is_dir() {
+                        list_snapshots_unlocked(&ws_vault)
+                    } else {
+                        Ok(Vec::new())
+                    }
+                })
                 .map(|s| s.len())
                 .unwrap_or(0);
         }

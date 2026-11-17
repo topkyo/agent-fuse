@@ -244,7 +244,7 @@ pub fn run_guarded_command_with_vault(
         verified_sha256 = Some(rep.tree_sha256);
     }
 
-    let (ino_end, _) = lstat_inode_mode(anchor_path)?;
+    let ino_end = lstat_inode_mode(anchor_path).map(|x| x.0).unwrap_or(0);
     Ok(GuardReport {
         baseline_snapshot_id: baseline.id,
         tripped,

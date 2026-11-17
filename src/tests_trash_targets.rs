@@ -136,12 +136,13 @@ mod tests_trash_targets {
         assert_eq!(sib_ino_0, sib_ino_1);
         assert_eq!(fs::read_to_string(&sibling).unwrap(), "sibling-safe");
 
-        // Guard against wrong dir created at target file path
+        // BLINDSPOT-04: heterogeneous dir/symlink at single-file path recovers cleanly
         fs::remove_file(&target).unwrap();
         fs::create_dir_all(target.join("keep")).unwrap();
-        let col_err = restore_snapshot_with_vault(&target, Some(&vault), &snap.id, false).unwrap_err();
-        assert_eq!(col_err.code, ERR_EINVAL);
-        assert!(target.join("keep").is_dir());
+        let dir_rec = restore_snapshot_with_vault(&target, Some(&vault), &snap.id, false).unwrap();
+        assert!(target.is_file());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "v1-original");
+        assert_eq!(dir_rec.restored_files, 1);
     }
 
     #[test]
