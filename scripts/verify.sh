@@ -296,11 +296,13 @@ PY
 
 REL_JSON="$TMP_SANDBOX/release.json"
 echo '{"tag_name":"v0.9.0","html_url":"https://github.com/topkyo/agent-fuse/releases/tag/v0.9.0","assets":[]}' > "$REL_JSON"
+CUR_VER=$("$BIN_PATH" --version | awk '{print $NF}')
 UP_JSON=$(AFUSE_RELEASE_JSON_URL="file://$REL_JSON" "$BIN_PATH" --json upgrade --check)
-python3 - "$UP_JSON" <<'PY'
+python3 - "$UP_JSON" "$CUR_VER" <<'PY'
 import json, sys
 d = json.loads(sys.argv[1])
-assert d["ok"] is True and d["current_version"] == "0.6.1" and d["latest_version"] == "0.9.0" and d["update_available"] is True, d
+cur_ver = sys.argv[2]
+assert d["ok"] is True and d["current_version"] == cur_ver and d["latest_version"] == "0.9.0" and d["update_available"] is True, d
 PY
 
 AFUSE_VAULT_DIR="$SEL_VAULT" AFUSE_MAX_AUTO_SNAPS=2 "$BIN_PATH" --workspace "$SEL_WS" --json snap -m "manual-keep" >/dev/null

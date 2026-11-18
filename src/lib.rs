@@ -1,19 +1,25 @@
 //! `agent-fuse` (`afuse`) — Zero-dependency APFS CoW snapshot & circuit-breaker engine.
 //!
 //! Architecture overview (< 400 LOC per module, 0 external crates, 0 background network calls):
-//! - `sha256`: Pure Rust FIPS 180-4 SHA-256 implementation.
 //! - `error`: Unified errno-backed error type (`AfuseError`) & fuse exit code.
+//! - `sha256`: Pure Rust FIPS 180-4 SHA-256 implementation.
+//! - `unicode_norm`: Pure Rust Unicode NFD decomposition & CCC ordering for APFS path parity.
 //! - `apfs`: Exclusive `unsafe` C-shim boundary (`darwin_shim.c`: `clonefile(2)`,
-//!   `renamex_np(2) RENAME_SWAP`, `statfs64(2)`, `flock(2)`, `fork`/`execvp` in pgroup).
-//! - `vault`: Workspace boundary & project-marker validation (`$HOME`/root refusal,
-//!   same-APFS-volume verification, exclusive vault locking).
-//! - `manifest`: Filtered tree cloning, fast tree stats, Merkle SHA-256 & `meta.kv`.
-//! - `snapshot` / `restore`: Atomic root-Inode-preserving snapshot, diff & selective restore.
-//! - `prune`: Orphan staging cleanup and retention-policy pruning.
-//! - `hook_config` / `hook`: Opt-in zsh preexec & Claude Code PreToolUse auto-snap.
-//! - `guard`: Isolated process-group fuse tripping on runaway deletes or write spikes.
+//!   `renamex_np(2) RENAME_SWAP`, `statfs64(2)`, `flock(2)`, `fsgetpath`, `fork`/`execvp` in pgroup).
+//! - `vault` / `vault_policy`: Arbitrary plain folder (`.git` optional) & single-file (`TargetKind`)
+//!   guardian with physical system/container-root blacklist, same-APFS check & exclusive vault flock.
+//! - `fs_guard`: Temporary readonly permission unlocker & single-file sibling isolation guards.
+//! - `meta`: `SnapshotMeta` key-value serializer, JSON escaping & terminal text sanitizer.
+//! - `manifest`: Filtered tree cloning, fast tree stats, Merkle SHA-256 & `meta.kv` persistence.
+//! - `snapshot` / `diff`: Atomic snapshot creation, fast dedup & NFD-safe workspace diffing.
+//! - `restore` / `restore_tree`: Atomic root-Inode-preserving full/selective restore & ignored-subtree stash.
+//! - `trash`: Darwin `fsgetpath` exact `(fsid, ino)` Trash cleanup & TCC degradation handling.
+//! - `prune`: Orphan staging cleanup, `auto:*` rolling quota GC & label-filtered pruning.
+//! - `hook_json` / `hook_config` / `hook`: Opt-in zsh preexec & Claude Code PreToolUse auto-snap.
+//! - `guard`: Isolated process-group fuse tripping on runaway deletes, renames or truncation spikes.
 //! - `doctor`: Privacy-safe offline APFS & vault health diagnostics.
-//! - `upgrade_json` / `upgrade`: Opt-in manual release check & SHA-256 verified self-upgrade.
+//! - `upgrade_json` / `upgrade_verify` / `upgrade`: Opt-in release check & SHA-256 verified self-upgrade.
+//! - `cli_cmds` / `cli_ops` / `cli_upgrade`: CLI subcommand dispatch & structured `--json` formatting.
 
 pub mod apfs;
 pub mod diff;
