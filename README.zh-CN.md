@@ -1,4 +1,4 @@
-# ⚡️ `agent-fuse` (`afuse`) v0.6.0
+# ⚡️ `agent-fuse` (`afuse`) v0.6.1
 
 **[English](./README.md)** | **简体中文** · **[参与贡献](./CONTRIBUTING.md)** · **[安全策略](./SECURITY.md)**
 
@@ -39,15 +39,15 @@ xattr -cr /Applications/AgentFuse.app
 
 实测硬件基准：**2015 款 MacBook Pro（`Intel Core i5-5257U`，8 GB 内存，`macOS 12.7.6` APFS）**：
 
-| 对比维度 | `git stash -u` | Electron / IDE 内置检查点 | **`agent-fuse` (`afuse` v0.6.0)** |
+| 对比维度 | `git stash -u` | Electron / IDE 内置检查点 | **`agent-fuse` (`afuse` v0.6.1)** |
 | :--- | :--- | :--- | :--- |
 | 未追踪文件 + 脏工作区 + `.git` 索引 | 局部覆盖且争抢 `.git` 锁 | 仅限编辑器已打开文件且漏检 Bash 删除 | **全工作区 + `.git` 核心守护 + 单文件精准恢复（外部 `.noindex` 隔离保险库）** |
 | 142 文件脏仓库快照 / 恢复耗时 | `50–800 ms` | `200–2,000 ms` | **`6.46 ms` 快照 / `12.60 ms` 原位恢复（含安全前备与 SHA-256 校验）** |
-| 1,000 文件 `snap --fast`（钩子模式） | 不支持 | 不支持 | **`27.05 ms`（含完整流式 SHA-256 树哈希为 `47.45 ms`）** |
+| 1,000 文件 `snap --fast`（钩子模式） | 不支持 | 不支持 | **`26.90 ms`（含完整流式 SHA-256 树哈希为 `30.22 ms`）** |
 | 快照瞬间磁盘增量（`t=0`） | 压缩拷贝对象 | 重复文件副本 | **`0 Bytes` 写时复制（`clonefile(2)`）+ 自动配额回收（默认上限 `50`）** |
 | 保持活跃终端 `cwd` 根目录 Inode | 是 | 是 | **是（`renamex_np` 原子目录项交换，无需重进目录）** |
 | 物理阻断失控子进程树 | 否 | 否 | **`SIGSTOP` -> `SIGKILL -pgid` 整组收割并自动回滚** |
-| 二进制 / 安装包体积与峰值内存 | 不适用 | `500 MB+` Electron | **`695 KiB` 裁剪后 CLI（千文件峰值 RSS `1.70 MiB` · 64 MiB 流式哈希 `1.25 MiB`）· `< 5 MiB` 双架构 DMG（单架构 `3.06 MiB`）** |
+| 二进制 / 安装包体积与峰值内存 | 不适用 | `500 MB+` Electron | **`695 KiB` 裁剪后 CLI（千文件峰值 RSS `1.67 MiB` · 64 MiB 流式哈希 `1.29 MiB`）· `< 5 MiB` 双架构 DMG（单架构 `3.10 MiB`）** |
 
 ---
 
@@ -84,10 +84,10 @@ afuse upgrade --check         # 仅在手动执行时查询 GitHub Releases 新�
 <a id="agentfuse-pro"></a>
 ## **AgentFuse Pro** 原生菜单栏与毛玻璃主控桌面端（`¥98` / `$19` 一次买断）
 
-需要零配置成本的原生 macOS 桌面级守护壳（纯手写 AppKit + QuartzCore + CoreGraphics Swift，单模块严格 `< 400` 行，双架构 DMG `< 5 MiB` / 单架构 `3.06 MiB`，冷启动实测 `62.63 ms`，双仓静默守护 2 秒窗口 CPU 占用 `2.20 ms`）？
+需要零配置成本的原生 macOS 桌面级守护壳（纯手写 AppKit + QuartzCore + CoreGraphics Swift，单模块严格 `< 400` 行，主壳 `1.02 MiB`，双架构 DMG `< 5 MiB` / 单架构 `3.10 MiB`，冷启动实测 `89.24 ms`，双仓静默守护 2 秒窗口 CPU 占用 `3.04 ms`）？
 
-- **居中 `500×410` Apple 原生 HIG 毛玻璃主控台 + 系统自适应外观**：启动即呈现屏幕居中的 `500×410` 系统自适应毛玻璃主控窗口（`underWindowBackground` 自动适配系统浅/深色外观，不受刘海屏、Bartender 或 Dozer 折叠影响，重开应用或点击菜单栏图标随时唤回），全面采用 `SF Symbols`、标准 `窗口` 菜单（`⌘W` / `⌘M`）与右上角操作菜单（`帮助与诊断 -> 语言 / Language` 无干扰切换），安静态隐藏冗余状态横幅、仅在批量误删或受阻时自动展开告警，保留原生圆角 `NSButton` 与快捷键（`⌘O` 绑定、`⌘S` 快照、`⌘R` 恢复、`⌘W` / `Esc` 关闭）。
-- **任意文件夹/单文件拖拽守护 + 应用内 `.dmg` 校验自更新**：将最多 `5` 个目标直接拖入窗口或菜单栏图标即可开启 `FSEvents` 滚动基线守护：无需 `.git` 或工程标记，直接支持普通文件夹及单个文件（含 `~/Desktop`、`~/Documents`、`~/Downloads` 内部子项），单文件同级兄弟零干扰；通过访达移入 `~/.Trash` 废纸篓触发原位重建后，自动按 `(fsid, ino)` 清理废纸篓副本（受系统隐私权限阻止时优雅保留）。状态栏与窗口操作菜单严格职责分离（`SF Symbols` 单色模板图标），内置目录模式**单文件精准恢复**子菜单、按需手动**检查更新…**（解析 GitHub 可信 `.dmg` 与 `.sha256` 直链，校验 `SHA-256` 与 `codesign` 签名后直接应用内原子换包重拉，只读挂载目录自动在访达揭示）与可选 `--background` **登录时打开**（Shell 与 Claude Code 钩子由 CLI `afuse hook zsh | claude` 提供）。
+- **居中 `500×410` Apple 原生 HIG 毛玻璃主控台 + 系统自适应外观**：启动即呈现屏幕居中的 `500×410` 系统自适应毛玻璃主控窗口（`underWindowBackground` 监听浅/深色切换并实时重绘 `CGColor`，不受刘海屏、Bartender 或 Dozer 折叠影响，重开应用或点击菜单栏图标随时唤回），全面采用 `SF Symbols`、标准 `窗口` 菜单（`⌘W` / `⌘M`）、`编辑` 菜单（含 `⇧⌘Z` 重做）、顶栏下拉切换器及右上角操作菜单（顶栏内含 `添加保护目标… ⌘O`，`帮助与诊断 -> 语言 / Language` 无干扰切换），安静态隐藏冗余状态横幅、仅在批量误删或受阻时自动展开告警，停止保护前提供破坏性操作确认弹窗，保留原生圆角 `NSButton` 与快捷键（`⌘O` 绑定、`⌘S` 快照、`⌘R` 恢复、`⌘W` / `Esc` 关闭）。
+- **任意文件夹/单文件拖拽守护 + 应用内 `.dmg` 校验自更新**：将最多 `5` 个目标直接拖入窗口或菜单栏图标即可开启 `FSEvents` 滚动基线守护：无需 `.git` 或工程标记，直接支持普通文件夹及单个文件（含 `~/Desktop`、`~/Documents`、`~/Downloads` 内部子项），单文件同级兄弟零干扰；通过访达移入 `~/.Trash` 废纸篓触发原位重建后，自动按 `(fsid, ino)` 清理废纸篓副本（受系统隐私权限阻止时优雅保留）。状态栏与窗口操作菜单严格职责分离（`SF Symbols` 单色模板图标），内置目录模式**单文件精准恢复**子菜单、独立更新队列驱动的按需手动**检查更新…**（解析 GitHub 可信 `.dmg` 与 `.sha256` 直链，强制执行非软链校验、`CFBundleIdentifier` 与防降级 `CFBundleVersion` 核验、SHA-256 及 `codesign --verify --deep --strict` 校验，并通过 `FD_CLOEXEC` 锁隔离与退出后拉起守护安全替换重启；只读挂载目录自动在访达揭示）与可选 `--background` **登录时打开**（Shell 与 Claude Code 钩子由 CLI `afuse hook zsh | claude` 提供）。
 - **恢复反馈层与中英双语「APFS 原位恢复凭证」（`1200×630` sRGB PNG）**：救回瞬间呈现零空闲 CPU 占用的 `QuartzCore` 流金脉冲反馈层，实时渲染零隐私泄露的黑金质感**恢复凭证**（不含任何目标名、文件名或路径，展示恢复耗时、文件数、Inode/隔离与 Merkle SHA-256 校验状态），自动写入系统剪贴板并支持一键分享至 `𝕏`、`微信 / 朋友圈` 或导出高清 PNG。
 - **单目标永久免费与终身买断原则**：**社区免费版永久守护 1 个活跃目标（普通文件夹或单文件）**，无试用倒计时，历史时间线恢复永久开放。**AgentFuse Pro 终身买断版（中国大陆 `¥98` 一次买断 · 海外 `$19` 一次买断）** 解锁最多 `5` 个并发守护目标与 **100% 离线 `Ed25519` 激活码**（支持 3 台本人 Mac，零遥测联网，14 天无理由退款）。
 - **[前往 GitHub Releases 下载 `AgentFuse.app` 双架构 DMG](https://github.com/topkyo/agent-fuse/releases/latest)** · **可直接通过 `AgentFuse.app` 内置离线双语购买指引获取 AgentFuse Pro（`¥98` / `$19` 一次买断）**。

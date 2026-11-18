@@ -1,4 +1,4 @@
-# ⚡️ `agent-fuse` (`afuse`) v0.6.0
+# ⚡️ `agent-fuse` (`afuse`) v0.6.1
 
 **English** | **[简体中文](./README.zh-CN.md)** · **[Contributing](./CONTRIBUTING.md)** · **[Security](./SECURITY.md)**
 
@@ -39,15 +39,15 @@ xattr -cr /Applications/AgentFuse.app
 
 Measured on a **2015 MacBook Pro (`Intel Core i5-5257U`, 8 GB RAM, `macOS 12.7.6` APFS)**:
 
-| Dimension | `git stash -u` | Electron / IDE Checkpoints | **`agent-fuse` (`afuse` v0.6.0)** |
+| Dimension | `git stash -u` | Electron / IDE Checkpoints | **`agent-fuse` (`afuse` v0.6.1)** |
 | :--- | :--- | :--- | :--- |
 | Untracked + dirty files + `.git` index | Partial / touches `.git` lock | Open IDE buffers only | **Full workspace tree + `.git` guard + selective path restore (external `.noindex` vault)** |
 | 142-file dirty workspace snap / restore | `50–800 ms` | `200–2,000 ms` | **`6.46 ms` snap / `12.60 ms` restore (with `auto:pre-restore` + SHA-256 verify)** |
-| 1,000-file `snap --fast` (hook clone step) | N/A | N/A | **`27.05 ms` (`47.45 ms` with full streaming SHA-256)** |
+| 1,000-file `snap --fast` (hook clone step) | N/A | N/A | **`26.90 ms` (`30.22 ms` with full streaming SHA-256)** |
 | Disk allocation at snapshot time (`t=0`) | Object copy | Duplicate copies | **`0 Bytes` CoW (`clonefile(2)`) + Auto-GC cap (`AFUSE_MAX_AUTO_SNAPS=50`)** |
 | Preserves active shell `cwd` root Inode | Yes | Yes | **Yes (`renamex_np` atomic entry swap)** |
 | Kills runaway subshell process groups | No | No | **`SIGSTOP` -> `SIGKILL -pgid` + auto-rollback** |
-| Binary / DMG size & peak RAM | N/A | `500 MB+` Electron | **`695 KiB` stripped CLI (`1.70 MiB` 1k-file RSS · `1.25 MiB` 64 MiB-file RSS) · `< 5 MiB` Universal DMG (`3.06 MiB` single-arch)** |
+| Binary / DMG size & peak RAM | N/A | `500 MB+` Electron | **`695 KiB` stripped CLI (`1.67 MiB` 1k-file RSS · `1.29 MiB` 64 MiB-file RSS) · `< 5 MiB` Universal DMG (`3.10 MiB` single-arch)** |
 
 ---
 
@@ -84,10 +84,10 @@ Automatic `auto:*` checkpoints enforce a rolling ring cap via `AFUSE_MAX_AUTO_SN
 <a id="agentfuse-pro"></a>
 ## **AgentFuse Pro** Native Menu Bar & Control Window App (`$19` / `¥98` One-Time)
 
-Prefer a zero-friction native macOS desktop shield (pure AppKit + QuartzCore + CoreGraphics Swift, `< 400` LOC per module, `< 5 MiB` Universal DMG / `3.06 MiB` single-arch, `62.63 ms` cold start, `2.20 ms` CPU across a 2s 2-repo idle window)?
+Prefer a zero-friction native macOS desktop shield (pure AppKit + QuartzCore + CoreGraphics Swift, `< 400` LOC per module, `1.02 MiB` stripped GUI shell, `< 5 MiB` Universal DMG / `3.10 MiB` single-arch, `89.24 ms` cold start, `3.04 ms` CPU across a 2s 2-repo idle window)?
 
-- **Centered `500×410` macOS HIG Vibrancy Window + Adaptive Light/Dark Chrome**: Launches a `500×410` system-adaptive `NSVisualEffectView` (`underWindowBackground`) `NSWindow` centered on screen (immune to Dozer/Bartender/Notch hiding, re-summoned anytime by reopening `AgentFuse.app` or clicking the menu bar shield icon), featuring `SF Symbols`, standard `Window` menu (`⌘W` / `⌘M`), clean `Actions` (`ellipsis.circle`) menu with `Help & Diagnostics -> Language (简体中文 / English)` switcher, distraction-free onboarding (drag any plain folder or single file or run the **5-Second Safe Demo**), contextual inline alert banner (hidden while protected, expands only on mass-delete/errors), native `NSButton` shortcuts (`⌘O` bind, `⌘S` snap, `⌘R` restore, `⌘W` / `Esc` dismiss), and colored diff inspection.
-- **Drag-and-Drop Multi-Target Watch (Plain Folders & Single Files) + Verified In-App `.dmg` Updates**: Drop up to `5` ordinary folders (zero `.git` required) or individual files (including sub-items inside `~/Desktop`, `~/Documents`, or `~/Downloads`) into the Control Window or onto the menu bar shield icon. Single-file binds isolate sibling files cleanly; items deleted into macOS `~/.Trash` are matched by `(fsid, ino)` and automatically purged upon restore (gracefully keeping untouched on TCC privacy restrictions). Features strictly separated **Status Bar** (<= 8 items) and **Actions** menus with `SF Symbols`, a **Restore Single File** submenu, opt-in **Check for Updates…** (verifies trusted GitHub `.dmg` + `.sha256` + `codesign --verify --deep --strict` for atomic in-app update & relaunch, or reveals mounted DMG in Finder on read-only mounts), and `--background` **Launch at Login** (CLI hooks remain auditable via `afuse hook zsh | claude`).
+- **Centered `500×410` macOS HIG Vibrancy Window + Adaptive Light/Dark Chrome**: Launches a `500×410` system-adaptive `NSVisualEffectView` (`underWindowBackground`) `NSWindow` centered on screen (immune to Dozer/Bartender/Notch hiding, re-summoned anytime by reopening `AgentFuse.app` or clicking the menu bar shield icon), featuring real-time Light/Dark `CGColor` redraw on appearance changes, `SF Symbols`, standard `Window` menu (`⌘W` / `⌘M`) & `Edit` (`⇧⌘Z` Redo), top header target switcher + `+ Add Target… (⌘O)` inside Actions (`ellipsis.circle`), `Help & Diagnostics -> Language (简体中文 / English)` switcher, distraction-free onboarding (drag any plain folder or single file or run the **5-Second Safe Demo**), contextual inline alert banner (hidden while protected, expands only on mass-delete/errors), native `NSButton` shortcuts (`⌘O` bind, `⌘S` snap, `⌘R` restore, `⌘W` / `Esc` dismiss), confirmation before stopping protection, and colored diff inspection.
+- **Drag-and-Drop Multi-Target Watch (Plain Folders & Single Files) + Verified In-App `.dmg` Updates**: Drop up to `5` ordinary folders (zero `.git` required) or individual files (including sub-items inside `~/Desktop`, `~/Documents`, or `~/Downloads`) into the Control Window or onto the menu bar shield icon. Single-file binds isolate sibling files cleanly; items deleted into macOS `~/.Trash` are matched by `(fsid, ino)` and automatically purged upon restore (gracefully keeping untouched on TCC privacy restrictions). Features strictly separated **Status Bar** (<= 8 items) and **Actions** menus with `SF Symbols`, a **Restore Single File** submenu, opt-in **Check for Updates…** (runs on a dedicated update queue without stalling snapshots/diffs, verifies trusted GitHub `.dmg` + `.sha256` + `CFBundleIdentifier` + anti-downgrade `CFBundleVersion` + non-symlink bundle check + `codesign --verify --deep --strict` for detached post-exit atomic relaunch with `FD_CLOEXEC` lock hygiene, or reveals mounted DMG in Finder on read-only mounts), and `--background` **Launch at Login** (CLI hooks remain auditable via `afuse hook zsh | claude`).
 - **Hero Recovery Overlay & Bilingual Recovery Receipt (`1200×630` sRGB PNG)**: Displays a zero-idle-CPU `QuartzCore` gold-pulse recovery overlay with a live preview of your privacy-safe black-and-gold **APFS Recovery Receipt** (zero target/file names, rendered in `中文` or `English` with Merkle SHA-256 verification status), copied automatically to your clipboard with one-click share actions for `𝕏`, `WeChat`, and `Save PNG`.
 - **Generous Free Edition & Perpetual Pro License**: **Free Edition watches 1 target forever** (any folder or single file) with zero countdown timers (`Timeline Restore` is never locked). **AgentFuse Pro (`$19` USD one-time / `¥98` CNY one-time)** unlocks up to `5` concurrent targets with a **100% offline `Ed25519` license key** (up to 3 Macs, zero telemetry, 14-day refund).
 - **[Download `AgentFuse.app` Universal DMG (GitHub Releases)](https://github.com/topkyo/agent-fuse/releases/latest)** · **Upgrade to AgentFuse Pro (`$19` Global / `¥98` China Mainland) directly from the built-in bilingual license guide inside `AgentFuse.app`**.

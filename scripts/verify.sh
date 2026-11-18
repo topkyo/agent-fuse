@@ -300,7 +300,7 @@ UP_JSON=$(AFUSE_RELEASE_JSON_URL="file://$REL_JSON" "$BIN_PATH" --json upgrade -
 python3 - "$UP_JSON" <<'PY'
 import json, sys
 d = json.loads(sys.argv[1])
-assert d["ok"] is True and d["current_version"] == "0.6.0" and d["latest_version"] == "0.9.0" and d["update_available"] is True, d
+assert d["ok"] is True and d["current_version"] == "0.6.1" and d["latest_version"] == "0.9.0" and d["update_available"] is True, d
 PY
 
 AFUSE_VAULT_DIR="$SEL_VAULT" AFUSE_MAX_AUTO_SNAPS=2 "$BIN_PATH" --workspace "$SEL_WS" --json snap -m "manual-keep" >/dev/null
