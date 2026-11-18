@@ -12,13 +12,15 @@ cask "agent-fuse" do
   app "AgentFuse.app"
   binary "#{appdir}/AgentFuse.app/Contents/MacOS/afuse"
 
-  # Cold-start note (M8): install with `brew install --cask --no-quarantine topkyo/tap/agent-fuse`
+  # Pre-notarization note: install with `brew install --cask --no-quarantine topkyo/tap/agent-fuse`
   # prior to Apple Developer ID notarization cutover.
 
   zap trash: [
     "~/Library/Application Support/AgentFuse",
+    "~/Library/HTTPStorages/app.agentfuse.pro",
     "~/Library/LaunchAgents/app.agentfuse.pro.plist",
     "~/Library/Preferences/app.agentfuse.pro.plist",
+    "~/Library/Saved Application State/app.agentfuse.pro.savedState",
     "~/.agent-fuse",
     "~/.cache/afuse-interactive-demo",
   ]

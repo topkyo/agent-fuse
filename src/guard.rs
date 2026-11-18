@@ -48,11 +48,24 @@ fn collect_git_critical_paths(git_dir: &Path, out: &mut Vec<PathBuf>) {
             }
         }
     }
-    for sub_dir in ["refs", "logs", "hooks", "objects", "info"] {
+    for sub_dir in ["refs", "logs", "hooks", "info"] {
         let d = git_dir.join(sub_dir);
         if fs::symlink_metadata(&d).is_ok() {
             out.push(d.clone());
             walk_sub(&d, out);
+        }
+    }
+    let objects_dir = git_dir.join("objects");
+    if fs::symlink_metadata(&objects_dir).is_ok() {
+        out.push(objects_dir.clone());
+        if let Ok(rd) = fs::read_dir(&objects_dir) {
+            for entry in rd.flatten() {
+                let p = entry.path();
+                out.push(p.clone());
+                if entry.file_name() == "pack" && entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                    walk_sub(&p, out);
+                }
+            }
         }
     }
 }

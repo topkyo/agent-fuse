@@ -39,8 +39,13 @@ fn fetch_release_outcome() -> Result<ReleaseFetch, AfuseError> {
         return Ok(ReleaseFetch::Published(parse_release_json(&raw)?));
     }
     let ua = format!("afuse/{}", env!("CARGO_PKG_VERSION"));
-    let out = Command::new("/usr/bin/curl")
-        .args(["-sSL", "--max-time", "10", "-w", "\n%{http_code}", "-H", "Accept: application/vnd.github+json", "-H", &format!("User-Agent: {}", ua), &source])
+    let mut cmd = Command::new("/usr/bin/curl");
+    cmd.args(["-sSL", "--max-time", "10"]);
+    if source.starts_with("https://") {
+        cmd.args(["--proto", "=https", "--proto-redir", "=https"]);
+    }
+    let out = cmd
+        .args(["-w", "\n%{http_code}", "-H", "Accept: application/vnd.github+json", "-H", &format!("User-Agent: {}", ua), &source])
         .output()
         .map_err(|e| AfuseError::new(1, format!("failed to invoke curl: {}", e)))?;
     if !out.status.success() {

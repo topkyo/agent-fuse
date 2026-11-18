@@ -165,7 +165,6 @@ pub fn execute_hook_auto_snap(
             }
         }
     }
-    let _ = fs::write(&stamp_path, format!("{}\n", now_ms));
 
     let clean_label = if label.starts_with("auto:hook:") {
         label.to_string()
@@ -175,6 +174,7 @@ pub fn execute_hook_auto_snap(
         format!("auto:hook:{}", label)
     };
     let (meta, _) = create_snapshot_fast_dedup_unlocked(&ws, &ws_vault, &clean_label)?;
+    let _ = fs::write(&stamp_path, format!("{}\n", now_ms));
     let _ = prune_unlocked(&ws_vault, HOOK_MAX_AUTO_SNAPS, Some("auto:hook:"), ORPHAN_MAX_AGE_SECS);
     Ok(Some(meta))
 }
