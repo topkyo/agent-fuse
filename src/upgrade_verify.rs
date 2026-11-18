@@ -1,4 +1,5 @@
 use crate::error::{AfuseError, ERR_EINVAL};
+use crate::upgrade_json::ReleaseAsset;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -199,4 +200,47 @@ pub(crate) fn prepare_and_verify_staged_binary(staged_bin: &Path) -> Result<(), 
     #[cfg(target_os = "macos")]
     ensure_macos_codesign(staged_bin)?;
     probe_staged_version(staged_bin)
+}
+
+pub fn validate_release_asset_url(url: &str) -> Result<(), AfuseError> {
+    let rest = url.strip_prefix("https://").ok_or_else(|| {
+        AfuseError::new(ERR_EINVAL, "release asset URL must use https://")
+    })?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') {
+        return Err(AfuseError::new(ERR_EINVAL, "invalid release asset authority"));
+    }
+    let host = authority.split(':').next().unwrap_or("").to_ascii_lowercase();
+    if !matches!(
+        host.as_str(),
+        "github.com" | "objects.githubusercontent.com" | "release-assets.githubusercontent.com"
+    ) {
+        return Err(AfuseError::new(ERR_EINVAL, format!("untrusted release asset host: {}", host)));
+    }
+    Ok(())
+}
+
+pub fn is_trusted_github_url(url: &str) -> bool {
+    validate_release_asset_url(url).is_ok()
+}
+
+pub(crate) fn extract_trusted_dmg_urls(assets: &[ReleaseAsset]) -> (Option<String>, Option<String>) {
+    let dmg_asset = assets
+        .iter()
+        .find(|a| a.name.ends_with("-macos.dmg") && is_trusted_github_url(&a.download_url));
+    let preferred_sha = dmg_asset.and_then(|d| {
+        let exact = format!("{}.sha256", d.name);
+        assets
+            .iter()
+            .find(|a| a.name == exact && is_trusted_github_url(&a.download_url))
+    });
+    let sha_asset = preferred_sha.or_else(|| {
+        assets
+            .iter()
+            .find(|a| a.name.ends_with("-macos.dmg.sha256") && is_trusted_github_url(&a.download_url))
+    });
+    (
+        dmg_asset.map(|a| a.download_url.clone()),
+        sha_asset.map(|a| a.download_url.clone()),
+    )
 }

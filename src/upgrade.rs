@@ -2,8 +2,8 @@ use crate::apfs::{force_remove_all, TMP_SEQ};
 use crate::error::{AfuseError, ERR_EACCES, ERR_EINVAL, ERR_ENOENT, ERR_USAGE};
 use crate::sha256::Sha256;
 pub use crate::upgrade_json::{
-    is_newer_version, parse_release_json, validate_release_asset_url, ReleaseAsset, ReleaseInfo,
-    UpgradeApplyReport, UpgradeCheckReport,
+    is_newer_version, is_trusted_github_url, parse_release_json, validate_release_asset_url,
+    ReleaseAsset, ReleaseInfo, UpgradeApplyReport, UpgradeCheckReport,
 };
 use crate::upgrade_verify::{find_extracted_afuse, prepare_and_verify_staged_binary};
 use std::env;
@@ -71,6 +71,8 @@ pub fn check_for_updates() -> Result<UpgradeCheckReport, AfuseError> {
             release_state: "unpublished".to_string(),
             release_url: DEFAULT_RELEASES_WEB_URL.to_string(),
             brew_cmd: BREW_UPGRADE_CMD.to_string(),
+            dmg_url: None,
+            dmg_sha256_url: None,
         }),
         ReleaseFetch::Published(rel) => {
             let update_available = is_newer_version(&current, &rel.latest_version);
@@ -81,6 +83,8 @@ pub fn check_for_updates() -> Result<UpgradeCheckReport, AfuseError> {
                 release_state: "published".to_string(),
                 release_url: rel.html_url,
                 brew_cmd: BREW_UPGRADE_CMD.to_string(),
+                dmg_url: rel.dmg_url,
+                dmg_sha256_url: rel.dmg_sha256_url,
             })
         }
     }

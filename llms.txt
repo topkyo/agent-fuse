@@ -1,4 +1,4 @@
-# AgentFuse (`afuse`) v0.5.0
+# AgentFuse (`afuse`) v0.6.0
 
 > Millisecond-scale APFS Copy-on-Write workspace time machine, selective path recovery, opt-in agent hooks, and process-group circuit breaker for macOS coding agents (`Claude Code`, `Cursor`, `Codex`, `Aider`, `zsh`).
 
@@ -9,15 +9,15 @@ Autonomous CLI coding agents run `rm -rf`, `mv`, or mass file overwrites on dirt
 1. **0-Byte External CoW Snapshots (`clonefile(2)`) + Auto-GC Cap**: Clones Git repos, plain folders (zero `.git` required), or individual single files (including items inside `~/Desktop`, `~/Documents`, `~/Downloads`, with sibling-file isolation) into an external same-volume vault (`~/.agent-fuse/vault.noindex`, `chmod 0700`, Spotlight excluded), preserving nested ignored caches (`node_modules`, `target`, `.build`, `.venv`, `DerivedData`) in place. Allocates `0 Bytes` of new data blocks at `t=0` and caps `auto:*` snapshots at `AFUSE_MAX_AUTO_SNAPS` (default `50`, with `auto:hook:*` capped at `20`) while preserving manual milestones.
 2. **In-Place Restore & Trash Auto-Purge (`renamex_np`)**: Swaps full directories via `renamex_np(..., RENAME_SWAP)` preserving workspace root `cwd` Inode, restores individual protected files without disturbing siblings, or surgically restores relative paths (`afuse restore <snap> -- <path>...`). Purges identical `(fsid, ino)` copies moved into macOS `~/.Trash` on rebuild (retaining cleanly if TCC blocks Trash access) and creates an `auto:pre-restore` backup before every restore.
 3. **Out-of-Band Process-Group Circuit Breaker (`afuse guard`)**: Places agents in a dedicated process group (`setpgid(0, 0)`), polls deletion and write deltas every 15 ms, freezes runaway trees with `SIGSTOP -pgid`, reaps with `SIGKILL -pgid`, and rolls back automatically (exit code `99`).
-4. **Zero-Dotfile-Mutation Hooks & Opt-In Verified Upgrade**: `afuse hook zsh | claude` prints auditable snippets to stdout without editing dotfiles. `afuse upgrade [--check]` performs zero background polling and verifies `SHA256SUMS` strictly upon manual invocation.
+4. **Zero-Dotfile-Mutation Hooks & Opt-In Verified Upgrade**: `afuse hook zsh | claude` prints auditable snippets to stdout without editing dotfiles. `afuse upgrade [--check]` performs zero background polling, exposes trusted GitHub `dmg_url` + `dmg_sha256_url` metadata in `--check` JSON, and verifies `SHA256SUMS` + Mach-O `codesign` strictly upon manual invocation.
 
 ## Verified Benchmarks (2015 MacBook Pro, Core i5-5257U, 8 GB RAM, macOS 12.7.6 APFS)
 - `afuse` MIT CLI binary: `695 KiB` (`711,320 B`) stripped (`0` external Rust crates, links only `libSystem.B.dylib`)
-- `AgentFuse-0.5.0-macos.dmg`: `< 5 MiB` Universal (`3.04 MiB` single-arch `3,186,385 B` AppKit GUI + Retina `AppIcon.icns` + embedded CLI)
-- Peak RSS: `1.73 MiB` (`1,810,432 B`) on 1,000-file chaos test; `1.32 MiB` (`1,380,352 B`) on 64 MiB streaming SHA-256 snapshot
+- `AgentFuse-0.6.0-macos.dmg`: `< 5 MiB` Universal (`3.06 MiB` single-arch `3,212,507 B` AppKit HIG GUI + Retina `AppIcon.icns` + embedded CLI)
+- Peak RSS: `1.70 MiB` (`1,781,760 B`) on 1,000-file snapshot (`2.50 MiB` / `2,625,536 B` guard+restore); `1.25 MiB` (`1,314,816 B`) on 64 MiB streaming SHA-256 snapshot
 - 142-file dirty repo `snap`: `6.46 ms` | in-place `restore` (with `auto:pre-restore` + Merkle verify): `12.60 ms`
-- 1,000-file `snap --fast`: `24.15 ms` (`37.99 ms` with full streaming Merkle SHA-256)
-- `AgentFuse.app` cold start: `60.72 ms` (`< 300 ms`) | 2-repo `FSEvents` idle CPU (2s): `2.92 ms` (`< 5 ms`) | async rescue + `1200×630` `APFS Recovery Receipt` PNG render: `169.20 ms` (`264,932 B`)
+- 1,000-file `snap --fast`: `27.05 ms` (`47.45 ms` with full streaming Merkle SHA-256)
+- `AgentFuse.app` cold start: `62.63 ms` (`< 300 ms`) | 2-repo `FSEvents` idle CPU (2s): `2.20 ms` (`< 5 ms`) | async rescue + `1200×630` `APFS Recovery Receipt` PNG render: `144.26 ms` (`264,464 B`)
 
 ## Comparison Matrix
 - **vs `git stash -u`**: `afuse` does not touch `.git` locks, protects `.git` itself if deleted, supports single-path restore of untracked files, and finishes in single-digit ms without zlib hashing.
@@ -44,7 +44,7 @@ afuse doctor --json
 
 ## Licensing & Pricing
 - **MIT Open-Source CLI (`afuse`)**: `$0` forever (bilingual English `README.md` & Simplified Chinese `README.zh-CN.md`).
-- **AgentFuse Pro (macOS AppKit App)**: Free Edition watches 1 target (plain folder or single file) forever (no countdown timers, Timeline Restore never locked). AgentFuse Pro unlocks up to 5 concurrent targets, selective single-file menu restore for directories, automatic `(fsid, ino)` `~/.Trash` duplicate purging on rebuild, native mass-delete banner notifications, bilingual `APFS Recovery Receipt` (`1200×630` PNG), up to 3 Macs, `100%` offline `Ed25519` license key, `0` telemetry.
+- **AgentFuse Pro (macOS AppKit App)**: Free Edition watches 1 target (plain folder or single file) forever (no countdown timers, Timeline Restore never locked). Adaptive macOS HIG vibrancy Control Window with decoupled Status Bar & Actions menus (`SF Symbols`, `Window` `⌘W`), opt-in verified in-app `.dmg` SHA-256 update & relaunch, up to 5 concurrent targets, selective single-file menu restore for directories, automatic `(fsid, ino)` `~/.Trash` duplicate purging on rebuild, native mass-delete banner notifications, bilingual `APFS Recovery Receipt` (`1200×630` PNG), up to 3 Macs, `100%` offline `Ed25519` license key, `0` telemetry.
   - Global One-Time License: `$19 USD` (Creem.io).
   - China Mainland One-Time License: `¥98 CNY` (Mianbaoduo / WeChat & Alipay).
   - Releases & Downloads: https://github.com/topkyo/agent-fuse/releases/latest

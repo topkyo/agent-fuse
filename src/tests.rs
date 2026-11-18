@@ -749,7 +749,7 @@ struct ScopedDir(PathBuf);
 
         let fake_exe = bin_dir.join("afuse");
         fs::write(&fake_exe, b"OLD_AFUSE_BINARY").unwrap();
-        compile_dummy_afuse_macho(&payload_dir.join("afuse"), "0.6.0");
+        compile_dummy_afuse_macho(&payload_dir.join("afuse"), "9.6.0");
 
         let tb_path = archive_dir.join("afuse-macos-universal.tar.gz");
         let tar_st = std::process::Command::new("/usr/bin/tar")
@@ -769,7 +769,7 @@ struct ScopedDir(PathBuf);
         let rel_json_path = sandbox.0.join("release.json");
         fs::write(
             &rel_json_path,
-            r#"{"tag_name":"v0.6.0","html_url":"https://github.com/topkyo/agent-fuse/releases/tag/v0.6.0","assets":[{"name":"afuse-macos-universal.tar.gz","browser_download_url":"https://example.invalid/tb.tar.gz"},{"name":"SHA256SUMS.txt","browser_download_url":"https://example.invalid/sums.txt"}]}"#,
+            r#"{"tag_name":"v9.6.0","html_url":"https://github.com/topkyo/agent-fuse/releases/tag/v9.6.0","assets":[{"name":"afuse-macos-universal.tar.gz","browser_download_url":"https://example.invalid/tb.tar.gz"},{"name":"SHA256SUMS.txt","browser_download_url":"https://example.invalid/sums.txt"}]}"#,
         )
         .unwrap();
 
@@ -778,7 +778,7 @@ struct ScopedDir(PathBuf);
 
         let chk = check_for_updates().unwrap();
         assert!(chk.update_available);
-        assert_eq!(chk.latest_version, "0.6.0");
+        assert_eq!(chk.latest_version, "9.6.0");
 
         // Tampered checksum must fail and keep existing binary untouched
         fs::write(
@@ -798,7 +798,7 @@ struct ScopedDir(PathBuf);
         assert_eq!(applied.verified_sha256.as_deref(), Some(real_sha.as_str()));
         let ver_out = std::process::Command::new(&fake_exe).arg("--version").output().unwrap();
         assert!(ver_out.status.success());
-        assert_eq!(String::from_utf8_lossy(&ver_out.stdout).trim(), "afuse 0.6.0");
+        assert_eq!(String::from_utf8_lossy(&ver_out.stdout).trim(), "afuse 9.6.0");
 
         // .app bundle binary & symlink pointing inside .app refuse CLI self-overwrite with ERR_USAGE (even without network)
         env::set_var("AFUSE_RELEASE_JSON_URL", "http://127.0.0.1:9/unreachable");

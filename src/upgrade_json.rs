@@ -1,5 +1,7 @@
 use crate::error::{AfuseError, ERR_EINVAL};
 use crate::manifest::json_escape;
+use crate::upgrade_verify::extract_trusted_dmg_urls;
+pub use crate::upgrade_verify::{is_trusted_github_url, validate_release_asset_url};
 
 #[derive(Debug, Clone)]
 pub struct ReleaseAsset {
@@ -13,6 +15,8 @@ pub struct ReleaseInfo {
     pub latest_version: String,
     pub html_url: String,
     pub assets: Vec<ReleaseAsset>,
+    pub dmg_url: Option<String>,
+    pub dmg_sha256_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -23,6 +27,8 @@ pub struct UpgradeCheckReport {
     pub release_state: String,
     pub release_url: String,
     pub brew_cmd: String,
+    pub dmg_url: Option<String>,
+    pub dmg_sha256_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,32 +43,30 @@ pub struct UpgradeApplyReport {
     pub target_path: Option<String>,
 }
 
+fn json_opt_str(v: &Option<String>) -> String {
+    v.as_ref()
+        .map(|s| format!("\"{}\"", json_escape(s)))
+        .unwrap_or_else(|| "null".to_string())
+}
+
 impl UpgradeCheckReport {
     pub fn to_json(&self) -> String {
         format!(
-            "{{\"ok\":true,\"current_version\":\"{}\",\"latest_version\":\"{}\",\"update_available\":{},\"release_state\":\"{}\",\"release_url\":\"{}\",\"brew_cmd\":\"{}\"}}",
+            "{{\"ok\":true,\"current_version\":\"{}\",\"latest_version\":\"{}\",\"update_available\":{},\"release_state\":\"{}\",\"release_url\":\"{}\",\"brew_cmd\":\"{}\",\"dmg_url\":{},\"dmg_sha256_url\":{}}}",
             json_escape(&self.current_version),
             json_escape(&self.latest_version),
             self.update_available,
             json_escape(&self.release_state),
             json_escape(&self.release_url),
-            json_escape(&self.brew_cmd)
+            json_escape(&self.brew_cmd),
+            json_opt_str(&self.dmg_url),
+            json_opt_str(&self.dmg_sha256_url)
         )
     }
 }
 
 impl UpgradeApplyReport {
     pub fn to_json(&self) -> String {
-        let sha = self
-            .verified_sha256
-            .as_ref()
-            .map(|s| format!("\"{}\"", json_escape(s)))
-            .unwrap_or_else(|| "null".to_string());
-        let tgt = self
-            .target_path
-            .as_ref()
-            .map(|s| format!("\"{}\"", json_escape(s)))
-            .unwrap_or_else(|| "null".to_string());
         format!(
             "{{\"ok\":true,\"updated\":{},\"release_state\":\"{}\",\"current_version\":\"{}\",\"latest_version\":\"{}\",\"release_url\":\"{}\",\"brew_cmd\":\"{}\",\"verified_sha256\":{},\"target_path\":{}}}",
             self.updated,
@@ -71,8 +75,8 @@ impl UpgradeApplyReport {
             json_escape(&self.latest_version),
             json_escape(&self.release_url),
             json_escape(&self.brew_cmd),
-            sha,
-            tgt
+            json_opt_str(&self.verified_sha256),
+            json_opt_str(&self.target_path)
         )
     }
 }
@@ -361,28 +365,13 @@ pub fn parse_release_json(raw: &str) -> Result<ReleaseInfo, AfuseError> {
         }
     }
 
+    let (dmg_url, dmg_sha256_url) = extract_trusted_dmg_urls(&assets);
     Ok(ReleaseInfo {
         tag_name,
         latest_version,
         html_url,
         assets,
+        dmg_url,
+        dmg_sha256_url,
     })
-}
-
-pub fn validate_release_asset_url(url: &str) -> Result<(), AfuseError> {
-    let rest = url.strip_prefix("https://").ok_or_else(|| {
-        AfuseError::new(ERR_EINVAL, "release asset URL must use https://")
-    })?;
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if authority.is_empty() || authority.contains('@') {
-        return Err(AfuseError::new(ERR_EINVAL, "invalid release asset authority"));
-    }
-    let host = authority.split(':').next().unwrap_or("").to_ascii_lowercase();
-    if !matches!(
-        host.as_str(),
-        "github.com" | "objects.githubusercontent.com" | "release-assets.githubusercontent.com"
-    ) {
-        return Err(AfuseError::new(ERR_EINVAL, format!("untrusted release asset host: {}", host)));
-    }
-    Ok(())
 }

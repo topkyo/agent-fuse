@@ -78,9 +78,9 @@ pub use snapshot::{
 };
 pub use trash::{allowed_trash_roots, TrashCleanupStatus};
 pub use upgrade::{
-    check_for_updates, is_newer_version, parse_release_json, perform_upgrade_on_exe,
-    run_upgrade_apply, validate_release_asset_url, ReleaseAsset, ReleaseInfo, UpgradeApplyReport,
-    UpgradeCheckReport,
+    check_for_updates, is_newer_version, is_trusted_github_url, parse_release_json,
+    perform_upgrade_on_exe, run_upgrade_apply, validate_release_asset_url, ReleaseAsset,
+    ReleaseInfo, UpgradeApplyReport, UpgradeCheckReport,
 };
 pub use vault::{
     is_ignored_name, prepare_live_workspace_vault_with, prepare_workspace_vault,

@@ -1,4 +1,4 @@
-# ⚡️ `agent-fuse` (`afuse`) v0.5.0
+# ⚡️ `agent-fuse` (`afuse`) v0.6.0
 
 **English** | **[简体中文](./README.zh-CN.md)** · **[Contributing](./CONTRIBUTING.md)** · **[Security](./SECURITY.md)**
 
@@ -39,15 +39,15 @@ xattr -cr /Applications/AgentFuse.app
 
 Measured on a **2015 MacBook Pro (`Intel Core i5-5257U`, 8 GB RAM, `macOS 12.7.6` APFS)**:
 
-| Dimension | `git stash -u` | Electron / IDE Checkpoints | **`agent-fuse` (`afuse` v0.5.0)** |
+| Dimension | `git stash -u` | Electron / IDE Checkpoints | **`agent-fuse` (`afuse` v0.6.0)** |
 | :--- | :--- | :--- | :--- |
 | Untracked + dirty files + `.git` index | Partial / touches `.git` lock | Open IDE buffers only | **Full workspace tree + `.git` guard + selective path restore (external `.noindex` vault)** |
 | 142-file dirty workspace snap / restore | `50–800 ms` | `200–2,000 ms` | **`6.46 ms` snap / `12.60 ms` restore (with `auto:pre-restore` + SHA-256 verify)** |
-| 1,000-file `snap --fast` (hook clone step) | N/A | N/A | **`24.15 ms` (`37.99 ms` with full streaming SHA-256)** |
+| 1,000-file `snap --fast` (hook clone step) | N/A | N/A | **`27.05 ms` (`47.45 ms` with full streaming SHA-256)** |
 | Disk allocation at snapshot time (`t=0`) | Object copy | Duplicate copies | **`0 Bytes` CoW (`clonefile(2)`) + Auto-GC cap (`AFUSE_MAX_AUTO_SNAPS=50`)** |
 | Preserves active shell `cwd` root Inode | Yes | Yes | **Yes (`renamex_np` atomic entry swap)** |
 | Kills runaway subshell process groups | No | No | **`SIGSTOP` -> `SIGKILL -pgid` + auto-rollback** |
-| Binary / DMG size & peak RAM | N/A | `500 MB+` Electron | **`695 KiB` stripped CLI (`1.73 MiB` 1k-file RSS · `1.32 MiB` 64 MiB-file RSS) · `< 5 MiB` Universal DMG (`3.04 MiB` single-arch)** |
+| Binary / DMG size & peak RAM | N/A | `500 MB+` Electron | **`695 KiB` stripped CLI (`1.70 MiB` 1k-file RSS · `1.25 MiB` 64 MiB-file RSS) · `< 5 MiB` Universal DMG (`3.06 MiB` single-arch)** |
 
 ---
 
@@ -84,10 +84,10 @@ Automatic `auto:*` checkpoints enforce a rolling ring cap via `AFUSE_MAX_AUTO_SN
 <a id="agentfuse-pro"></a>
 ## **AgentFuse Pro** Native Menu Bar & Control Window App (`$19` / `¥98` One-Time)
 
-Prefer a zero-friction native macOS desktop shield (pure AppKit + QuartzCore + CoreGraphics Swift, `< 400` LOC per module, `< 5 MiB` Universal DMG / `3.04 MiB` single-arch, `60.72 ms` cold start, `2.92 ms` CPU across a 2s 2-repo idle window)?
+Prefer a zero-friction native macOS desktop shield (pure AppKit + QuartzCore + CoreGraphics Swift, `< 400` LOC per module, `< 5 MiB` Universal DMG / `3.06 MiB` single-arch, `62.63 ms` cold start, `2.20 ms` CPU across a 2s 2-repo idle window)?
 
-- **Centered `500×410` Dark Vibrancy Control Window + 1-Step Protection**: Launches a `500×410` dark vibrancy `NSWindow` centered on screen (immune to Dozer/Bartender/Notch hiding, re-summoned anytime by reopening `AgentFuse.app` or clicking the menu bar shield icon), featuring SF Pro / PingFang SC typography, a one-click `中文 | EN` segmented toggle, distraction-free onboarding (drag any plain folder or single file to start 0-Byte APFS protection immediately or run the **5-Second Safe Demo**), native `Edit` + `Actions` shortcuts (`⌘O` bind, `⌘S` snap, `⌘R` restore, `⌘W` / `Esc` dismiss), and colored diff inspection.
-- **Drag-and-Drop Multi-Target Watch (Plain Folders & Single Files) + Trash Auto-Purge**: Drop up to `5` ordinary folders (zero `.git` required) or individual files (including sub-items inside `~/Desktop`, `~/Documents`, or `~/Downloads`) into the Control Window or onto the menu bar shield icon. Single-file binds isolate sibling files cleanly; items deleted into macOS `~/.Trash` are matched by `(fsid, ino)` and automatically purged upon restore (gracefully keeping untouched on TCC privacy restrictions). Includes `FSEvents` rolling baselines, a `>= 20` file mass-delete tripwire (flips the menu bar shield red with `<N>`, delivers a native macOS banner notification when unfocused, and enables asynchronous non-blocking **Instant Rescue**), a **Restore Single File** submenu for directory targets, opt-in **Check for Updates**, and `--background` **Launch at Login** (terminal & Claude Code hooks remain auditable via CLI `afuse hook zsh | claude`).
+- **Centered `500×410` macOS HIG Vibrancy Window + Adaptive Light/Dark Chrome**: Launches a `500×410` system-adaptive `NSVisualEffectView` (`underWindowBackground`) `NSWindow` centered on screen (immune to Dozer/Bartender/Notch hiding, re-summoned anytime by reopening `AgentFuse.app` or clicking the menu bar shield icon), featuring `SF Symbols`, standard `Window` menu (`⌘W` / `⌘M`), clean `Actions` (`ellipsis.circle`) menu with `Help & Diagnostics -> Language (简体中文 / English)` switcher, distraction-free onboarding (drag any plain folder or single file or run the **5-Second Safe Demo**), contextual inline alert banner (hidden while protected, expands only on mass-delete/errors), native `NSButton` shortcuts (`⌘O` bind, `⌘S` snap, `⌘R` restore, `⌘W` / `Esc` dismiss), and colored diff inspection.
+- **Drag-and-Drop Multi-Target Watch (Plain Folders & Single Files) + Verified In-App `.dmg` Updates**: Drop up to `5` ordinary folders (zero `.git` required) or individual files (including sub-items inside `~/Desktop`, `~/Documents`, or `~/Downloads`) into the Control Window or onto the menu bar shield icon. Single-file binds isolate sibling files cleanly; items deleted into macOS `~/.Trash` are matched by `(fsid, ino)` and automatically purged upon restore (gracefully keeping untouched on TCC privacy restrictions). Features strictly separated **Status Bar** (<= 8 items) and **Actions** menus with `SF Symbols`, a **Restore Single File** submenu, opt-in **Check for Updates…** (verifies trusted GitHub `.dmg` + `.sha256` + `codesign --verify --deep --strict` for atomic in-app update & relaunch, or reveals mounted DMG in Finder on read-only mounts), and `--background` **Launch at Login** (CLI hooks remain auditable via `afuse hook zsh | claude`).
 - **Hero Recovery Overlay & Bilingual Recovery Receipt (`1200×630` sRGB PNG)**: Displays a zero-idle-CPU `QuartzCore` gold-pulse recovery overlay with a live preview of your privacy-safe black-and-gold **APFS Recovery Receipt** (zero target/file names, rendered in `中文` or `English` with Merkle SHA-256 verification status), copied automatically to your clipboard with one-click share actions for `𝕏`, `WeChat`, and `Save PNG`.
 - **Generous Free Edition & Perpetual Pro License**: **Free Edition watches 1 target forever** (any folder or single file) with zero countdown timers (`Timeline Restore` is never locked). **AgentFuse Pro (`$19` USD one-time / `¥98` CNY one-time)** unlocks up to `5` concurrent targets with a **100% offline `Ed25519` license key** (up to 3 Macs, zero telemetry, 14-day refund).
 - **[Download `AgentFuse.app` Universal DMG (GitHub Releases)](https://github.com/topkyo/agent-fuse/releases/latest)** · **Upgrade to AgentFuse Pro (`$19` Global / `¥98` China Mainland) directly from the built-in bilingual license guide inside `AgentFuse.app`**.
@@ -117,7 +117,7 @@ Prefer a zero-friction native macOS desktop shield (pure AppKit + QuartzCore + C
 3. **Why does `restore` preserve my terminal `cwd` without `cd .. && cd -`?**
    `afuse restore` stages cloned entries beside the workspace and swaps top-level entries using Darwin's `renamex_np(..., RENAME_SWAP)`, keeping the workspace root directory inode intact for active shells and LSP servers.
 4. **Why do manual `.dmg` drags trigger a macOS Gatekeeper warning?**
-   Early v0.5.x releases prior to Apple Developer ID notarization use ad-hoc signatures. Install with `brew install --cask --no-quarantine topkyo/tap/agent-fuse`, or run `xattr -cr /Applications/AgentFuse.app` once after manual copy.
+   Early v0.6.x releases prior to Apple Developer ID notarization use ad-hoc signatures. Install with `brew install --cask --no-quarantine topkyo/tap/agent-fuse`, or run `xattr -cr /Applications/AgentFuse.app` once after manual copy.
 5. **Does `afuse` phone home for update checks or fill up my disk with automatic snapshots?**
    Neither. Startup and background watching perform `0` network requests (`afuse upgrade --check` runs strictly on manual demand). Automatic `auto:*` snapshots self-prune beyond `AFUSE_MAX_AUTO_SNAPS` (default `50`), while manual snapshots stay preserved until explicitly pruned.
 6. **What is the difference between the Free Edition and `$19` / `¥98` AgentFuse Pro?**
