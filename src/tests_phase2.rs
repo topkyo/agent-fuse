@@ -11,7 +11,7 @@ mod tests_phase2 {
     use crate::snapshot::{
         create_snapshot_with_vault, diff_snapshot_with_vault, list_snapshots_with_vault,
     };
-    use crate::tests::ENV_LOCK;
+    use crate::tests::{compile_dummy_afuse_macho, TestEnvGuard, ENV_LOCK};
     use crate::unicode_norm::{canonical_rel_key, to_nfd};
     use crate::upgrade::{
         parse_release_json, perform_upgrade_on_exe, validate_release_asset_url,
@@ -229,7 +229,8 @@ mod tests_phase2 {
 
     #[test]
     fn k_up1_to_up3_upgrade_url_draft_filter_and_symlink_target() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _eg = TestEnvGuard::clean(&["AFUSE_RELEASE_JSON_URL", "AFUSE_UPGRADE_ARCHIVE_DIR"]);
         assert!(validate_release_asset_url("https://github.com/topkyo/agent-fuse/releases/download/v0.9.0/afuse.tar.gz").is_ok());
         assert!(validate_release_asset_url("https://objects.githubusercontent.com/github-production-release-asset/foo").is_ok());
         assert!(validate_release_asset_url("https://release-assets.githubusercontent.com/foo").is_ok());
@@ -250,7 +251,7 @@ mod tests_phase2 {
         let link_exe = link_dir.join("afuse");
         fs::write(&real_exe, b"OLD_BIN").unwrap();
         std::os::unix::fs::symlink(&real_exe, &link_exe).unwrap();
-        fs::write(payload.join("afuse"), b"NEW_BIN_V090").unwrap();
+        compile_dummy_afuse_macho(&payload.join("afuse"), "0.9.0");
         let tb = archive.join("afuse-macos-universal.tar.gz");
         assert!(Command::new("/usr/bin/tar").args(["-czf"]).arg(&tb).args(["-C"]).arg(&payload).arg("afuse").status().unwrap().success());
         let sha = sha256_hex(&fs::read(&tb).unwrap());
@@ -258,15 +259,13 @@ mod tests_phase2 {
         let rel = sb.0.join("rel.json");
         fs::write(&rel, r#"{"tag_name":"v0.9.0","html_url":"https://github.com/topkyo/agent-fuse/releases/tag/v0.9.0","assets":[]}"#).unwrap();
 
-        let p_url = env::var_os("AFUSE_RELEASE_JSON_URL");
-        let p_dir = env::var_os("AFUSE_UPGRADE_ARCHIVE_DIR");
         env::set_var("AFUSE_RELEASE_JSON_URL", format!("file://{}", rel.display()));
         env::set_var("AFUSE_UPGRADE_ARCHIVE_DIR", &archive);
         let rep = perform_upgrade_on_exe(&link_exe).unwrap();
         assert!(rep.updated);
         assert!(fs::symlink_metadata(&link_exe).unwrap().file_type().is_symlink());
-        assert_eq!(fs::read(&real_exe).unwrap(), b"NEW_BIN_V090");
-        if let Some(v) = p_url { env::set_var("AFUSE_RELEASE_JSON_URL", v); } else { env::remove_var("AFUSE_RELEASE_JSON_URL"); }
-        if let Some(v) = p_dir { env::set_var("AFUSE_UPGRADE_ARCHIVE_DIR", v); } else { env::remove_var("AFUSE_UPGRADE_ARCHIVE_DIR"); }
+        let out = Command::new(&real_exe).arg("--version").output().unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "afuse 0.9.0");
     }
 }

@@ -15,6 +15,47 @@ use std::sync::Mutex;
 
 pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+pub(crate) struct TestEnvGuard {
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+impl TestEnvGuard {
+    pub(crate) fn clean(keys: &[&'static str]) -> Self {
+        let mut saved = Vec::with_capacity(keys.len());
+        for &k in keys {
+            saved.push((k, env::var_os(k)));
+            env::remove_var(k);
+        }
+        Self { saved }
+    }
+}
+impl Drop for TestEnvGuard {
+    fn drop(&mut self) {
+        for (k, v) in self.saved.drain(..) {
+            match v {
+                Some(val) => env::set_var(k, val),
+                None => env::remove_var(k),
+            }
+        }
+    }
+}
+
+pub(crate) fn compile_dummy_afuse_macho(dest: &Path, version_str: &str) {
+    let src = format!(
+        "#include <stdio.h>\nint main(void){{ puts(\"afuse {}\"); return 0; }}\n",
+        version_str
+    );
+    let c_path = dest.with_extension("c");
+    fs::write(&c_path, src).unwrap();
+    let st = std::process::Command::new("clang")
+        .args(["-O2", "-o"])
+        .arg(dest)
+        .arg(&c_path)
+        .status()
+        .expect("clang compile dummy afuse");
+    let _ = fs::remove_file(&c_path);
+    assert!(st.success(), "clang dummy afuse failed");
+}
+
 struct ScopedDir(PathBuf);
     impl ScopedDir {
         fn new(tag: &str) -> Self {
@@ -114,6 +155,8 @@ struct ScopedDir(PathBuf);
 
     #[test]
     fn prune_label_prefix_preserves_manual_snapshots_and_cleans_orphans() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _eg = TestEnvGuard::clean(&["AFUSE_MAX_AUTO_SNAPS"]);
         let sandbox = ScopedDir::new("prunepfx");
         let ws = sandbox.0.join("ws");
         let vault = sandbox.0.join("vault");
@@ -256,6 +299,8 @@ struct ScopedDir(PathBuf);
 
     #[test]
     fn hook_exec_throttles_caps_ring_at_20_and_uninstall_respects_dry_run() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _eg = TestEnvGuard::clean(&["AFUSE_MAX_AUTO_SNAPS", "AFUSE_HOOK_DISABLE", "AFUSE_GUARDED", "AFUSE_HOOK_THROTTLE_MS"]);
         let sandbox = ScopedDir::new("hookexec");
         let repo = sandbox.0.join("repo");
         let sub = repo.join("src/deep");
@@ -408,6 +453,8 @@ struct ScopedDir(PathBuf);
 
     #[test]
     fn doctor_reports_privacy_safe_apfs_diagnostics() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _eg = TestEnvGuard::clean(&["AFUSE_VAULT_DIR"]);
         let sandbox = ScopedDir::new("doctor");
         let ws = sandbox.0.join("ws");
         let vault = sandbox.0.join("vault");
@@ -485,6 +532,8 @@ struct ScopedDir(PathBuf);
 
     #[test]
     fn hook_auto_snap_discovers_non_git_cargo_root_and_prefers_git() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _eg = TestEnvGuard::clean(&["AFUSE_HOOK_DISABLE", "AFUSE_GUARDED", "AFUSE_MAX_AUTO_SNAPS"]);
         let sandbox = ScopedDir::new("hook-markers");
         let cargo_ws = sandbox.0.join("cargo_only");
         let nested_src = cargo_ws.join("src");
@@ -555,6 +604,8 @@ struct ScopedDir(PathBuf);
 
     #[test]
     fn fast_snapshot_restore_returns_real_merkle_hash_and_full_timing() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _eg = TestEnvGuard::clean(&["AFUSE_VAULT_DIR", "AFUSE_MAX_AUTO_SNAPS"]);
         let sandbox = ScopedDir::new("fast-restore");
         let ws = sandbox.0.join("ws");
         let vault = sandbox.0.join("vault");
@@ -644,13 +695,13 @@ struct ScopedDir(PathBuf);
     #[test]
     fn auto_snapshot_quota_gc_keeps_limit_and_preserves_manual() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _eg = TestEnvGuard::clean(&["AFUSE_MAX_AUTO_SNAPS"]);
         let sandbox = ScopedDir::new("auto-quota");
         let ws = sandbox.0.join("ws");
         let vault = sandbox.0.join("vault");
         fs::create_dir_all(ws.join(".git")).unwrap();
         fs::write(ws.join("a.txt"), b"1\n").unwrap();
 
-        let prev = env::var_os("AFUSE_MAX_AUTO_SNAPS");
         env::set_var("AFUSE_MAX_AUTO_SNAPS", "3");
 
         let m1 = create_snapshot_opts_with_vault(&ws, Some(&vault), "manual", false).unwrap();
@@ -678,16 +729,12 @@ struct ScopedDir(PathBuf);
         assert!(all.iter().any(|m| m.id == pre.id));
         assert!(!all.iter().any(|m| m.id == auto_ids[0]));
         assert!(all.iter().any(|m| m.id == auto_ids[4]));
-
-        match prev {
-            Some(v) => env::set_var("AFUSE_MAX_AUTO_SNAPS", v),
-            None => env::remove_var("AFUSE_MAX_AUTO_SNAPS"),
-        }
     }
 
     #[test]
     fn upgrade_check_and_offline_archive_sha256_self_replace() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _eg = TestEnvGuard::clean(&["AFUSE_RELEASE_JSON_URL", "AFUSE_UPGRADE_ARCHIVE_DIR"]);
         assert!(is_newer_version("0.5.0", "0.5.1"));
         assert!(!is_newer_version("0.5.0", "0.5.0"));
         assert!(!is_newer_version("0.5.0", "0.4.9"));
@@ -702,7 +749,7 @@ struct ScopedDir(PathBuf);
 
         let fake_exe = bin_dir.join("afuse");
         fs::write(&fake_exe, b"OLD_AFUSE_BINARY").unwrap();
-        fs::write(payload_dir.join("afuse"), b"NEW_AFUSE_0_6_0_BINARY").unwrap();
+        compile_dummy_afuse_macho(&payload_dir.join("afuse"), "0.6.0");
 
         let tb_path = archive_dir.join("afuse-macos-universal.tar.gz");
         let tar_st = std::process::Command::new("/usr/bin/tar")
@@ -726,8 +773,6 @@ struct ScopedDir(PathBuf);
         )
         .unwrap();
 
-        let prev_url = env::var_os("AFUSE_RELEASE_JSON_URL");
-        let prev_dir = env::var_os("AFUSE_UPGRADE_ARCHIVE_DIR");
         env::set_var("AFUSE_RELEASE_JSON_URL", format!("file://{}", rel_json_path.display()));
         env::set_var("AFUSE_UPGRADE_ARCHIVE_DIR", &archive_dir);
 
@@ -745,14 +790,18 @@ struct ScopedDir(PathBuf);
         assert_eq!(bad_err.code, ERR_EINVAL);
         assert_eq!(fs::read(&fake_exe).unwrap(), b"OLD_AFUSE_BINARY");
 
-        // Valid checksum completes atomic replacement
+        // Valid checksum completes atomic replacement with codesign + --version probe
         fs::write(&sums_path, format!("{}  afuse-macos-universal.tar.gz\n", real_sha)).unwrap();
         let applied = perform_upgrade_on_exe(&fake_exe).unwrap();
         assert!(applied.updated);
+        assert_eq!(applied.release_state, "updated");
         assert_eq!(applied.verified_sha256.as_deref(), Some(real_sha.as_str()));
-        assert_eq!(fs::read(&fake_exe).unwrap(), b"NEW_AFUSE_0_6_0_BINARY");
+        let ver_out = std::process::Command::new(&fake_exe).arg("--version").output().unwrap();
+        assert!(ver_out.status.success());
+        assert_eq!(String::from_utf8_lossy(&ver_out.stdout).trim(), "afuse 0.6.0");
 
-        // .app bundle binary & symlink pointing inside .app refuse CLI self-overwrite with ERR_USAGE
+        // .app bundle binary & symlink pointing inside .app refuse CLI self-overwrite with ERR_USAGE (even without network)
+        env::set_var("AFUSE_RELEASE_JSON_URL", "http://127.0.0.1:9/unreachable");
         let app_bin = sandbox.0.join("AgentFuse.app/Contents/MacOS/afuse");
         fs::create_dir_all(app_bin.parent().unwrap()).unwrap();
         fs::write(&app_bin, b"APP_BUNDLED").unwrap();
@@ -769,15 +818,6 @@ struct ScopedDir(PathBuf);
         assert!(sym_err.message.contains("Check for Updates"));
         assert!(fs::symlink_metadata(&sym_bin).unwrap().file_type().is_symlink());
         assert_eq!(fs::read(&app_bin).unwrap(), b"APP_BUNDLED");
-
-        match prev_url {
-            Some(v) => env::set_var("AFUSE_RELEASE_JSON_URL", v),
-            None => env::remove_var("AFUSE_RELEASE_JSON_URL"),
-        }
-        match prev_dir {
-            Some(v) => env::set_var("AFUSE_UPGRADE_ARCHIVE_DIR", v),
-            None => env::remove_var("AFUSE_UPGRADE_ARCHIVE_DIR"),
-        }
     }
 
     #[test]
@@ -890,6 +930,7 @@ struct ScopedDir(PathBuf);
 
     #[test]
     fn doctor_flags_forbidden_home_without_creating_vault_state() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let sandbox = ScopedDir::new("doctor-home");
         let vault = sandbox.0.join("vault");
         let real_home = crate::real_home_dir().unwrap();
@@ -903,6 +944,8 @@ struct ScopedDir(PathBuf);
 
     #[test]
     fn blindspot_01_to_09_kernel_regressions() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _eg = TestEnvGuard::clean(&["AFUSE_MAX_AUTO_SNAPS"]);
         let sandbox = ScopedDir::new("blindspots");
         let vault = sandbox.0.join("vault");
 

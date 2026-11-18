@@ -1,8 +1,11 @@
-use crate::apfs::real_home_dir;
+use crate::apfs::{can_write_path, real_home_dir, TMP_SEQ};
 use crate::error::{AfuseError, ERR_EINVAL};
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) const HOOK_MARKER_BEGIN: &str = "# >>> afuse hook v1 >>>";
@@ -134,25 +137,39 @@ pub fn uninstall_hooks(
         };
         let lines: Vec<&str> = raw.lines().collect();
         let mut blocks: Vec<(usize, usize)> = Vec::new();
+        let mut orphan_begins: Vec<usize> = Vec::new();
         let mut cur_begin: Option<usize> = None;
         for (idx, line) in lines.iter().enumerate() {
-            if line.trim() == HOOK_MARKER_BEGIN && cur_begin.is_none() {
-                cur_begin = Some(idx);
-            } else if line.trim() == HOOK_MARKER_END {
+            let trimmed = line.trim();
+            if trimmed == HOOK_MARKER_BEGIN {
+                if let Some(prev_b) = cur_begin.replace(idx) {
+                    orphan_begins.push(prev_b);
+                }
+            } else if trimmed == HOOK_MARKER_END {
                 if let Some(b) = cur_begin.take() {
                     blocks.push((b, idx));
                 }
             }
         }
+        if let Some(b) = cur_begin {
+            orphan_begins.push(b);
+        }
         if !blocks.is_empty() {
             let mut backup_path = None;
             let mut did_apply = false;
             if apply {
-                let ts = SystemTime::now()
+                can_write_path(sf).map_err(|e| {
+                    AfuseError::new(
+                        e.code,
+                        format!("write failed {}: permission denied (errno={})", sf.display(), e.code),
+                    )
+                })?;
+                let ms = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
-                    .as_secs();
-                let bak = PathBuf::from(format!("{}.afuse-bak-{}", sf.display(), ts));
+                    .as_millis();
+                let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+                let bak = PathBuf::from(format!("{}.afuse-bak-{}-{}", sf.display(), ms, seq));
                 fs::copy(sf, &bak).map_err(|err| {
                     AfuseError::new(
                         err.raw_os_error().unwrap_or(1),
@@ -169,16 +186,18 @@ pub fn uninstall_hooks(
                 if !updated.is_empty() && raw.ends_with('\n') {
                     updated.push('\n');
                 }
-                fs::write(sf, updated).map_err(|err| {
-                    AfuseError::new(
+                if let Err(err) = fs::write(sf, updated) {
+                    let _ = fs::set_permissions(&bak, fs::Permissions::from_mode(0o600));
+                    let _ = fs::remove_file(&bak);
+                    return Err(AfuseError::new(
                         err.raw_os_error().unwrap_or(1),
                         format!("write failed {}: {}", sf.display(), err),
-                    )
-                })?;
+                    ));
+                }
                 backup_path = Some(bak.to_string_lossy().into_owned());
                 did_apply = true;
             }
-            for (b, e) in blocks {
+            for (b, e) in &blocks {
                 actions.push(UninstallAction {
                     path: sf.to_string_lossy().into_owned(),
                     kind: "zsh_marker_block".to_string(),
@@ -188,27 +207,40 @@ pub fn uninstall_hooks(
                     backup_path: backup_path.clone(),
                 });
             }
-        } else {
-            for (idx, line) in lines.iter().enumerate() {
-                if line.contains("afuse hook") {
-                    actions.push(UninstallAction {
-                        path: sf.to_string_lossy().into_owned(),
-                        kind: "manual_shell_line".to_string(),
-                        start_line: idx + 1,
-                        end_line: idx + 1,
-                        applied: false,
-                        backup_path: None,
-                    });
-                }
+        }
+        let mut manual_lines: BTreeSet<usize> = orphan_begins.into_iter().collect();
+        for (idx, line) in lines.iter().enumerate() {
+            if !blocks.iter().any(|(b, e)| idx >= *b && idx <= *e) && line.contains("afuse hook") {
+                manual_lines.insert(idx);
             }
+        }
+        for idx in manual_lines {
+            actions.push(UninstallAction {
+                path: sf.to_string_lossy().into_owned(),
+                kind: "manual_shell_line".to_string(),
+                start_line: idx + 1,
+                end_line: idx + 1,
+                applied: false,
+                backup_path: None,
+            });
         }
     }
 
-    let claude_files = [
+    let mut seen_claude: BTreeSet<PathBuf> = BTreeSet::new();
+    let claude_candidates = [
         home.join(".claude").join("settings.json"),
         workspace.join(".claude").join("settings.json"),
     ];
-    for cf in &claude_files {
+    for cf in &claude_candidates {
+        let abs = if cf.is_absolute() {
+            cf.clone()
+        } else {
+            env::current_dir().map(|d| d.join(cf)).unwrap_or_else(|_| cf.clone())
+        };
+        let key = fs::canonicalize(&abs).unwrap_or(abs);
+        if !seen_claude.insert(key) {
+            continue;
+        }
         let Ok(raw) = fs::read_to_string(cf) else {
             continue;
         };

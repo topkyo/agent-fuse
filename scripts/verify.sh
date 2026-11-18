@@ -421,6 +421,40 @@ DOC_SYS_JSON="$(cd / && AFUSE_VAULT_DIR="$P2_VAULT" "$BIN_PATH" --json doctor)"
 printf '%s' "$DOC_SYS_JSON" | grep -q '"ok":true' || { echo "FAIL: doctor from cwd=/ failed: $DOC_SYS_JSON" >&2; exit 1; }
 AFUSE_VAULT_DIR="$P2_VAULT" "$BIN_PATH" --workspace "$P2_WS" --json prune --keep 0 >/dev/null
 
+# R4 CLI contract checks: upgrade/hook '--', exit code 2 on bad opts, --json --help, 404 unpublished apply
+"$BIN_PATH" upgrade --help | grep -q "USAGE:" || { echo "FAIL: upgrade --help missing USAGE" >&2; exit 1; }
+"$BIN_PATH" upgrade --json --help | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] is True and "USAGE:" in d["usage"], d'
+"$BIN_PATH" hook --help | grep -q "USAGE:" || { echo "FAIL: hook --help missing USAGE" >&2; exit 1; }
+"$BIN_PATH" hook --json --help | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] is True and "USAGE:" in d["usage"], d'
+set +e
+"$BIN_PATH" upgrade --bad-opt >/dev/null 2>&1; UP_BAD_RC=$?
+"$BIN_PATH" upgrade -- --check >/dev/null 2>&1; UP_DASH_RC=$?
+"$BIN_PATH" hook --bad-opt >/dev/null 2>&1; HK_BAD_RC=$?
+"$BIN_PATH" hook -- --exec >/dev/null 2>&1; HK_DASH_RC=$?
+set -e
+[ "$UP_BAD_RC" -eq 2 ] && [ "$UP_DASH_RC" -eq 2 ] && [ "$HK_BAD_RC" -eq 2 ] && [ "$HK_DASH_RC" -eq 2 ] || {
+  echo "FAIL: expected exit code 2 for bad upgrade/hook flags, got up=$UP_BAD_RC up_dash=$UP_DASH_RC hk=$HK_BAD_RC hk_dash=$HK_DASH_RC" >&2
+  exit 1
+}
+# Verify 404 apply text and JSON using fresh local server
+python3 - "$BIN_PATH" <<'PY'
+import http.server, json, os, subprocess, threading, sys
+bin_p = sys.argv[1]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(404); self.end_headers(); self.wfile.write(b"{}")
+    def log_message(self, *a): pass
+s = http.server.HTTPServer(("127.0.0.1", 0), H)
+t = threading.Thread(target=lambda: [s.handle_request() for _ in range(2)], daemon=True)
+t.start()
+env = dict(os.environ, AFUSE_RELEASE_JSON_URL=f"http://127.0.0.1:{s.server_address[1]}/latest")
+r_json = subprocess.check_output([bin_p, "upgrade", "--json", "--"], env=env, text=True)
+d = json.loads(r_json)
+assert d["ok"] is True and d["updated"] is False and d["release_state"] == "unpublished", d
+r_txt = subprocess.check_output([bin_p, "upgrade"], env=env, text=True)
+assert "no GitHub Release has been published yet" in r_txt, r_txt
+PY
+
 "$BIN_PATH" --workspace "$WS" --json prune --keep 0 >/dev/null
 AFUSE_VAULT_DIR="$HOOK_VAULT" "$BIN_PATH" --workspace "$HOOK_REPO" --json prune --keep 0 >/dev/null
 echo "PASS: Gate 2 verified (1,000 files restored, root Inode=$INO_AFTER preserved, binary=${BIN_BYTES}B, RSS=${RSS_BYTES}B, 64MiB_RSS=${BIG_RSS}B, hook & deep-audit suite green)."

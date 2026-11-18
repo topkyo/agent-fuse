@@ -1,6 +1,6 @@
 use crate::apfs::{force_remove_all, lstat_inode_mode, TMP_SEQ};
 use crate::snapshot::list_snapshots_unlocked;
-use crate::tests::ENV_LOCK;
+use crate::tests::{TestEnvGuard, ENV_LOCK};
 use crate::*;
 use std::collections::BTreeMap;
 use std::env;
@@ -133,6 +133,8 @@ fn upgrade_http_contract_200_404_and_500_over_real_tcp() {
 
 #[test]
 fn deleted_workspace_recovery_and_non_creation_invariants() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _eg = TestEnvGuard::clean(&["AFUSE_MAX_AUTO_SNAPS"]);
     let sb = TempSandbox::new("delrec");
     let vault = sb.0.join("vault");
     let parent = sb.0.join("deep/folder");
@@ -183,6 +185,8 @@ fn deleted_workspace_recovery_and_non_creation_invariants() {
 
 #[test]
 fn stateful_280_step_property_invariants_i1_and_i2() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _eg = TestEnvGuard::clean(&["AFUSE_MAX_AUTO_SNAPS"]);
     let sb = TempSandbox::new("prop280");
     let vault = sb.0.join("vault");
     let ws = sb.0.join("prop-repo");

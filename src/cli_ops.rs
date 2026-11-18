@@ -1,8 +1,7 @@
 use crate::emit_error;
 use agent_fuse::{
-    check_for_updates, json_escape, render_hook_snippet, run_claude_hook_exec_stdio,
-    run_doctor_with_opts, run_guarded_command, run_upgrade_apply, run_zsh_hook_exec,
-    uninstall_hooks, AfuseError, GuardConfig,
+    json_escape, render_hook_snippet, run_claude_hook_exec_stdio, run_doctor_with_opts,
+    run_guarded_command, run_zsh_hook_exec, uninstall_hooks, AfuseError, GuardConfig,
 };
 use std::path::{Path, PathBuf};
 use std::process;
@@ -13,64 +12,103 @@ fn json_opt_str(v: &Option<String>) -> String {
         .unwrap_or_else(|| "null".to_string())
 }
 
-fn take_str_flag(rest: &[String], idx: usize, flag: &str, json: bool) -> String {
+fn take_str_flag(rest: &[String], idx: usize, flag: &str, code: i32, json: bool) -> String {
     if idx + 1 >= rest.len() {
-        emit_error(json, &AfuseError::new(22, format!("{} requires an argument", flag)));
+        emit_error(json, &AfuseError::new(code, format!("{} requires an argument", flag)));
     }
     rest[idx + 1].clone()
 }
 
 pub(crate) fn cmd_hook(workspace: PathBuf, rest: &[String], mut json: bool) {
     let mut target = String::new();
-    let mut is_exec = false;
-    let mut apply = false;
+    let (mut is_exec, mut apply, mut want_help, mut end_opts) = (false, false, false, false);
     let mut custom_cwd: Option<PathBuf> = None;
     let mut custom_tool = String::new();
     let mut custom_home: Option<PathBuf> = None;
-    let want_exec = rest.iter().any(|a| a == "--exec");
+    let want_exec = rest
+        .iter()
+        .take_while(|a| a.as_str() != "--")
+        .any(|a| a == "--exec");
 
     let mut i = 0usize;
     while i < rest.len() {
-        match rest[i].as_str() {
-            "--help" | "-h" if !want_exec => {
-                println!(
-                    "USAGE:\n  afuse hook <zsh|claude> [--json]\n  afuse hook uninstall [--apply] [--home <DIR>] [--json]"
-                );
-                return;
-            }
-            "--exec" => is_exec = true,
-            "--apply" => apply = true,
-            "--json" => json = true,
-            "--cwd" => {
-                custom_cwd = Some(PathBuf::from(take_str_flag(rest, i, "--cwd", json)));
-                i += 1;
-            }
-            "--tool" => {
-                custom_tool = take_str_flag(rest, i, "--tool", json);
-                i += 1;
-            }
-            "--home" => {
-                custom_home = Some(PathBuf::from(take_str_flag(rest, i, "--home", json)));
-                i += 1;
-            }
-            "print" => {}
-            "--claude" | "claude" => target = "claude".to_string(),
-            "--zsh" | "--shell" | "zsh" => target = "zsh".to_string(),
-            "uninstall" => target = "uninstall".to_string(),
-            other if other.starts_with('-') => {
-                if !want_exec {
-                    emit_error(json, &AfuseError::new(22, "unknown hook option"));
+        let arg = rest[i].as_str();
+        if !want_exec && !end_opts && arg == "--" {
+            end_opts = true;
+            i += 1;
+            continue;
+        }
+        if !end_opts {
+            match arg {
+                "--help" | "-h" if !want_exec => { want_help = true; i += 1; continue; }
+                "--exec" => { is_exec = true; i += 1; continue; }
+                "--apply" => { apply = true; i += 1; continue; }
+                "--json" => { json = true; i += 1; continue; }
+                "--cwd" => {
+                    custom_cwd = Some(PathBuf::from(take_str_flag(rest, i, "--cwd", 2, json)));
+                    i += 2;
+                    continue;
                 }
+                "--tool" => {
+                    custom_tool = take_str_flag(rest, i, "--tool", 2, json);
+                    i += 2;
+                    continue;
+                }
+                "--home" => {
+                    custom_home = Some(PathBuf::from(take_str_flag(rest, i, "--home", 2, json)));
+                    i += 2;
+                    continue;
+                }
+                "--claude" => { target = "claude".to_string(); i += 1; continue; }
+                "--zsh" | "--shell" => { target = "zsh".to_string(); i += 1; continue; }
+                other if other.starts_with('-') => {
+                    if !want_exec {
+                        emit_error(json, &AfuseError::new(2, "unknown hook option"));
+                    }
+                    i += 1;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        match arg {
+            "print" if !end_opts => {}
+            "claude" | "zsh" | "uninstall" => {
+                if !target.is_empty() && target != arg && !want_exec {
+                    emit_error(json, &AfuseError::new(2, "unexpected extra hook target"));
+                }
+                target = arg.to_string();
             }
             other => {
-                if target.is_empty() {
-                    target = other.to_string();
-                } else if !want_exec {
-                    emit_error(json, &AfuseError::new(22, "unexpected extra hook argument"));
+                if want_exec {
+                    if target.is_empty() {
+                        target = other.to_string();
+                    }
+                } else {
+                    emit_error(
+                        json,
+                        &AfuseError::new(
+                            2,
+                            format!(
+                                "unsupported hook target '{}': expected 'zsh', 'claude', or 'uninstall'",
+                                other
+                            ),
+                        ),
+                    );
                 }
             }
         }
         i += 1;
+    }
+
+    if want_help && !want_exec {
+        let usage = "USAGE: afuse hook <zsh|claude|uninstall> [--apply] [--home <DIR>] [--json]";
+        if json {
+            println!("{{\"ok\":true,\"usage\":\"{}\"}}", json_escape(usage));
+        } else {
+            println!("USAGE:\n  afuse hook <zsh|claude> [--json]\n  afuse hook uninstall [--apply] [--home <DIR>] [--json]");
+        }
+        return;
     }
 
     if is_exec {
@@ -298,61 +336,6 @@ pub(crate) fn cmd_doctor(workspace: &Path, explicit_ws: bool, rest: &[String], m
             process::exit(if rep.ok { 0 } else { 1 });
         }
         Err(e) => emit_error(json, &e),
-    }
-}
-
-pub(crate) fn cmd_upgrade(rest: &[String], mut json: bool) {
-    let mut check_only = false;
-    for arg in rest {
-        match arg.as_str() {
-            "--help" | "-h" => {
-                println!("USAGE: afuse [--json] upgrade [--check]");
-                return;
-            }
-            "--check" => check_only = true,
-            "--json" => json = true,
-            _ => emit_error(json, &AfuseError::new(22, "unknown upgrade option")),
-        }
-    }
-    if check_only {
-        match check_for_updates() {
-            Ok(rep) => {
-                if json {
-                    println!("{}", rep.to_json());
-                } else if rep.release_state == "unpublished" {
-                    println!(
-                        "afuse v{} is installed; no GitHub Release has been published yet.",
-                        rep.current_version
-                    );
-                } else if rep.update_available {
-                    println!(
-                        "Update available: v{} -> v{}\nRelease: {}\nHomebrew: {}",
-                        rep.current_version, rep.latest_version, rep.release_url, rep.brew_cmd
-                    );
-                } else {
-                    println!("afuse v{} is up to date (latest: v{}).", rep.current_version, rep.latest_version);
-                }
-            }
-            Err(e) => emit_error(json, &e),
-        }
-    } else {
-        match run_upgrade_apply() {
-            Ok(rep) => {
-                if json {
-                    println!("{}", rep.to_json());
-                } else if rep.updated {
-                    println!(
-                        "Upgraded afuse: v{} -> v{} (sha256={})",
-                        rep.current_version,
-                        rep.latest_version,
-                        rep.verified_sha256.as_deref().unwrap_or("verified")
-                    );
-                } else {
-                    println!("afuse v{} is already up to date (latest: v{}).", rep.current_version, rep.latest_version);
-                }
-            }
-            Err(e) => emit_error(json, &e),
-        }
     }
 }
 

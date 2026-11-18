@@ -47,7 +47,7 @@ Measured on a **2015 MacBook Pro (`Intel Core i5-5257U`, 8 GB RAM, `macOS 12.7.6
 | Disk allocation at snapshot time (`t=0`) | Object copy | Duplicate copies | **`0 Bytes` CoW (`clonefile(2)`) + Auto-GC cap (`AFUSE_MAX_AUTO_SNAPS=50`)** |
 | Preserves active shell `cwd` root Inode | Yes | Yes | **Yes (`renamex_np` atomic entry swap)** |
 | Kills runaway subshell process groups | No | No | **`SIGSTOP` -> `SIGKILL -pgid` + auto-rollback** |
-| Binary / DMG size & peak RAM | N/A | `500 MB+` Electron | **`550 KiB` stripped CLI (`1.73 MiB` 1k-file RSS · `1.20 MiB` 64 MiB-file RSS) · `< 5 MiB` Universal DMG (`~2.7 MiB` single-arch)** |
+| Binary / DMG size & peak RAM | N/A | `500 MB+` Electron | **`695 KiB` stripped CLI (`1.73 MiB` 1k-file RSS · `1.32 MiB` 64 MiB-file RSS) · `< 5 MiB` Universal DMG (`3.04 MiB` single-arch)** |
 
 ---
 
@@ -84,7 +84,7 @@ Automatic `auto:*` checkpoints enforce a rolling ring cap via `AFUSE_MAX_AUTO_SN
 <a id="agentfuse-pro"></a>
 ## **AgentFuse Pro** Native Menu Bar & Control Window App (`$19` / `¥98` One-Time)
 
-Prefer a zero-friction native macOS desktop shield (pure AppKit + QuartzCore + CoreGraphics Swift, `< 400` LOC per module, `< 5 MiB` Universal DMG / `~2.7 MiB` single-arch, `61.42 ms` cold start, `3.26 ms` CPU across a 2s 2-repo idle window)?
+Prefer a zero-friction native macOS desktop shield (pure AppKit + QuartzCore + CoreGraphics Swift, `< 400` LOC per module, `< 5 MiB` Universal DMG / `3.04 MiB` single-arch, `60.72 ms` cold start, `2.92 ms` CPU across a 2s 2-repo idle window)?
 
 - **Centered `500×410` Dark Vibrancy Control Window + 1-Step Protection**: Launches a `500×410` dark vibrancy `NSWindow` centered on screen (immune to Dozer/Bartender/Notch hiding, re-summoned anytime by reopening `AgentFuse.app` or clicking the menu bar shield icon), featuring SF Pro / PingFang SC typography, a one-click `中文 | EN` segmented toggle, distraction-free onboarding (drag any plain folder or single file to start 0-Byte APFS protection immediately or run the **5-Second Safe Demo**), native `Edit` + `Actions` shortcuts (`⌘O` bind, `⌘S` snap, `⌘R` restore, `⌘W` / `Esc` dismiss), and colored diff inspection.
 - **Drag-and-Drop Multi-Target Watch (Plain Folders & Single Files) + Trash Auto-Purge**: Drop up to `5` ordinary folders (zero `.git` required) or individual files (including sub-items inside `~/Desktop`, `~/Documents`, or `~/Downloads`) into the Control Window or onto the menu bar shield icon. Single-file binds isolate sibling files cleanly; items deleted into macOS `~/.Trash` are matched by `(fsid, ino)` and automatically purged upon restore (gracefully keeping untouched on TCC privacy restrictions). Includes `FSEvents` rolling baselines, a `>= 20` file mass-delete tripwire (flips the menu bar shield red with `<N>`, delivers a native macOS banner notification when unfocused, and enables asynchronous non-blocking **Instant Rescue**), a **Restore Single File** submenu for directory targets, opt-in **Check for Updates**, and `--background` **Launch at Login** (terminal & Claude Code hooks remain auditable via CLI `afuse hook zsh | claude`).

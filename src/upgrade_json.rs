@@ -30,6 +30,7 @@ pub struct UpgradeApplyReport {
     pub current_version: String,
     pub latest_version: String,
     pub updated: bool,
+    pub release_state: String,
     pub release_url: String,
     pub brew_cmd: String,
     pub verified_sha256: Option<String>,
@@ -63,8 +64,9 @@ impl UpgradeApplyReport {
             .map(|s| format!("\"{}\"", json_escape(s)))
             .unwrap_or_else(|| "null".to_string());
         format!(
-            "{{\"ok\":true,\"updated\":{},\"current_version\":\"{}\",\"latest_version\":\"{}\",\"release_url\":\"{}\",\"brew_cmd\":\"{}\",\"verified_sha256\":{},\"target_path\":{}}}",
+            "{{\"ok\":true,\"updated\":{},\"release_state\":\"{}\",\"current_version\":\"{}\",\"latest_version\":\"{}\",\"release_url\":\"{}\",\"brew_cmd\":\"{}\",\"verified_sha256\":{},\"target_path\":{}}}",
             self.updated,
+            json_escape(&self.release_state),
             json_escape(&self.current_version),
             json_escape(&self.latest_version),
             json_escape(&self.release_url),
@@ -142,6 +144,15 @@ pub fn is_newer_version(current: &str, latest: &str) -> bool {
     }
 }
 
+fn parse_hex4_bytes(bytes: &[u8], idx: usize) -> Option<u32> {
+    let slice = bytes.get(idx..idx + 4)?;
+    if !slice.iter().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let hex = std::str::from_utf8(slice).ok()?;
+    u32::from_str_radix(hex, 16).ok()
+}
+
 fn parse_json_string_at(bytes: &[u8], start_quote: usize) -> Option<(String, usize)> {
     if bytes.get(start_quote).copied() != Some(b'"') {
         return None;
@@ -157,24 +168,35 @@ fn parse_json_string_at(bytes: &[u8], start_quote: usize) -> Option<(String, usi
                     return None;
                 }
                 match bytes[i] {
-                    b'"' => out.push('"'),
-                    b'\\' => out.push('\\'),
-                    b'/' => out.push('/'),
-                    b'n' => out.push('\n'),
-                    b'r' => out.push('\r'),
-                    b't' => out.push('\t'),
-                    b'u' if i + 4 < bytes.len() => {
-                        let hex = std::str::from_utf8(&bytes[i + 1..i + 5]).ok()?;
-                        if let Ok(code) = u32::from_str_radix(hex, 16) {
-                            if let Some(ch) = char::from_u32(code) {
-                                out.push(ch);
+                    b'"' => { out.push('"'); i += 1; }
+                    b'\\' => { out.push('\\'); i += 1; }
+                    b'/' => { out.push('/'); i += 1; }
+                    b'b' => { out.push('\u{0008}'); i += 1; }
+                    b'f' => { out.push('\u{000C}'); i += 1; }
+                    b'n' => { out.push('\n'); i += 1; }
+                    b'r' => { out.push('\r'); i += 1; }
+                    b't' => { out.push('\t'); i += 1; }
+                    b'u' => {
+                        let u1 = parse_hex4_bytes(bytes, i + 1)?;
+                        i += 5;
+                        if (0xD800..=0xDBFF).contains(&u1) && bytes.get(i..i + 2) == Some(b"\\u") {
+                            if let Some(u2) = parse_hex4_bytes(bytes, i + 2) {
+                                if (0xDC00..=0xDFFF).contains(&u2) {
+                                    i += 6;
+                                    let cp = 0x10000 + (((u1 - 0xD800) << 10) | (u2 - 0xDC00));
+                                    out.push(char::from_u32(cp).unwrap_or(char::REPLACEMENT_CHARACTER));
+                                    continue;
+                                }
                             }
+                            out.push(char::REPLACEMENT_CHARACTER);
+                        } else if (0xD800..=0xDFFF).contains(&u1) {
+                            out.push(char::REPLACEMENT_CHARACTER);
+                        } else if let Some(ch) = char::from_u32(u1) {
+                            out.push(ch);
                         }
-                        i += 4;
                     }
-                    other => out.push(other as char),
+                    other => { out.push(other as char); i += 1; }
                 }
-                i += 1;
             }
             _ => {
                 let start = i;
@@ -318,7 +340,9 @@ pub fn parse_release_json(raw: &str) -> Result<ReleaseInfo, AfuseError> {
         let arr = &bytes[as_start..as_end];
         let mut i = 0usize;
         while i < arr.len() {
-            if arr[i] == b'{' {
+            if arr[i] == b'"' {
+                i = parse_json_string_at(arr, i).map(|(_, n)| n).unwrap_or(arr.len());
+            } else if arr[i] == b'{' {
                 let end = skip_json_value(arr, i);
                 let slice = &arr[i..end];
                 if let (Some(name), Some(dl)) = (

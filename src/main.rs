@@ -1,5 +1,6 @@
 mod cli_cmds;
 mod cli_ops;
+mod cli_upgrade;
 
 use agent_fuse::{json_escape, sanitize_terminal_text, AfuseError};
 use std::env;
@@ -74,7 +75,11 @@ fn main() {
                 idx += 2;
             }
             "--help" | "-h" => {
-                print_usage();
+                if json {
+                    println!("{{\"ok\":true,\"version\":\"{}\",\"usage\":\"afuse [-w | --workspace <DIR>] [--json] <SUBCOMMAND> [OPTIONS]\"}}", VERSION);
+                } else {
+                    print_usage();
+                }
                 return;
             }
             "--version" | "-V" => {
@@ -134,7 +139,7 @@ fn main() {
         "hook" => cli_ops::cmd_hook(workspace, rest, json),
         "guard" => cli_ops::cmd_guard(&workspace, rest, json),
         "doctor" => cli_ops::cmd_doctor(&workspace, explicit_workspace, rest, json),
-        "upgrade" => cli_ops::cmd_upgrade(rest, json),
+        "upgrade" => cli_upgrade::cmd_upgrade(rest, json),
         other => emit_error(
             json,
             &AfuseError::new(2, format!("unknown subcommand '{}'", sanitize_terminal_text(other))),

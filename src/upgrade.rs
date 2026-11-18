@@ -5,6 +5,7 @@ pub use crate::upgrade_json::{
     is_newer_version, parse_release_json, validate_release_asset_url, ReleaseAsset, ReleaseInfo,
     UpgradeApplyReport, UpgradeCheckReport,
 };
+use crate::upgrade_verify::{find_extracted_afuse, prepare_and_verify_staged_binary};
 use std::env;
 use std::fs::{self, File};
 use std::io::Read;
@@ -152,26 +153,6 @@ fn expected_sha256_from_sums(sums_text: &str, tarball_name: &str) -> Result<Stri
     ))
 }
 
-fn find_extracted_afuse(dir: &Path) -> Option<PathBuf> {
-    for rel in ["afuse", "bin/afuse"] {
-        let cand = dir.join(rel);
-        if cand.is_file() {
-            return Some(cand);
-        }
-    }
-    if let Ok(rd) = fs::read_dir(dir) {
-        for entry in rd.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                if let Some(found) = find_extracted_afuse(&p) {
-                    return Some(found);
-                }
-            }
-        }
-    }
-    None
-}
-
 struct StageCleanup(PathBuf);
 impl Drop for StageCleanup {
     fn drop(&mut self) {
@@ -180,6 +161,22 @@ impl Drop for StageCleanup {
 }
 
 pub fn perform_upgrade_on_exe(exe_path: &Path) -> Result<UpgradeApplyReport, AfuseError> {
+    let canon_exe = fs::canonicalize(exe_path).ok();
+    let is_app_bundled = exe_path.to_string_lossy().contains(".app/Contents/MacOS/")
+        || canon_exe
+            .as_ref()
+            .map(|p| p.to_string_lossy().contains(".app/Contents/MacOS/"))
+            .unwrap_or(false);
+    if is_app_bundled {
+        return Err(AfuseError::new(
+            ERR_USAGE,
+            format!(
+                "afuse is bundled inside AgentFuse.app; update via menu bar 'Check for Updates…', DMG, or run: {}",
+                BREW_UPGRADE_CMD
+            ),
+        ));
+    }
+
     let current = env!("CARGO_PKG_VERSION").to_string();
     let rel = match fetch_release_outcome()? {
         ReleaseFetch::Unpublished => {
@@ -187,6 +184,7 @@ pub fn perform_upgrade_on_exe(exe_path: &Path) -> Result<UpgradeApplyReport, Afu
                 current_version: current.clone(),
                 latest_version: current,
                 updated: false,
+                release_state: "unpublished".to_string(),
                 release_url: DEFAULT_RELEASES_WEB_URL.to_string(),
                 brew_cmd: BREW_UPGRADE_CMD.to_string(),
                 verified_sha256: None,
@@ -200,27 +198,12 @@ pub fn perform_upgrade_on_exe(exe_path: &Path) -> Result<UpgradeApplyReport, Afu
             current_version: current,
             latest_version: rel.latest_version,
             updated: false,
+            release_state: "up_to_date".to_string(),
             release_url: rel.html_url,
             brew_cmd: BREW_UPGRADE_CMD.to_string(),
             verified_sha256: None,
             target_path: Some(exe_path.to_string_lossy().into_owned()),
         });
-    }
-
-    let canon_exe = fs::canonicalize(exe_path).ok();
-    let is_app_bundled = exe_path.to_string_lossy().contains(".app/Contents/MacOS/")
-        || canon_exe
-            .as_ref()
-            .map(|p| p.to_string_lossy().contains(".app/Contents/MacOS/"))
-            .unwrap_or(false);
-    if is_app_bundled {
-        return Err(AfuseError::new(
-            ERR_USAGE,
-            format!(
-                "afuse is bundled inside AgentFuse.app; update via menu bar 'Check for Updates…' or run: {}",
-                BREW_UPGRADE_CMD
-            ),
-        ));
     }
 
     let is_symlink_exe = fs::symlink_metadata(exe_path).map(|m| m.file_type().is_symlink()).unwrap_or(false);
@@ -342,6 +325,10 @@ pub fn perform_upgrade_on_exe(exe_path: &Path) -> Result<UpgradeApplyReport, Afu
         ));
     }
     let _ = fs::set_permissions(&staged_bin, fs::Permissions::from_mode(0o755));
+    if let Err(e) = prepare_and_verify_staged_binary(&staged_bin) {
+        let _ = force_remove_all(&staged_bin);
+        return Err(e);
+    }
     if let Err(e) = fs::rename(&staged_bin, &install_target) {
         let _ = force_remove_all(&staged_bin);
         return Err(AfuseError::new(
@@ -354,6 +341,7 @@ pub fn perform_upgrade_on_exe(exe_path: &Path) -> Result<UpgradeApplyReport, Afu
         current_version: current,
         latest_version: rel.latest_version,
         updated: true,
+        release_state: "updated".to_string(),
         release_url: rel.html_url,
         brew_cmd: BREW_UPGRADE_CMD.to_string(),
         verified_sha256: Some(actual_sha),

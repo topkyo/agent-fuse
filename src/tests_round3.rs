@@ -82,6 +82,8 @@ fn r3_bug_01_case_insensitive_top_and_selective_restore_preserves_and_fixes_case
 
 #[test]
 fn r3_bug_02_git_repo_empty_project_files_blocks_auto_snapshot() {
+    let _lock = crate::tests::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _eg = crate::tests::TestEnvGuard::clean(&["AFUSE_MAX_AUTO_SNAPS"]);
     let sb = R3ScopedDir::new("r3b02");
     let (ws, vault) = (sb.0.join("ws"), sb.0.join("vault"));
     fs::create_dir_all(ws.join(".git/objects")).unwrap();
@@ -100,6 +102,8 @@ fn r3_bug_02_git_repo_empty_project_files_blocks_auto_snapshot() {
 
 #[test]
 fn r3_bug_03_06_corrupt_zombie_snaps_and_if_changed_ignores_pre_restore() {
+    let _lock = crate::tests::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _eg = crate::tests::TestEnvGuard::clean(&["AFUSE_MAX_AUTO_SNAPS"]);
     let sb = R3ScopedDir::new("r3b0306");
     let (ws, vault) = (sb.0.join("ws"), sb.0.join("vault"));
     fs::create_dir_all(&ws).unwrap();
@@ -190,6 +194,8 @@ fn r3_bug_05_chmod_0000_snap_and_uchg_selective_restore() {
 
 #[test]
 fn r3_bug_07_08_guard_single_file_swap_vault_kind_and_doctor_root_cwd() {
+    let _lock = crate::tests::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _eg = crate::tests::TestEnvGuard::clean(&["AFUSE_MAX_AUTO_SNAPS"]);
     let sb = R3ScopedDir::new("r3b0708");
     let (ws_file, vault) = (sb.0.join("solo.txt"), sb.0.join("vault"));
     fs::write(&ws_file, b"important-single").unwrap();
@@ -226,6 +232,8 @@ fn r3_bug_07_08_guard_single_file_swap_vault_kind_and_doctor_root_cwd() {
 
 #[test]
 fn r3_bug_09_dedup_adjacent_auto_snaps_and_calibrate_legacy_meta() {
+    let _lock = crate::tests::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _eg = crate::tests::TestEnvGuard::clean(&["AFUSE_MAX_AUTO_SNAPS"]);
     let sb = R3ScopedDir::new("r3b09");
     let (ws, vault) = (sb.0.join("ws"), sb.0.join("vault"));
     fs::create_dir_all(ws.join(".git")).unwrap();

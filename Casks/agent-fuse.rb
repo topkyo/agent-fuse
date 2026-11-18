@@ -19,5 +19,7 @@ cask "agent-fuse" do
     "~/Library/Application Support/AgentFuse",
     "~/Library/LaunchAgents/app.agentfuse.pro.plist",
     "~/Library/Preferences/app.agentfuse.pro.plist",
+    "~/.agent-fuse",
+    "~/.cache/afuse-interactive-demo",
   ]
 end

@@ -35,6 +35,7 @@ pub mod trash;
 pub mod unicode_norm;
 pub mod upgrade;
 pub mod upgrade_json;
+pub(crate) mod upgrade_verify;
 pub mod vault;
 mod vault_policy;
 
@@ -96,5 +97,7 @@ mod tests_invariants;
 mod tests_phase2;
 #[cfg(test)]
 mod tests_round3;
+#[cfg(test)]
+mod tests_round4;
 #[cfg(test)]
 mod tests_trash_targets;
