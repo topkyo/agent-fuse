@@ -1,5 +1,5 @@
 use crate::apfs::{can_read_write, current_euid, real_home_dir};
-use crate::error::{AfuseError, ERR_EACCES, ERR_EINVAL};
+use crate::error::{AfuseError, ERR_EACCES, ERR_EINVAL, ERR_ENOENT};
 use crate::meta::read_meta;
 use crate::vault::{is_ignored_name, TargetKind};
 use std::env;
@@ -233,4 +233,52 @@ pub(crate) fn enforce_vault_target_kind(
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct VerifiedLiveTarget {
+    path: PathBuf,
+    kind: TargetKind,
+    dev: u64,
+    ino: u64,
+}
+
+impl VerifiedLiveTarget {
+    pub(crate) fn open_matching(ws: &Path, expected_kind: TargetKind) -> Result<Self, AfuseError> {
+        let meta = fs::symlink_metadata(ws).map_err(|e| {
+            AfuseError::new(
+                e.raw_os_error().unwrap_or(ERR_ENOENT),
+                format!("live target missing at '{}'", ws.display()),
+            )
+        })?;
+        if meta.file_type().is_symlink() {
+            return Err(AfuseError::new(ERR_EINVAL, "live target must not be a symbolic link"));
+        }
+        let live_kind = if meta.file_type().is_dir() {
+            TargetKind::Directory
+        } else if meta.file_type().is_file() {
+            TargetKind::SingleFile
+        } else {
+            return Err(AfuseError::new(ERR_EINVAL, "live target must be a regular file or directory"));
+        };
+        if live_kind != expected_kind {
+            return Err(AfuseError::new(
+                ERR_EINVAL,
+                format!(
+                    "target kind mismatch: expected '{}' while live path is '{}'",
+                    expected_kind.as_str(),
+                    live_kind.as_str()
+                ),
+            ));
+        }
+        Ok(Self { path: ws.to_path_buf(), kind: live_kind, dev: meta.dev(), ino: meta.ino() })
+    }
+
+    pub(crate) fn path(&self) -> &Path { &self.path }
+    pub(crate) fn kind(&self) -> TargetKind { self.kind }
+    #[allow(dead_code)]
+    pub(crate) fn dev(&self) -> u64 { self.dev }
+    #[allow(dead_code)]
+    pub(crate) fn ino(&self) -> u64 { self.ino }
 }

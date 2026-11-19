@@ -346,4 +346,30 @@ mod tests_round4 {
         assert!(!outside.join("node_modules").exists(), "must not copy staged ignored dir through symlink");
         assert_eq!(fs::read_to_string(ws.join("a.txt")).unwrap(), "root-a\n");
     }
+
+    #[test]
+    fn verified_live_target_rejects_symlink_and_kind_mismatch() {
+        use crate::vault::TargetKind;
+        use crate::vault_policy::VerifiedLiveTarget;
+        let sb = R4ScopedDir::new("vlt-guard");
+        let dir = sb.0.join("dir");
+        let file = sb.0.join("note.txt");
+        let sym = sb.0.join("sym-dir");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&file, "hi\n").unwrap();
+        symlink(&dir, &sym).unwrap();
+
+        let ok_dir = VerifiedLiveTarget::open_matching(&dir, TargetKind::Directory).unwrap();
+        assert_eq!(ok_dir.kind(), TargetKind::Directory);
+        assert_eq!(ok_dir.path(), dir.as_path());
+        assert!(ok_dir.dev() > 0 && ok_dir.ino() > 0);
+        let ok_file = VerifiedLiveTarget::open_matching(&file, TargetKind::SingleFile).unwrap();
+        assert_eq!(ok_file.kind(), TargetKind::SingleFile);
+
+        assert_eq!(VerifiedLiveTarget::open_matching(&dir, TargetKind::SingleFile).unwrap_err().code, ERR_EINVAL);
+        assert_eq!(VerifiedLiveTarget::open_matching(&file, TargetKind::Directory).unwrap_err().code, ERR_EINVAL);
+        assert_eq!(VerifiedLiveTarget::open_matching(&sym, TargetKind::Directory).unwrap_err().code, ERR_EINVAL);
+        assert_eq!(VerifiedLiveTarget::open_matching(&sym, TargetKind::SingleFile).unwrap_err().code, ERR_EINVAL);
+        assert_eq!(VerifiedLiveTarget::open_matching(&sb.0.join("absent"), TargetKind::Directory).unwrap_err().code, ERR_ENOENT);
+    }
 }

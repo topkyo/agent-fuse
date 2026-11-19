@@ -373,7 +373,7 @@ mod tests_trash_targets {
 
         fs::write(&ws, b"accidental-hetero-file").unwrap();
         let hetero_err = crate::purge_workspace_trash_with_vault(&ws, Some(&vault)).unwrap_err();
-        assert_eq!(hetero_err.code, crate::error::ERR_ENOENT);
+        assert_eq!(hetero_err.code, crate::error::ERR_EINVAL);
         assert!(trashed.join("main.rs").is_file());
         fs::remove_file(&ws).unwrap();
 

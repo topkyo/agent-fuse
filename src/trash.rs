@@ -1,8 +1,9 @@
 use crate::apfs::{can_write_path, force_remove_all, fsgetpath, lstat_inode_mode, real_home_dir, statfs_info};
-use crate::error::{AfuseError, ERR_EACCES, ERR_ENOENT, ERR_EPERM};
+use crate::error::{AfuseError, ERR_EACCES, ERR_EPERM};
 use crate::manifest::SnapshotMeta;
 use crate::snapshot::list_snapshots_unlocked;
 use crate::vault::{is_ignored_name, lock_vault, resolve_workspace_vault_recovery, TargetKind};
+use crate::vault_policy::VerifiedLiveTarget;
 use std::collections::{BTreeSet, VecDeque};
 use std::env;
 use std::fs;
@@ -344,35 +345,17 @@ pub fn purge_workspace_trash_with_vault(
 ) -> Result<TrashCleanupStatus, AfuseError> {
     let (ws, ws_vault) = resolve_workspace_vault_recovery(workspace, vault_override)?;
     let _guard = lock_vault(&ws_vault)?;
-    let meta = fs::symlink_metadata(&ws).map_err(|_| {
-        AfuseError::new(
-            ERR_ENOENT,
-            "target must exist at workspace path before purging trash copies",
-        )
-    })?;
-    if meta.file_type().is_symlink() {
-        return Err(AfuseError::new(
-            ERR_ENOENT,
-            "target must not be a symlink before purging trash copies",
-        ));
-    }
     let snaps = list_snapshots_unlocked(&ws_vault)?;
     let Some(latest) = snaps.first() else {
         return Ok(TrashCleanupStatus::NotInTrash);
     };
-    let kind = latest.target_kind;
-    let kind_matches = match kind {
-        TargetKind::Directory => meta.file_type().is_dir(),
-        TargetKind::SingleFile => meta.file_type().is_file(),
-    };
-    if !kind_matches {
-        return Err(AfuseError::new(
-            ERR_ENOENT,
-            "live target kind does not match snapshot kind; refusing to purge trash copies",
-        ));
-    }
+    let live = VerifiedLiveTarget::open_matching(&ws, latest.target_kind)?;
     let snap_dir = ws_vault.join("snapshots").join(&latest.id);
-    let stat_p = if kind == TargetKind::SingleFile { ws.parent().unwrap_or(&ws) } else { &ws };
+    let stat_p = if live.kind() == TargetKind::SingleFile {
+        live.path().parent().unwrap_or(live.path())
+    } else {
+        live.path()
+    };
     let fsi = statfs_info(stat_p)?;
-    Ok(purge_trashed_counterparts(&ws, kind, &ws_vault, &snap_dir, latest, fsi.fsid))
+    Ok(purge_trashed_counterparts(live.path(), live.kind(), &ws_vault, &snap_dir, latest, fsi.fsid))
 }
