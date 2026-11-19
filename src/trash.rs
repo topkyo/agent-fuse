@@ -1,8 +1,8 @@
 use crate::apfs::{can_write_path, force_remove_all, fsgetpath, lstat_inode_mode, real_home_dir, statfs_info};
-use crate::error::{ERR_EACCES, ERR_EPERM};
+use crate::error::{AfuseError, ERR_EACCES, ERR_ENOENT, ERR_EPERM};
 use crate::manifest::SnapshotMeta;
 use crate::snapshot::list_snapshots_unlocked;
-use crate::vault::{is_ignored_name, TargetKind};
+use crate::vault::{is_ignored_name, lock_vault, resolve_workspace_vault_recovery, TargetKind};
 use std::collections::{BTreeSet, VecDeque};
 use std::env;
 use std::fs;
@@ -226,7 +226,7 @@ pub(crate) fn purge_trashed_counterparts(
     let mut purged_inos = BTreeSet::new();
     let mut denied_inos = Vec::new();
 
-    for cand_ino in cands {
+    for &cand_ino in &cands {
         if live_inodes.contains(&cand_ino) {
             continue;
         }
@@ -290,6 +290,31 @@ pub(crate) fn purge_trashed_counterparts(
     }
 
     let live_root = lstat_inode_mode(restored_ws).map(|x| x.0).unwrap_or(0);
+    if !saw_tcc_denied {
+        let has_stale_cand = cands.iter().any(|ino| !live_inodes.contains(ino) && !purged_inos.contains(ino));
+        if has_stale_cand {
+            for tr in &trash_roots {
+                let rd_denied = fs::read_dir(tr)
+                    .err()
+                    .and_then(|e| e.raw_os_error())
+                    .map(|c| c == ERR_EPERM || c == ERR_EACCES)
+                    .unwrap_or(false);
+                let wr_denied = can_write_path(tr)
+                    .err()
+                    .map(|e| e.code == ERR_EPERM || e.code == ERR_EACCES)
+                    .unwrap_or(false);
+                if rd_denied || wr_denied {
+                    saw_tcc_denied = true;
+                    for &ino in &cands {
+                        if !live_inodes.contains(&ino) && !purged_inos.contains(&ino) {
+                            denied_inos.push(ino);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
     let mut keep_roots = Vec::new();
     if saw_tcc_denied {
         keep_roots.extend(denied_inos);
@@ -311,4 +336,43 @@ pub(crate) fn purge_trashed_counterparts(
     } else {
         TrashCleanupStatus::NotInTrash
     }
+}
+
+pub fn purge_workspace_trash_with_vault(
+    workspace: &Path,
+    vault_override: Option<&Path>,
+) -> Result<TrashCleanupStatus, AfuseError> {
+    let (ws, ws_vault) = resolve_workspace_vault_recovery(workspace, vault_override)?;
+    let _guard = lock_vault(&ws_vault)?;
+    let meta = fs::symlink_metadata(&ws).map_err(|_| {
+        AfuseError::new(
+            ERR_ENOENT,
+            "target must exist at workspace path before purging trash copies",
+        )
+    })?;
+    if meta.file_type().is_symlink() {
+        return Err(AfuseError::new(
+            ERR_ENOENT,
+            "target must not be a symlink before purging trash copies",
+        ));
+    }
+    let snaps = list_snapshots_unlocked(&ws_vault)?;
+    let Some(latest) = snaps.first() else {
+        return Ok(TrashCleanupStatus::NotInTrash);
+    };
+    let kind = latest.target_kind;
+    let kind_matches = match kind {
+        TargetKind::Directory => meta.file_type().is_dir(),
+        TargetKind::SingleFile => meta.file_type().is_file(),
+    };
+    if !kind_matches {
+        return Err(AfuseError::new(
+            ERR_ENOENT,
+            "live target kind does not match snapshot kind; refusing to purge trash copies",
+        ));
+    }
+    let snap_dir = ws_vault.join("snapshots").join(&latest.id);
+    let stat_p = if kind == TargetKind::SingleFile { ws.parent().unwrap_or(&ws) } else { &ws };
+    let fsi = statfs_info(stat_p)?;
+    Ok(purge_trashed_counterparts(&ws, kind, &ws_vault, &snap_dir, latest, fsi.fsid))
 }

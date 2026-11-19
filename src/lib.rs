@@ -82,7 +82,7 @@ pub use snapshot::{
     create_snapshot_if_changed_with_vault, create_snapshot_opts_with_vault,
     create_snapshot_with_vault, list_snapshots, list_snapshots_with_vault,
 };
-pub use trash::{allowed_trash_roots, TrashCleanupStatus};
+pub use trash::{allowed_trash_roots, purge_workspace_trash_with_vault, TrashCleanupStatus};
 pub use upgrade::{
     check_for_updates, is_newer_version, is_trusted_github_url, parse_release_json,
     perform_upgrade_on_exe, run_upgrade_apply, validate_release_asset_url, ReleaseAsset,

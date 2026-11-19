@@ -351,4 +351,41 @@ mod tests_trash_targets {
         assert_eq!(t_rest.snapshot_id, t_meta.id);
         assert_eq!(fs::read_to_string(&target_sf).unwrap(), "init-target");
     }
+
+    #[test]
+    fn purge_workspace_trash_respects_tcc_and_live_target_guard() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let sb = ScopedDir::new("purge-trash-cmd");
+        let vault = sb.0.join("vault");
+        let trash = sb.0.join("trash");
+        let ws = sb.0.join("proj");
+        fs::create_dir_all(&trash).unwrap();
+        fs::create_dir_all(&ws).unwrap();
+        fs::write(ws.join("main.rs"), b"v1").unwrap();
+        let _tg = EnvGuard::set("AFUSE_TRASH_DIR", &trash);
+        let snap = crate::create_snapshot_with_vault(&ws, Some(&vault), "base").unwrap();
+
+        let trashed = trash.join("proj 10.00.00");
+        fs::rename(&ws, &trashed).unwrap();
+        let err = crate::purge_workspace_trash_with_vault(&ws, Some(&vault)).unwrap_err();
+        assert_eq!(err.code, crate::error::ERR_ENOENT);
+        assert!(trashed.join("main.rs").is_file());
+
+        fs::write(&ws, b"accidental-hetero-file").unwrap();
+        let hetero_err = crate::purge_workspace_trash_with_vault(&ws, Some(&vault)).unwrap_err();
+        assert_eq!(hetero_err.code, crate::error::ERR_ENOENT);
+        assert!(trashed.join("main.rs").is_file());
+        fs::remove_file(&ws).unwrap();
+
+        fs::set_permissions(&trash, fs::Permissions::from_mode(0o500)).unwrap();
+        let rep = restore_snapshot_with_vault(&ws, Some(&vault), &snap.id, false).unwrap();
+        assert_eq!(rep.trash_cleanup, TrashCleanupStatus::TccDenied);
+        assert_eq!(crate::purge_workspace_trash_with_vault(&ws, Some(&vault)).unwrap(), TrashCleanupStatus::TccDenied);
+        assert!(trashed.join("main.rs").is_file());
+
+        fs::set_permissions(&trash, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(crate::purge_workspace_trash_with_vault(&ws, Some(&vault)).unwrap(), TrashCleanupStatus::Purged);
+        assert!(!trashed.exists());
+        assert_eq!(crate::purge_workspace_trash_with_vault(&ws, Some(&vault)).unwrap(), TrashCleanupStatus::NotInTrash);
+    }
 }

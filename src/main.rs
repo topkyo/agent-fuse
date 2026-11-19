@@ -4,7 +4,7 @@ mod cli_upgrade;
 
 use agent_fuse::{json_escape, sanitize_terminal_text, AfuseError};
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -28,11 +28,42 @@ fn print_usage() {
            hook <zsh|claude>                     Print opt-in hook snippet to stdout (never edits files)\n\
            hook uninstall [--apply]              Dry-run scan (or remove with backup) afuse hook blocks\n\
            validate [<DIR>]                      Validate safe APFS project root binding\n\
+           purge-trash                           Purge stale restored copies remaining in Trash\n\
            doctor [--json] [<DIR>]               Print privacy-safe APFS & vault diagnostics\n\
            prune --keep <N> [--label-prefix P]   Reclaim snapshots & stale incomplete directories\n\
            upgrade [--check]                     On-demand release check or self-upgrade CLI binary\n",
         VERSION
     );
+}
+
+fn cmd_purge_trash(workspace: &Path, rest: &[String], mut json: bool) {
+    let mut want_help = false;
+    for arg in rest {
+        match arg.as_str() {
+            "--json" => json = true,
+            "--help" | "-h" => want_help = true,
+            flag => emit_error(json, &AfuseError::new(22, format!("unknown purge-trash option '{}'", sanitize_terminal_text(flag)))),
+        }
+    }
+    if want_help {
+        let usage = "USAGE: afuse [-w | --workspace <DIR>] [--json] purge-trash";
+        if json {
+            println!("{{\"ok\":true,\"usage\":\"{}\"}}", json_escape(usage));
+        } else {
+            println!("{}", usage);
+        }
+        return;
+    }
+    match agent_fuse::purge_workspace_trash_with_vault(workspace, None) {
+        Ok(st) => {
+            if json {
+                println!("{{\"ok\":true,\"trash_cleanup\":\"{}\"}}", st.as_str());
+            } else {
+                println!("TRASH_CLEANUP {}", st.as_str());
+            }
+        }
+        Err(e) => emit_error(json, &e),
+    }
 }
 
 pub(crate) fn emit_error(json: bool, err: &AfuseError) -> ! {
@@ -132,6 +163,7 @@ fn main() {
     match sub {
         "snap" => cli_cmds::cmd_snap(&workspace, rest, json),
         "validate" => cli_cmds::cmd_validate(&workspace, rest, json),
+        "purge-trash" => cmd_purge_trash(&workspace, rest, json),
         "list" => cli_cmds::cmd_list(&workspace, rest, json),
         "diff" => cli_cmds::cmd_diff(&workspace, rest, json),
         "restore" => cli_cmds::cmd_restore(&workspace, rest, json),
