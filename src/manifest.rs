@@ -36,73 +36,55 @@ fn fast_entry_sig(path: &Path, meta: &fs::Metadata) -> Result<Option<String>, Af
     }
 }
 
-pub fn compute_fast_fingerprint(
-    target: &Path,
-    kind: TargetKind,
-) -> Result<(String, u64, u64), AfuseError> {
+pub(crate) fn compute_fast_entries(target: &Path, kind: TargetKind) -> Result<(BTreeMap<String, String>, u64, u64, u64), AfuseError> {
     if kind == TargetKind::SingleFile {
-        let meta = fs::symlink_metadata(target).map_err(|e| {
-            AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), format!("stat failed on {}: {}", target.display(), e))
-        })?;
+        let meta = fs::symlink_metadata(target).map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), format!("stat failed on {}: {}", target.display(), e)))?;
         if meta.file_type().is_symlink() || !meta.file_type().is_file() {
             return Err(AfuseError::new(ERR_EINVAL, "target is not a regular file"));
         }
-        let name = target
-            .file_name()
-            .ok_or_else(|| AfuseError::new(ERR_EINVAL, "missing file name"))?
-            .to_string_lossy()
-            .into_owned();
-        let sig = fast_entry_sig(target, &meta)?.unwrap_or_default();
-        let mut h = Sha256::new();
-        h.update(name.as_bytes());
-        h.update(b"\0");
-        h.update(sig.as_bytes());
-        h.update(b"\n");
-        return Ok((format!("fast:{}", h.finalize_hex()), 1, meta.len()));
+        let name = target.file_name().ok_or_else(|| AfuseError::new(ERR_EINVAL, "missing file name"))?.to_string_lossy().into_owned();
+        let mut map = BTreeMap::new();
+        map.insert(name, fast_entry_sig(target, &meta)?.unwrap_or_default());
+        return Ok((map, 1, meta.len(), 1));
     }
     let mut entries: BTreeMap<String, String> = BTreeMap::new();
-    let (mut files, mut bytes) = (0u64, 0u64);
-    fn walk(
-        base: &Path,
-        cur: &Path,
-        map: &mut BTreeMap<String, String>,
-        files: &mut u64,
-        bytes: &mut u64,
-    ) -> Result<(), AfuseError> {
+    let (mut files, mut bytes, mut proj_files) = (0u64, 0u64, 0u64);
+    fn walk(base: &Path, cur: &Path, in_git: bool, map: &mut BTreeMap<String, String>, files: &mut u64, bytes: &mut u64, proj_files: &mut u64) -> Result<(), AfuseError> {
         let _dir_guard = TempPermGuard::ensure(cur, 0o500);
-        let rd = fs::read_dir(cur).map_err(|e| {
-            AfuseError::new(e.raw_os_error().unwrap_or(1), format!("read_dir failed on {}: {}", cur.display(), e))
-        })?;
+        let rd = fs::read_dir(cur).map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), format!("read_dir failed on {}: {}", cur.display(), e)))?;
         for item in rd {
             let item = item.map_err(|e| AfuseError::new(1, e.to_string()))?;
             let name = item.file_name().to_string_lossy().into_owned();
-            if is_ignored_name(&name) {
-                continue;
-            }
+            if is_ignored_name(&name) { continue; }
             let p = item.path();
             let rel = p.strip_prefix(base).unwrap_or(&p).to_string_lossy().into_owned();
-            let meta = fs::symlink_metadata(&p).map_err(|e| {
-                AfuseError::new(e.raw_os_error().unwrap_or(1), format!("symlink_metadata failed on {}: {}", p.display(), e))
-            })?;
+            let meta = fs::symlink_metadata(&p).map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), format!("symlink_metadata failed on {}: {}", p.display(), e)))?;
             let ft = meta.file_type();
-            if !ft.is_file() && !ft.is_dir() && !ft.is_symlink() {
-                continue;
-            }
-            if let Some(sig) = fast_entry_sig(&p, &meta)? {
-                map.insert(rel, sig);
-            }
+            if !ft.is_file() && !ft.is_dir() && !ft.is_symlink() { continue; }
+            if let Some(sig) = fast_entry_sig(&p, &meta)? { map.insert(rel, sig); }
+            let child_in_git = in_git || name == ".git";
             if ft.is_dir() {
-                walk(base, &p, map, files, bytes)?;
+                walk(base, &p, child_in_git, map, files, bytes, proj_files)?;
             } else if ft.is_symlink() {
                 *files += 1;
+                if !child_in_git { *proj_files += 1; }
             } else if ft.is_file() {
                 *files += 1;
                 *bytes += meta.len();
+                if !child_in_git { *proj_files += 1; }
             }
         }
         Ok(())
     }
-    walk(target, target, &mut entries, &mut files, &mut bytes)?;
+    walk(target, target, false, &mut entries, &mut files, &mut bytes, &mut proj_files)?;
+    Ok((entries, files, bytes, proj_files))
+}
+
+pub fn compute_fast_fingerprint(
+    target: &Path,
+    kind: TargetKind,
+) -> Result<(String, u64, u64), AfuseError> {
+    let (entries, files, bytes, _) = compute_fast_entries(target, kind)?;
     let mut overall = Sha256::new();
     for (rel, sig) in &entries {
         overall.update(rel.as_bytes());
@@ -209,6 +191,14 @@ pub(crate) fn compute_snap_tree_manifest(
     }
 }
 
+pub(crate) fn count_non_git_entries(map: &BTreeMap<String, String>) -> u64 {
+    map.iter()
+        .filter(|(rel, sig)| {
+            !sig.starts_with("D:") && *rel != ".git" && !rel.starts_with(".git/")
+        })
+        .count() as u64
+}
+
 pub fn compute_tree_manifest(
     root: &Path,
 ) -> Result<(String, u64, u64, BTreeMap<String, String>), AfuseError> {
@@ -294,77 +284,73 @@ pub fn compute_tree_manifest(
     Ok((overall.finalize_hex(), file_count, logical_bytes, entries_map))
 }
 
-pub(crate) fn clone_filtered_tree(src_dir: &Path, dst_dir: &Path) -> Result<(), AfuseError> {
-    fs::create_dir_all(dst_dir).map_err(|e| {
-        AfuseError::new(
-            e.raw_os_error().unwrap_or(1),
-            format!("create_dir_all failed on {}: {}", dst_dir.display(), e),
-        )
-    })?;
+fn collect_filtered_dirs(dir: &Path, filtered: &mut std::collections::HashSet<PathBuf>) -> bool {
+    let mut need = fs::symlink_metadata(dir)
+        .map(|m| !m.file_type().is_symlink() && (m.permissions().mode() & 0o500) != 0o500)
+        .unwrap_or(false);
+    let _g = TempPermGuard::ensure(dir, 0o500);
+    let Ok(rd) = fs::read_dir(dir) else {
+        if need { filtered.insert(dir.to_path_buf()); }
+        return need;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if is_ignored_name(&name) {
+            need = true;
+            continue;
+        }
+        let child = entry.path();
+        if let Ok(m) = fs::symlink_metadata(&child) {
+            let ft = m.file_type();
+            let mode = m.permissions().mode() & 0o7777;
+            if !ft.is_file() && !ft.is_dir() && !ft.is_symlink() {
+                need = true;
+                continue;
+            }
+            if !ft.is_symlink()
+                && ((ft.is_file() && (mode & 0o400) == 0) || (ft.is_dir() && (mode & 0o500) != 0o500))
+            {
+                need = true;
+            }
+            if ft.is_dir() && name != ".git" && collect_filtered_dirs(&child, filtered) {
+                need = true;
+            }
+        }
+    }
+    if need {
+        filtered.insert(dir.to_path_buf());
+    }
+    need
+}
+
+fn clone_filtered_inner(src_dir: &Path, dst_dir: &Path, filtered: &std::collections::HashSet<PathBuf>) -> Result<(), AfuseError> {
+    fs::create_dir_all(dst_dir).map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), format!("create_dir_all failed on {}: {}", dst_dir.display(), e)))?;
     let (_, src_mode) = lstat_inode_mode(src_dir)?;
     let _src_guard = TempPermGuard::ensure(src_dir, 0o500);
     // Keep u+rwx writable while cloning children into dst_dir; apply final mode afterward.
     let _ = fs::set_permissions(dst_dir, fs::Permissions::from_mode((src_mode & 0o7777) | 0o700));
-
-    fn needs_filtered_walk(dir: &Path) -> bool {
-        if let Ok(dm) = fs::symlink_metadata(dir) {
-            if !dm.file_type().is_symlink() && (dm.permissions().mode() & 0o500) != 0o500 {
-                return true;
-            }
-        }
-        let _g = TempPermGuard::ensure(dir, 0o500);
-        let Ok(rd) = fs::read_dir(dir) else {
-            return false;
-        };
-        for entry in rd.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if is_ignored_name(&name) {
-                return true;
-            }
-            if let Ok(m) = fs::symlink_metadata(entry.path()) {
-                let ft = m.file_type();
-                let mode = m.permissions().mode() & 0o7777;
-                if !ft.is_file() && !ft.is_dir() && !ft.is_symlink() {
-                    return true;
-                }
-                if !ft.is_symlink() && ((ft.is_file() && (mode & 0o400) == 0) || (ft.is_dir() && (mode & 0o500) != 0o500)) {
-                    return true;
-                }
-                if ft.is_dir() && name != ".git" && needs_filtered_walk(&entry.path()) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    let rd = fs::read_dir(src_dir).map_err(|e| {
-        AfuseError::new(
-            e.raw_os_error().unwrap_or(1),
-            format!("read_dir failed on {}: {}", src_dir.display(), e),
-        )
-    })?;
+    let rd = fs::read_dir(src_dir).map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), format!("read_dir failed on {}: {}", src_dir.display(), e)))?;
     for entry in rd {
         let entry = entry.map_err(|e| AfuseError::new(1, e.to_string()))?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if is_ignored_name(&name) {
-            continue;
-        }
+        if is_ignored_name(&name) { continue; }
         let s_child = entry.path();
         let d_child = dst_dir.join(&entry.file_name());
-        let meta = fs::symlink_metadata(&s_child).map_err(|e| {
-            AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string())
-        })?;
+        let meta = fs::symlink_metadata(&s_child).map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))?;
         let ft = meta.file_type();
-        if !ft.is_file() && !ft.is_dir() && !ft.is_symlink() {
-            continue;
-        }
-        if ft.is_dir() && name != ".git" && needs_filtered_walk(&s_child) {
-            clone_filtered_tree(&s_child, &d_child)?;
+        if !ft.is_file() && !ft.is_dir() && !ft.is_symlink() { continue; }
+        if ft.is_dir() && name != ".git" && filtered.contains(&s_child) {
+            clone_filtered_inner(&s_child, &d_child, filtered)?;
         } else {
             clonefile_readable(&s_child, &d_child)?;
         }
     }
     let _ = fs::set_permissions(dst_dir, fs::Permissions::from_mode(src_mode & 0o7777));
     Ok(())
+}
+
+pub(crate) fn clone_filtered_tree(src_dir: &Path, dst_dir: &Path) -> Result<(), AfuseError> {
+    let mut filtered = std::collections::HashSet::new();
+    let _ = collect_filtered_dirs(src_dir, &mut filtered);
+    clone_filtered_inner(src_dir, dst_dir, &filtered)
 }

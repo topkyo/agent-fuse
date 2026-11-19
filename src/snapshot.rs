@@ -3,10 +3,11 @@ use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
 pub use crate::diff::{diff_snapshot, diff_snapshot_with_vault, DiffReport};
 use crate::fs_guard::clonefile_readable;
 use crate::manifest::{
-    clone_filtered_tree, compute_fast_fingerprint, compute_single_file_manifest,
-    compute_snap_tree_manifest, compute_tree_manifest, count_project_files, read_meta, write_meta,
+    clone_filtered_tree, compute_fast_entries, compute_single_file_manifest,
+    compute_snap_tree_manifest, compute_tree_manifest, count_non_git_entries, read_meta, write_meta,
     SnapshotMeta,
 };
+use crate::sha256::Sha256;
 use crate::prune::{dedup_and_calibrate_history_unlocked, snap_tree_fast_fp};
 pub use crate::restore::{
     restore_snapshot, restore_snapshot_paths, restore_snapshot_paths_with_vault,
@@ -82,7 +83,15 @@ pub(crate) fn create_snapshot_fast_dedup_unlocked(
 ) -> Result<(SnapshotMeta, bool), AfuseError> {
     let kind = if ws.is_file() { TargetKind::SingleFile } else { TargetKind::Directory };
     if label.starts_with("auto:") && label != "auto:pre-restore" {
-        if let Ok((cur_fp, _, _)) = compute_fast_fingerprint(ws, kind) {
+        if let Ok((entries, _, _, _)) = compute_fast_entries(ws, kind) {
+            let mut h = Sha256::new();
+            for (rel, sig) in &entries {
+                h.update(rel.as_bytes());
+                h.update(b"\0");
+                h.update(sig.as_bytes());
+                h.update(b"\n");
+            }
+            let cur_fp = format!("fast:{}", h.finalize_hex());
             let existing = list_snapshots_unlocked(ws_vault)?;
             if let Some(latest) = existing.iter().find(|m| m.label != "auto:pre-restore") {
                 if snap_tree_fast_fp(ws_vault, latest).as_deref() == Some(cur_fp.as_str()) {
@@ -182,21 +191,25 @@ pub(crate) fn create_snapshot_unlocked_opts(
     }
     let clone_elapsed_us = t0.elapsed().as_micros();
 
-    let (tree_sha256, file_count, logical_bytes) = if fast {
+    let (tree_sha256, file_count, logical_bytes, project_files) = if fast {
         let fp_target = if target_kind == TargetKind::SingleFile {
             tree_dir.join(ws.file_name().unwrap_or_default())
         } else {
             tree_dir.clone()
         };
-        compute_fast_fingerprint(&fp_target, target_kind)?
+        let (entries, fc, lb, pf) = compute_fast_entries(&fp_target, target_kind)?;
+        let mut h = Sha256::new();
+        for (rel, sig) in &entries {
+            h.update(rel.as_bytes());
+            h.update(b"\0");
+            h.update(sig.as_bytes());
+            h.update(b"\n");
+        }
+        (format!("fast:{}", h.finalize_hex()), fc, lb, pf)
     } else {
-        let (sha, fc, lb, _) = compute_snap_tree_manifest(&tree_dir, ws, target_kind)?;
-        (sha, fc, lb)
-    };
-    let project_files = if target_kind == TargetKind::SingleFile {
-        1
-    } else {
-        count_project_files(&tree_dir, TargetKind::Directory)
+        let (sha, fc, lb, map) = compute_snap_tree_manifest(&tree_dir, ws, target_kind)?;
+        let pf = if target_kind == TargetKind::SingleFile { 1 } else { count_non_git_entries(&map) };
+        (sha, fc, lb, pf)
     };
     if label.starts_with("auto:") && label != "auto:pre-restore" && target_kind == TargetKind::Directory {
         let prior = list_snapshots_unlocked(ws_vault)?;

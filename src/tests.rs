@@ -1053,3 +1053,58 @@ struct ScopedDir(PathBuf);
         assert_eq!(grep.exit_code, EXIT_FUSE_TRIPPED);
         assert!(!grep.root_inode_preserved);
     }
+
+    #[test]
+    fn selective_restore_preserves_other_trash_and_nested_ignore_and_fast_verify() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env_guard = TestEnvGuard::clean(&["HOME"]);
+        let sandbox = ScopedDir::new("sel_nest_fast");
+        env::set_var("HOME", &sandbox.0);
+        let vault = sandbox.0.join("vault");
+        let ws = sandbox.0.join("ws");
+        let trash = sandbox.0.join(".Trash");
+        fs::create_dir_all(&ws).unwrap();
+        fs::create_dir_all(&trash).unwrap();
+        fs::write(ws.join("keep.txt"), b"keep-v1").unwrap();
+        fs::write(ws.join("other.txt"), b"other-v1").unwrap();
+
+        // P0-1: selective restore must not purge other trashed counterparts.
+        let s1 = create_snapshot_fast_dedup_with_vault(&ws, Some(&vault), "s1").unwrap().0;
+        let trash_other = trash.join("other.txt");
+        fs::rename(ws.join("other.txt"), &trash_other).unwrap();
+        fs::write(ws.join("keep.txt"), b"keep-mutated").unwrap();
+        let r_sel = restore_snapshot_paths_with_vault(&ws, Some(&vault), &s1.id, false, &[String::from("keep.txt")]).unwrap();
+        assert_eq!(r_sel.trash_cleanup, crate::trash::TrashCleanupStatus::NotInTrash);
+        assert_eq!(fs::read_to_string(ws.join("keep.txt")).unwrap(), "keep-v1");
+        assert!(trash_other.exists(), "unrelated trashed file must stay intact in Trash");
+
+        // P0-2: NestedIgnoredGuard must drop staged ignored dir if parent dir did not exist in snapshot.
+        fs::create_dir_all(ws.join("new_subpkg/node_modules/pkg")).unwrap();
+        fs::write(ws.join("new_subpkg/node_modules/pkg/index.js"), b"x").unwrap();
+        fs::write(ws.join("new_subpkg/mod.rs"), b"v1").unwrap();
+        let r_full = restore_snapshot_with_vault(&ws, Some(&vault), &s1.id, false).unwrap();
+        assert_eq!(r_full.snapshot_id, s1.id);
+        assert!(!ws.join("new_subpkg").exists());
+
+        // P1-7: corrupting a file inside fast: vault tree must fail fast fingerprint verification.
+        let (_, ws_vault) = crate::vault::resolve_workspace_vault_recovery(&ws, Some(&vault)).unwrap();
+        let corrupted = ws_vault.join("snapshots").join(&s1.id).join("tree/keep.txt");
+        let _ = fs::set_permissions(&corrupted, fs::Permissions::from_mode(0o644));
+        fs::write(&corrupted, b"corrupted-vault-payload").unwrap();
+        let corrupt_err = restore_snapshot_with_vault(&ws, Some(&vault), &s1.id, false).unwrap_err();
+        assert_eq!(corrupt_err.code, crate::error::ERR_EINVAL);
+
+        // P1-perf: diff_snapshot_fast detects added, modified, and deleted entries without SHA256.
+        let ws_fast = sandbox.0.join("ws_fast");
+        fs::create_dir_all(&ws_fast).unwrap();
+        fs::write(ws_fast.join("a.rs"), b"aaa").unwrap();
+        fs::write(ws_fast.join("b.rs"), b"bbb").unwrap();
+        let sf = create_snapshot_fast_dedup_with_vault(&ws_fast, Some(&vault), "fast-diff").unwrap().0;
+        fs::write(ws_fast.join("a.rs"), b"modified-aaa").unwrap();
+        fs::remove_file(ws_fast.join("b.rs")).unwrap();
+        fs::write(ws_fast.join("c.rs"), b"ccc").unwrap();
+        let df = diff_snapshot_opts_with_vault(&ws_fast, Some(&vault), &sf.id, true).unwrap();
+        assert_eq!(df.added, vec![String::from("c.rs")]);
+        assert_eq!(df.modified, vec![String::from("a.rs")]);
+        assert_eq!(df.deleted, vec![String::from("b.rs")]);
+    }

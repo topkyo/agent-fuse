@@ -75,7 +75,7 @@ pub use restore::{
     restore_snapshot, restore_snapshot_paths, restore_snapshot_paths_with_vault,
     restore_snapshot_with_vault, RestoreReport,
 };
-pub use diff::{diff_snapshot, diff_snapshot_with_vault, DiffReport};
+pub use diff::{diff_snapshot, diff_snapshot_fast, diff_snapshot_opts_with_vault, diff_snapshot_with_vault, DiffReport};
 pub use snapshot::{
     create_snapshot, create_snapshot_fast, create_snapshot_fast_dedup,
     create_snapshot_fast_dedup_with_vault, create_snapshot_if_changed,

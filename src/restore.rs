@@ -4,8 +4,8 @@ use crate::apfs::{
 use crate::error::{AfuseError, ERR_EACCES, ERR_EINVAL, ERR_ENOENT};
 use crate::fs_guard::clonefile_readable;
 use crate::manifest::{
-    compute_single_file_manifest, compute_snap_tree_manifest, compute_tree_manifest,
-    count_project_files, SnapshotMeta,
+    compute_fast_fingerprint, compute_single_file_manifest, compute_snap_tree_manifest,
+    compute_tree_manifest, count_project_files, SnapshotMeta,
 };
 use crate::restore_tree::{
     align_ancestor_case, clear_heterogeneous_path_if_needed, find_single_snap_file,
@@ -50,7 +50,22 @@ fn verify_snapshot_tree(ws: &Path, ws_vault: &Path, target_id: &str) -> Result<(
     if !snap_tree.is_dir() {
         return Err(AfuseError::new(ERR_ENOENT, format!("snapshot tree missing on disk: {}", snap_tree.display())));
     }
-    let vault_hash = if meta.tree_sha256 == "fast" || meta.tree_sha256.starts_with("fast:") {
+    let vault_hash = if meta.tree_sha256 == "fast" {
+        None
+    } else if meta.tree_sha256.starts_with("fast:") {
+        let fp_target = if meta.target_kind == TargetKind::SingleFile {
+            find_single_snap_file(ws, &snap_tree)
+                .ok_or_else(|| AfuseError::new(ERR_ENOENT, "snapshot file missing in tree"))?
+        } else {
+            snap_tree.clone()
+        };
+        let (actual_fp, _, _) = compute_fast_fingerprint(&fp_target, meta.target_kind)?;
+        if actual_fp != meta.tree_sha256 {
+            return Err(AfuseError::new(
+                ERR_EINVAL,
+                format!("fast snapshot integrity mismatch: expected {}, found {}", meta.tree_sha256, actual_fp),
+            ));
+        }
         None
     } else {
         let (vh, _, _, _) = compute_snap_tree_manifest(&snap_tree, ws, meta.target_kind)?;
@@ -153,11 +168,15 @@ fn finalize_restore_unlocked(
             return Err(AfuseError::new(ERR_EINVAL, format!("post-restore Merkle mismatch: expected {}, got {}", expected, live_hash)));
         }
     }
-    let stat_p = if kind == TargetKind::SingleFile { ws.parent().unwrap_or(ws) } else { ws };
-    let snap_dir = ws_vault.join("snapshots").join(&meta.id);
-    let trash_cleanup = statfs_info(stat_p)
-        .map(|fsi| purge_trashed_counterparts(ws, kind, ws_vault, &snap_dir, meta, fsi.fsid))
-        .unwrap_or(TrashCleanupStatus::NotInTrash);
+    let trash_cleanup = if selective {
+        TrashCleanupStatus::NotInTrash
+    } else {
+        let stat_p = if kind == TargetKind::SingleFile { ws.parent().unwrap_or(ws) } else { ws };
+        let snap_dir = ws_vault.join("snapshots").join(&meta.id);
+        statfs_info(stat_p)
+            .map(|fsi| purge_trashed_counterparts(ws, kind, ws_vault, &snap_dir, meta, fsi.fsid))
+            .unwrap_or(TrashCleanupStatus::NotInTrash)
+    };
     Ok(RestoreReport {
         snapshot_id: meta.id.clone(), safety_snapshot_id: safety_id,
         root_inode_before: ino_before, root_inode_after: ino_after,

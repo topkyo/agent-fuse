@@ -1,5 +1,9 @@
 use crate::error::{AfuseError, ERR_ENOENT};
-use crate::manifest::{compute_single_file_manifest, compute_snap_tree_manifest, compute_tree_manifest};
+use crate::manifest::{
+    compute_fast_entries, compute_single_file_manifest, compute_snap_tree_manifest,
+    compute_tree_manifest,
+};
+use crate::restore_tree::find_single_snap_file;
 use crate::snapshot::{lock_vault_and_resolve, resolve_snapshot_id};
 use crate::unicode_norm::canonical_rel_key;
 use crate::vault::TargetKind;
@@ -19,10 +23,23 @@ pub fn diff_snapshot(workspace: &Path, target_id: &str) -> Result<DiffReport, Af
     diff_snapshot_with_vault(workspace, None, target_id)
 }
 
+pub fn diff_snapshot_fast(workspace: &Path, target_id: &str) -> Result<DiffReport, AfuseError> {
+    diff_snapshot_opts_with_vault(workspace, None, target_id, true)
+}
+
 pub fn diff_snapshot_with_vault(
     workspace: &Path,
     vault_override: Option<&Path>,
     target_id: &str,
+) -> Result<DiffReport, AfuseError> {
+    diff_snapshot_opts_with_vault(workspace, vault_override, target_id, false)
+}
+
+pub fn diff_snapshot_opts_with_vault(
+    workspace: &Path,
+    vault_override: Option<&Path>,
+    target_id: &str,
+    fast: bool,
 ) -> Result<DiffReport, AfuseError> {
     let (ws, ws_vault, _guard) = lock_vault_and_resolve(workspace, vault_override)?;
     if !ws_vault.join("snapshots").is_dir() {
@@ -31,17 +48,35 @@ pub fn diff_snapshot_with_vault(
     let meta = resolve_snapshot_id(&ws_vault, target_id)?;
     let snap_tree = ws_vault.join("snapshots").join(&meta.id).join("tree");
 
-    let (_, _, _, snap_map) = compute_snap_tree_manifest(&snap_tree, &ws, meta.target_kind)?;
+    let snap_map = if fast {
+        if meta.target_kind == TargetKind::SingleFile {
+            let sf = find_single_snap_file(&ws, &snap_tree)
+                .ok_or_else(|| AfuseError::new(ERR_ENOENT, "snapshot file missing in tree"))?;
+            compute_fast_entries(&sf, TargetKind::SingleFile)?.0
+        } else {
+            compute_fast_entries(&snap_tree, TargetKind::Directory)?.0
+        }
+    } else {
+        compute_snap_tree_manifest(&snap_tree, &ws, meta.target_kind)?.3
+    };
     let live_map = match fs::symlink_metadata(&ws) {
         Ok(m) if meta.target_kind == TargetKind::SingleFile => {
             if !m.file_type().is_symlink() && m.file_type().is_file() {
-                compute_single_file_manifest(&ws)?.3
+                if fast {
+                    compute_fast_entries(&ws, TargetKind::SingleFile)?.0
+                } else {
+                    compute_single_file_manifest(&ws)?.3
+                }
             } else {
                 BTreeMap::new()
             }
         }
         Ok(m) if !m.file_type().is_symlink() && m.file_type().is_dir() => {
-            compute_tree_manifest(&ws)?.3
+            if fast {
+                compute_fast_entries(&ws, TargetKind::Directory)?.0
+            } else {
+                compute_tree_manifest(&ws)?.3
+            }
         }
         _ => BTreeMap::new(),
     };

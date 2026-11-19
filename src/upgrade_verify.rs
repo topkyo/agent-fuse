@@ -206,16 +206,31 @@ pub fn validate_release_asset_url(url: &str) -> Result<(), AfuseError> {
     let rest = url.strip_prefix("https://").ok_or_else(|| {
         AfuseError::new(ERR_EINVAL, "release asset URL must use https://")
     })?;
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let (authority, path_and_query) = rest.split_once('/').unwrap_or((rest, ""));
+    let authority = authority.split(['?', '#']).next().unwrap_or("");
     if authority.is_empty() || authority.contains('@') {
         return Err(AfuseError::new(ERR_EINVAL, "invalid release asset authority"));
     }
     let host = authority.split(':').next().unwrap_or("").to_ascii_lowercase();
-    if !matches!(
-        host.as_str(),
-        "github.com" | "objects.githubusercontent.com" | "release-assets.githubusercontent.com"
-    ) {
-        return Err(AfuseError::new(ERR_EINVAL, format!("untrusted release asset host: {}", host)));
+    let path_only = path_and_query.split(['?', '#']).next().unwrap_or("");
+    match host.as_str() {
+        "github.com" => {
+            let lower_path = path_only.to_ascii_lowercase();
+            let has_traversal = lower_path.contains("..")
+                || lower_path.contains("%2e")
+                || lower_path.contains('\\')
+                || lower_path.contains("%5c");
+            if has_traversal || !path_only.starts_with("topkyo/agent-fuse/releases/download/") {
+                return Err(AfuseError::new(
+                    ERR_EINVAL,
+                    format!("untrusted github.com release asset path: /{}", path_only),
+                ));
+            }
+        }
+        "objects.githubusercontent.com" | "release-assets.githubusercontent.com" => {}
+        _ => {
+            return Err(AfuseError::new(ERR_EINVAL, format!("untrusted release asset host: {}", host)));
+        }
     }
     Ok(())
 }

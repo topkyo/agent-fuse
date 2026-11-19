@@ -20,7 +20,7 @@ fn print_usage() {
            snap [-m <LABEL>] [--fast] [--if-changed]\n\
                                                  Take an APFS CoW workspace snapshot (0 B at t=0)\n\
            list                                  List timeline snapshots (newest first)\n\
-           diff [<SNAP_ID|latest>]               Compare dirty workspace against snapshot\n\
+           diff [<SNAP_ID|latest>] [--fast]    Compare dirty workspace against snapshot\n\
            restore [<SNAP_ID|latest>] [--no-backup] [-- <REL_PATH>...]\n\
                                                  Atomically restore workspace (or selected paths) preserving root Inode\n\
            guard [--max-delete N] [--max-write-mb M] [--auto-rollback] -- <CMD...>\n\

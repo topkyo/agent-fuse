@@ -188,12 +188,17 @@ impl NestedIgnoredGuard {
         let items = std::mem::take(&mut self.moved);
         let mut first_err: Option<AfuseError> = None;
         for item in items {
+            let parent_rel = item.rel.parent().unwrap_or(Path::new(""));
+            if !parent_rel.as_os_str().is_empty() && !self.ws.join(parent_rel).is_dir() {
+                let _ = force_remove_all(&item.staged);
+                continue;
+            }
             let dst = self.ws.join(&item.rel);
             if fs::symlink_metadata(&dst).is_ok() {
                 let _ = force_remove_all(&item.staged);
                 continue;
             }
-            if let Err(e) = prepare_ancestors_writable(&self.ws, &item.rel, true, &mut dir_guard) {
+            if let Err(e) = prepare_ancestors_writable(&self.ws, &item.rel, false, &mut dir_guard) {
                 if first_err.is_none() {
                     first_err = Some(e);
                 }

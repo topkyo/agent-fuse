@@ -254,6 +254,10 @@ mod tests_round4 {
         assert!(!is_trusted_github_url("http://github.com/topkyo/agent-fuse/releases/download/v0.6.0/AgentFuse-0.6.0-macos.dmg"));
         assert!(!is_trusted_github_url("https://github.com@evil.invalid/AgentFuse-0.6.0-macos.dmg"));
         assert!(!is_trusted_github_url("https://evil.invalid/AgentFuse-0.6.0-macos.dmg"));
+        assert!(!is_trusted_github_url("https://github.com/attacker/agent-fuse/releases/download/v1.0/x.dmg"));
+        assert!(!is_trusted_github_url("https://github.com/topkyo/other-repo/releases/download/v1.0/x.dmg"));
+        assert!(is_trusted_github_url("https://github.com/topkyo/agent-fuse/releases/download/v0.6.1/AgentFuse.dmg"));
+        assert!(is_trusted_github_url("https://release-assets.githubusercontent.com/github-production-release-asset/x.dmg"));
 
         let untrusted_rel = r#"{
           "tag_name":"v0.9.5",

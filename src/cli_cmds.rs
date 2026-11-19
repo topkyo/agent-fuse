@@ -1,8 +1,8 @@
 use agent_fuse::{
     create_snapshot, create_snapshot_fast_dedup, create_snapshot_if_changed, diff_snapshot,
-    json_escape, list_snapshots, parse_prune_args, prune_snapshots_filtered, restore_snapshot,
-    restore_snapshot_paths, sanitize_terminal_text, short_hash, validate_workspace_binding,
-    AfuseError, RestoreReport,
+    diff_snapshot_fast, json_escape, list_snapshots, parse_prune_args, prune_snapshots_filtered,
+    restore_snapshot, restore_snapshot_paths, sanitize_terminal_text, short_hash,
+    validate_workspace_binding, AfuseError, RestoreReport,
 };
 use std::path::{Path, PathBuf};
 use std::process;
@@ -11,7 +11,7 @@ fn subcmd_usage(sub: &str) -> &'static str {
     match sub {
         "snap" => "USAGE: afuse [--workspace <DIR>] [--json] snap [-m <LABEL>] [--fast] [--if-changed]",
         "list" => "USAGE: afuse [--workspace <DIR>] [--json] list",
-        "diff" => "USAGE: afuse [--workspace <DIR>] [--json] diff [<SNAP_ID|latest>]",
+        "diff" => "USAGE: afuse [--workspace <DIR>] [--json] diff [<SNAP_ID|latest>] [--fast]",
         "restore" => "USAGE: afuse [--workspace <DIR>] [--json] restore [<SNAP_ID|latest>] [--no-backup] [-- <REL_PATH>...]",
         "validate" => "USAGE: afuse [--json] validate [<DIR>]",
         "prune" => "USAGE: afuse [--workspace <DIR>] [--json] prune --keep <N> [--label-prefix <P>]",
@@ -19,17 +19,35 @@ fn subcmd_usage(sub: &str) -> &'static str {
     }
 }
 
-fn handle_common_sub_flag(arg: &str, sub: &str, json: &mut bool) -> bool {
-    match arg {
-        "--help" | "-h" => {
-            println!("{}", subcmd_usage(sub));
-            process::exit(0);
+fn scan_help_and_json(rest: &[String], sub: &str, json: &mut bool) {
+    let mut want_help = false;
+    for arg in rest {
+        if arg == "--" {
+            break;
         }
-        "--json" => {
-            *json = true;
-            true
+        match arg.as_str() {
+            "--json" => *json = true,
+            "--help" | "-h" => want_help = true,
+            _ => {}
         }
-        _ => false,
+    }
+    if want_help {
+        let usage = subcmd_usage(sub);
+        if *json {
+            println!("{{\"ok\":true,\"usage\":\"{}\"}}", json_escape(usage));
+        } else {
+            println!("{}", usage);
+        }
+        process::exit(0);
+    }
+}
+
+fn handle_common_sub_flag(arg: &str, _sub: &str, json: &mut bool) -> bool {
+    if arg == "--json" {
+        *json = true;
+        true
+    } else {
+        false
     }
 }
 
@@ -81,6 +99,7 @@ fn print_restore_report(r: &RestoreReport, json: bool) {
 }
 
 pub(crate) fn cmd_snap(workspace: &Path, rest: &[String], mut json: bool) {
+    scan_help_and_json(rest, "snap", &mut json);
     let mut label = String::from("manual");
     let mut has_label = false;
     let mut if_changed = false;
@@ -155,6 +174,7 @@ pub(crate) fn cmd_snap(workspace: &Path, rest: &[String], mut json: bool) {
 }
 
 pub(crate) fn cmd_validate(workspace: &Path, rest: &[String], mut json: bool) {
+    scan_help_and_json(rest, "validate", &mut json);
     let mut candidate: Option<PathBuf> = None;
     let mut end_of_opts = false;
     for a in rest {
@@ -193,6 +213,7 @@ pub(crate) fn cmd_validate(workspace: &Path, rest: &[String], mut json: bool) {
 }
 
 pub(crate) fn cmd_list(workspace: &Path, rest: &[String], mut json: bool) {
+    scan_help_and_json(rest, "list", &mut json);
     for a in rest {
         if handle_common_sub_flag(a, "list", &mut json) {
             continue;
@@ -230,7 +251,9 @@ pub(crate) fn cmd_list(workspace: &Path, rest: &[String], mut json: bool) {
 }
 
 pub(crate) fn cmd_diff(workspace: &Path, rest: &[String], mut json: bool) {
+    scan_help_and_json(rest, "diff", &mut json);
     let mut target: Option<String> = None;
+    let mut fast = false;
     let mut end_of_opts = false;
     for a in rest {
         if !end_of_opts && a == "--" {
@@ -238,6 +261,10 @@ pub(crate) fn cmd_diff(workspace: &Path, rest: &[String], mut json: bool) {
             continue;
         }
         if !end_of_opts && handle_common_sub_flag(a, "diff", &mut json) {
+            continue;
+        }
+        if !end_of_opts && a == "--fast" {
+            fast = true;
             continue;
         }
         if !end_of_opts && a.starts_with('-') {
@@ -248,7 +275,9 @@ pub(crate) fn cmd_diff(workspace: &Path, rest: &[String], mut json: bool) {
         }
         target = Some(a.clone());
     }
-    match diff_snapshot(workspace, target.as_deref().unwrap_or("latest")) {
+    let snap_ref = target.as_deref().unwrap_or("latest");
+    let res = if fast { diff_snapshot_fast(workspace, snap_ref) } else { diff_snapshot(workspace, snap_ref) };
+    match res {
         Ok(d) => {
             if json {
                 let fmt_vec = |v: &[String]| -> String {
@@ -279,6 +308,7 @@ pub(crate) fn cmd_diff(workspace: &Path, rest: &[String], mut json: bool) {
 }
 
 pub(crate) fn cmd_restore(workspace: &Path, rest: &[String], mut json: bool) {
+    scan_help_and_json(rest, "restore", &mut json);
     let mut target: Option<String> = None;
     let mut safety_backup = true;
     let mut rel_paths: Vec<String> = Vec::new();
@@ -320,6 +350,7 @@ pub(crate) fn cmd_restore(workspace: &Path, rest: &[String], mut json: bool) {
 }
 
 pub(crate) fn cmd_prune(workspace: &Path, rest: &[String], mut json: bool) {
+    scan_help_and_json(rest, "prune", &mut json);
     for a in rest {
         if handle_common_sub_flag(a, "prune", &mut json) {
             continue;
