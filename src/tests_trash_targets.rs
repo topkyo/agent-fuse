@@ -328,5 +328,27 @@ mod tests_trash_targets {
         let rep = restore_snapshot_with_vault(&sf, Some(&vault), &meta.id, false).unwrap();
         assert_eq!(rep.tree_sha256, expected_sha);
         assert_eq!(fs::read_to_string(&sf).unwrap(), "v1");
+
+        let upper_git = sb.0.join("repo_upper/.GIT");
+        fs::create_dir_all(&upper_git).unwrap();
+        assert_eq!(crate::validate_workspace_binding_with_vault(&upper_git, Some(&vault)).unwrap_err().code, crate::error::ERR_EINVAL);
+
+        let plain_target_dir = sb.0.join("plain_notes");
+        fs::create_dir_all(&plain_target_dir).unwrap();
+        let target_sf = plain_target_dir.join("target");
+        fs::write(&target_sf, b"init-target").unwrap();
+        let vw = crate::validate_workspace_binding_with_vault(&target_sf, Some(&vault)).unwrap();
+        assert_eq!(vw.kind, TargetKind::SingleFile);
+        let t_meta = crate::create_snapshot_with_vault(&target_sf, Some(&vault), "manual-target").unwrap();
+        let d_clean = crate::diff::diff_snapshot_with_vault(&target_sf, Some(&vault), &t_meta.id).unwrap();
+        assert!(d_clean.added.is_empty() && d_clean.modified.is_empty() && d_clean.deleted.is_empty());
+        fs::write(&target_sf, b"edited-target").unwrap();
+        let d_dirty = crate::diff::diff_snapshot_with_vault(&target_sf, Some(&vault), &t_meta.id).unwrap();
+        assert!(d_dirty.added.is_empty() && d_dirty.deleted.is_empty() && d_dirty.modified == vec!["target".to_string()]);
+        let (t_meta2, dedup2) = crate::create_snapshot_if_changed_with_vault(&target_sf, Some(&vault), "auto:target-chg").unwrap();
+        assert!(!dedup2 && t_meta2.id != t_meta.id);
+        let t_rest = restore_snapshot_with_vault(&target_sf, Some(&vault), &t_meta.id, false).unwrap();
+        assert_eq!(t_rest.snapshot_id, t_meta.id);
+        assert_eq!(fs::read_to_string(&target_sf).unwrap(), "init-target");
     }
 }

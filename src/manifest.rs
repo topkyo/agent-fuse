@@ -195,6 +195,20 @@ pub fn compute_single_file_manifest(
     Ok((overall.finalize_hex(), 1, meta.len(), map))
 }
 
+pub(crate) fn compute_snap_tree_manifest(
+    snap_tree: &Path,
+    ws: &Path,
+    kind: TargetKind,
+) -> Result<(String, u64, u64, BTreeMap<String, String>), AfuseError> {
+    if kind == TargetKind::SingleFile {
+        let sf = crate::restore_tree::find_single_snap_file(ws, snap_tree)
+            .ok_or_else(|| AfuseError::new(ERR_ENOENT, "snapshot file missing in tree"))?;
+        compute_single_file_manifest(&sf)
+    } else {
+        compute_tree_manifest(snap_tree)
+    }
+}
+
 pub fn compute_tree_manifest(
     root: &Path,
 ) -> Result<(String, u64, u64, BTreeMap<String, String>), AfuseError> {

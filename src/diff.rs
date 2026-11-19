@@ -1,5 +1,5 @@
 use crate::error::{AfuseError, ERR_ENOENT};
-use crate::manifest::{compute_single_file_manifest, compute_tree_manifest};
+use crate::manifest::{compute_single_file_manifest, compute_snap_tree_manifest, compute_tree_manifest};
 use crate::snapshot::{lock_vault_and_resolve, resolve_snapshot_id};
 use crate::unicode_norm::canonical_rel_key;
 use crate::vault::TargetKind;
@@ -31,7 +31,7 @@ pub fn diff_snapshot_with_vault(
     let meta = resolve_snapshot_id(&ws_vault, target_id)?;
     let snap_tree = ws_vault.join("snapshots").join(&meta.id).join("tree");
 
-    let (_, _, _, snap_map) = compute_tree_manifest(&snap_tree)?;
+    let (_, _, _, snap_map) = compute_snap_tree_manifest(&snap_tree, &ws, meta.target_kind)?;
     let live_map = match fs::symlink_metadata(&ws) {
         Ok(m) if meta.target_kind == TargetKind::SingleFile => {
             if !m.file_type().is_symlink() && m.file_type().is_file() {

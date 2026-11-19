@@ -4,7 +4,8 @@ pub use crate::diff::{diff_snapshot, diff_snapshot_with_vault, DiffReport};
 use crate::fs_guard::clonefile_readable;
 use crate::manifest::{
     clone_filtered_tree, compute_fast_fingerprint, compute_single_file_manifest,
-    compute_tree_manifest, count_project_files, read_meta, write_meta, SnapshotMeta,
+    compute_snap_tree_manifest, compute_tree_manifest, count_project_files, read_meta, write_meta,
+    SnapshotMeta,
 };
 use crate::prune::{dedup_and_calibrate_history_unlocked, snap_tree_fast_fp};
 pub use crate::restore::{
@@ -122,7 +123,7 @@ pub fn create_snapshot_if_changed_with_vault(
         };
         let latest_sha = if latest.tree_sha256 == "fast" || latest.tree_sha256.starts_with("fast:") {
             let latest_tree = ws_vault.join("snapshots").join(&latest.id).join("tree");
-            compute_tree_manifest(&latest_tree)
+            compute_snap_tree_manifest(&latest_tree, &ws, latest.target_kind)
                 .map(|t| t.0)
                 .unwrap_or_default()
         } else {
@@ -188,14 +189,8 @@ pub(crate) fn create_snapshot_unlocked_opts(
             tree_dir.clone()
         };
         compute_fast_fingerprint(&fp_target, target_kind)?
-    } else if target_kind == TargetKind::SingleFile {
-        let fname = ws
-            .file_name()
-            .ok_or_else(|| AfuseError::new(ERR_EINVAL, "missing single-file name"))?;
-        let (sha, fc, lb, _) = compute_single_file_manifest(&tree_dir.join(fname))?;
-        (sha, fc, lb)
     } else {
-        let (sha, fc, lb, _) = compute_tree_manifest(&tree_dir)?;
+        let (sha, fc, lb, _) = compute_snap_tree_manifest(&tree_dir, ws, target_kind)?;
         (sha, fc, lb)
     };
     let project_files = if target_kind == TargetKind::SingleFile {

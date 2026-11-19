@@ -4,7 +4,8 @@ use crate::apfs::{
 use crate::error::{AfuseError, ERR_EACCES, ERR_EINVAL, ERR_ENOENT};
 use crate::fs_guard::clonefile_readable;
 use crate::manifest::{
-    compute_single_file_manifest, compute_tree_manifest, count_project_files, SnapshotMeta,
+    compute_single_file_manifest, compute_snap_tree_manifest, compute_tree_manifest,
+    count_project_files, SnapshotMeta,
 };
 use crate::restore_tree::{
     align_ancestor_case, clear_heterogeneous_path_if_needed, find_single_snap_file,
@@ -40,7 +41,7 @@ pub struct RestoreReport {
     pub trash_cleanup: TrashCleanupStatus,
 }
 
-fn verify_snapshot_tree(ws_vault: &Path, target_id: &str) -> Result<(SnapshotMeta, PathBuf, Option<String>), AfuseError> {
+fn verify_snapshot_tree(ws: &Path, ws_vault: &Path, target_id: &str) -> Result<(SnapshotMeta, PathBuf, Option<String>), AfuseError> {
     if !ws_vault.join("snapshots").is_dir() {
         return Err(AfuseError::new(ERR_ENOENT, "no snapshots exist for this workspace"));
     }
@@ -52,7 +53,7 @@ fn verify_snapshot_tree(ws_vault: &Path, target_id: &str) -> Result<(SnapshotMet
     let vault_hash = if meta.tree_sha256 == "fast" || meta.tree_sha256.starts_with("fast:") {
         None
     } else {
-        let (vh, _, _, _) = compute_tree_manifest(&snap_tree)?;
+        let (vh, _, _, _) = compute_snap_tree_manifest(&snap_tree, ws, meta.target_kind)?;
         if vh != meta.tree_sha256 {
             return Err(AfuseError::new(ERR_EINVAL, format!("snapshot integrity mismatch: expected {}, found {}", meta.tree_sha256, vh)));
         }
@@ -206,7 +207,7 @@ pub fn restore_snapshot_with_vault(
     let (ws, ws_vault) = resolve_workspace_vault_recovery(workspace, vault_override)?;
     let _guard = lock_vault(&ws_vault)?;
     let t0 = Instant::now();
-    let (meta, snap_tree, vault_hash) = verify_snapshot_tree(&ws_vault, target_id)?;
+    let (meta, snap_tree, vault_hash) = verify_snapshot_tree(&ws, &ws_vault, target_id)?;
     if meta.target_kind == TargetKind::SingleFile {
         return restore_single_file_unlocked(&ws, &ws_vault, &meta, &snap_tree, vault_hash.as_deref(), safety_backup, t0);
     }
@@ -281,7 +282,7 @@ pub fn restore_snapshot_paths_with_vault(
     let (ws, ws_vault) = resolve_workspace_vault_recovery(workspace, vault_override)?;
     let _guard = lock_vault(&ws_vault)?;
     let t0 = Instant::now();
-    let (meta, snap_tree, vault_hash) = verify_snapshot_tree(&ws_vault, target_id)?;
+    let (meta, snap_tree, vault_hash) = verify_snapshot_tree(&ws, &ws_vault, target_id)?;
     if meta.target_kind == TargetKind::SingleFile {
         if clean_paths.len() == 1
             && ws.file_name().map(|n| top_level_nfd_key(n) == top_level_nfd_key(clean_paths[0].as_os_str())).unwrap_or(false)

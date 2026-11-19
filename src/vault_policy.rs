@@ -185,7 +185,7 @@ pub(crate) fn enforce_target_leaf_and_access(
                 .parent()
                 .map(|p| fs::symlink_metadata(p.join("Cargo.toml")).is_ok())
                 .unwrap_or(false);
-        if name == ".git" || (is_ignored_name(name) && (name != "target" || is_cargo_target)) {
+        if name.eq_ignore_ascii_case(".git") || (is_ignored_name(name) && (name != "target" || is_cargo_target)) {
             return Err(AfuseError::new(
                 ERR_EINVAL,
                 format!("binding protected or ignored leaf '{}' is forbidden", name),
