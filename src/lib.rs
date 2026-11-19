@@ -106,4 +106,6 @@ mod tests_round3;
 #[cfg(test)]
 mod tests_round4;
 #[cfg(test)]
+mod tests_round5;
+#[cfg(test)]
 mod tests_trash_targets;

@@ -1,4 +1,7 @@
-use crate::apfs::{can_write_path, force_remove_all, fsgetpath, lstat_inode_mode, real_home_dir, statfs_info};
+use crate::apfs::{
+    can_write_path, current_euid, force_remove_all, fsgetpath, lstat_inode_mode, real_home_dir,
+    statfs_info,
+};
 use crate::error::{AfuseError, ERR_EACCES, ERR_EPERM};
 use crate::manifest::SnapshotMeta;
 use crate::snapshot::list_snapshots_unlocked;
@@ -157,27 +160,45 @@ pub(crate) fn record_live_target_inode_if_new(ws: &Path, kind: TargetKind, ws_va
     let _ = write_latest_with_retained(ws, kind, ws_vault, &retained);
 }
 
-pub fn allowed_trash_roots() -> Vec<PathBuf> {
+pub(crate) fn allowed_trash_roots_for(
+    home: Option<&Path>,
+    custom_env: Option<&str>,
+    ws: Option<&Path>,
+    euid: u32,
+) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut push_if_ok = |p: PathBuf| {
-        if let Ok(c) = fs::canonicalize(&p) {
-            if !out.contains(&c) {
-                out.push(c);
+        let resolved = fs::canonicalize(&p).ok().or_else(|| fs::symlink_metadata(&p).ok().map(|_| p));
+        if let Some(r) = resolved {
+            if !out.contains(&r) {
+                out.push(r);
             }
-        } else if p.exists() && !out.contains(&p) {
-            out.push(p);
         }
     };
-    if let Ok(custom) = env::var("AFUSE_TRASH_DIR") {
-        let trimmed = custom.trim();
-        if !trimmed.is_empty() {
-            push_if_ok(PathBuf::from(trimmed));
+    if let Some(custom) = custom_env.map(str::trim).filter(|s| !s.is_empty()) {
+        push_if_ok(PathBuf::from(custom));
+    }
+    if let Some(h) = home {
+        push_if_ok(h.join(".Trash"));
+        push_if_ok(h.join("Library/Mobile Documents/com~apple~CloudDocs/.Trash"));
+    }
+    if let Some(w) = ws {
+        let mut comps = w.components();
+        if matches!(comps.next(), Some(std::path::Component::RootDir)) {
+            if let (Some(c1), Some(c2)) = (comps.next(), comps.next()) {
+                if c1.as_os_str() == "Volumes" {
+                    push_if_ok(PathBuf::from("/Volumes").join(c2.as_os_str()).join(".Trashes").join(euid.to_string()));
+                }
+            }
         }
     }
-    if let Ok(home) = real_home_dir() {
-        push_if_ok(home.join(".Trash"));
-    }
     out
+}
+
+pub fn allowed_trash_roots() -> Vec<PathBuf> {
+    let home = real_home_dir().ok();
+    let custom = env::var("AFUSE_TRASH_DIR").ok();
+    allowed_trash_roots_for(home.as_deref(), custom.as_deref(), None, current_euid())
 }
 
 fn normalize_parent_keep_leaf(raw: &Path) -> PathBuf {
@@ -199,7 +220,9 @@ pub(crate) fn purge_trashed_counterparts(
     fsid: (i32, i32),
 ) -> TrashCleanupStatus {
     let live_inodes: BTreeSet<u64> = collect_target_inodes(restored_ws, kind).into_iter().collect();
-    let trash_roots = allowed_trash_roots();
+    let home = real_home_dir().ok();
+    let custom = env::var("AFUSE_TRASH_DIR").ok();
+    let trash_roots = allowed_trash_roots_for(home.as_deref(), custom.as_deref(), Some(restored_ws), current_euid());
     if trash_roots.is_empty() {
         refresh_latest_inodes(restored_ws, kind, ws_vault);
         return TrashCleanupStatus::NotInTrash;
@@ -292,43 +315,46 @@ pub(crate) fn purge_trashed_counterparts(
 
     let live_root = lstat_inode_mode(restored_ws).map(|x| x.0).unwrap_or(0);
     if !saw_tcc_denied {
-        let has_stale_cand = cands.iter().any(|ino| !live_inodes.contains(ino) && !purged_inos.contains(ino));
-        if has_stale_cand {
+        let stale_cands: BTreeSet<u64> = cands.iter().copied()
+            .filter(|ino| !live_inodes.contains(ino) && !purged_inos.contains(ino))
+            .collect();
+        if !stale_cands.is_empty() {
             for tr in &trash_roots {
-                let rd_denied = fs::read_dir(tr)
-                    .err()
-                    .and_then(|e| e.raw_os_error())
-                    .map(|c| c == ERR_EPERM || c == ERR_EACCES)
-                    .unwrap_or(false);
-                let wr_denied = can_write_path(tr)
-                    .err()
-                    .map(|e| e.code == ERR_EPERM || e.code == ERR_EACCES)
-                    .unwrap_or(false);
-                if rd_denied || wr_denied {
-                    saw_tcc_denied = true;
-                    for &ino in &cands {
-                        if !live_inodes.contains(&ino) && !purged_inos.contains(&ino) {
-                            denied_inos.push(ino);
+                match fs::read_dir(tr) {
+                    Err(e) if matches!(e.raw_os_error(), Some(c) if c == ERR_EPERM || c == ERR_EACCES) => {
+                        saw_tcc_denied = true;
+                        denied_inos.extend(stale_cands.iter().copied());
+                        break;
+                    }
+                    Ok(rd) => {
+                        let has_match = rd.flatten().any(|ent| {
+                            fs::symlink_metadata(ent.path()).map(|m| stale_cands.contains(&m.ino())).unwrap_or(false)
+                        });
+                        if has_match && matches!(can_write_path(tr), Err(e) if e.code == ERR_EPERM || e.code == ERR_EACCES) {
+                            saw_tcc_denied = true;
+                            denied_inos.extend(stale_cands.iter().copied());
+                            break;
                         }
                     }
-                    break;
+                    Err(_) => {}
                 }
             }
         }
     }
-    let mut keep_roots = Vec::new();
-    if saw_tcc_denied {
-        keep_roots.extend(denied_inos);
+    let retained = if saw_tcc_denied {
+        let mut keep_roots = denied_inos;
         if target_meta.root_inode > 0 && !purged_inos.contains(&target_meta.root_inode) {
             keep_roots.push(target_meta.root_inode);
         }
         if live_root > 0 {
             keep_roots.push(live_root);
         }
-    } else if live_root > 0 {
-        keep_roots.push(live_root);
-    }
-    let retained = update_retained_root_inodes(ws_vault, &keep_roots, &purged_inos);
+        update_retained_root_inodes(ws_vault, &keep_roots, &purged_inos)
+    } else {
+        let clean_roots: Vec<u64> = if live_root > 0 { vec![live_root] } else { Vec::new() };
+        write_inode_file(&ws_vault.join("retained_inodes.txt"), &clean_roots);
+        clean_roots
+    };
     let _ = write_latest_with_retained(restored_ws, kind, ws_vault, &retained);
     if saw_tcc_denied {
         TrashCleanupStatus::TccDenied
