@@ -1,9 +1,12 @@
 #[cfg(test)]
 mod tests_round4 {
     use crate::apfs::{force_remove_all, TMP_SEQ};
+    use crate::diff::diff_snapshot_opts_with_vault;
     use crate::error::{ERR_EINVAL, ERR_ENOENT, ERR_USAGE};
     use crate::hook_config::{render_hook_snippet, uninstall_hooks};
+    use crate::restore::restore_snapshot_with_vault;
     use crate::sha256::sha256_hex;
+    use crate::snapshot::create_snapshot_opts_with_vault;
     use crate::tests::{compile_dummy_afuse_macho, TestEnvGuard, ENV_LOCK};
     use crate::upgrade::{
         check_for_updates, is_trusted_github_url, parse_release_json, perform_upgrade_on_exe,
@@ -295,5 +298,52 @@ mod tests_round4 {
         let rep_json = rep.to_json();
         assert!(rep_json.contains("\"dmg_url\":\"https://github.com/topkyo/agent-fuse/releases/download/v0.9.6/AgentFuse-0.9.6-macos.dmg\""));
         assert!(rep_json.contains("\"dmg_sha256_url\":\"https://objects.githubusercontent.com/agent-fuse/AgentFuse-0.9.6-macos.dmg.sha256\""));
+    }
+
+    #[test]
+    fn nested_zero_mode_dir_restore_preserves_mode_and_merkle() {
+        let sb = R4ScopedDir::new("zero-dir");
+        let ws = sb.0.join("ws");
+        let vault = sb.0.join("vault");
+        let outer = ws.join("locked_dir");
+        let inner = outer.join("inner");
+        fs::create_dir_all(&inner).unwrap();
+        fs::write(inner.join("secret.txt"), "deep\n").unwrap();
+        fs::set_permissions(&inner, fs::Permissions::from_mode(0o000)).unwrap();
+        fs::set_permissions(&outer, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let full = create_snapshot_opts_with_vault(&ws, Some(&vault), "full-zero", false).unwrap();
+        restore_snapshot_with_vault(&ws, Some(&vault), &full.id, false).unwrap();
+        let outer_mode = fs::symlink_metadata(&outer).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(outer_mode, 0o000, "outer 0000 mode must survive full restore");
+
+        let fast = create_snapshot_opts_with_vault(&ws, Some(&vault), "fast-zero", true).unwrap();
+        restore_snapshot_with_vault(&ws, Some(&vault), &fast.id, false).unwrap();
+        let outer_mode_fast = fs::symlink_metadata(&outer).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(outer_mode_fast, 0o000, "outer 0000 mode must survive fast restore");
+        let diff = diff_snapshot_opts_with_vault(&ws, Some(&vault), &fast.id, true).unwrap();
+        assert!(diff.added.is_empty() && diff.deleted.is_empty() && diff.modified.is_empty(), "diff --fast false positive: {:?}", diff);
+    }
+
+    #[test]
+    fn restore_symlink_replacing_dir_with_nested_ignored_succeeds() {
+        let sb = R4ScopedDir::new("sym-nested");
+        let ws = sb.0.join("ws");
+        let outside = sb.0.join("outside");
+        let vault = sb.0.join("vault");
+        fs::create_dir_all(&ws).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(ws.join("a.txt"), "root-a\n").unwrap();
+        symlink(&outside, ws.join("pkg")).unwrap();
+
+        let snap = create_snapshot_opts_with_vault(&ws, Some(&vault), "s1", false).unwrap();
+        fs::remove_file(ws.join("pkg")).unwrap();
+        fs::create_dir_all(ws.join("pkg/node_modules")).unwrap();
+        fs::write(ws.join("pkg/node_modules/dep.js"), "dep\n").unwrap();
+
+        restore_snapshot_with_vault(&ws, Some(&vault), &snap.id, false).unwrap();
+        assert!(fs::symlink_metadata(ws.join("pkg")).unwrap().file_type().is_symlink());
+        assert!(!outside.join("node_modules").exists(), "must not copy staged ignored dir through symlink");
+        assert_eq!(fs::read_to_string(ws.join("a.txt")).unwrap(), "root-a\n");
     }
 }

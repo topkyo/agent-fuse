@@ -36,12 +36,7 @@ impl Drop for TempPermGuard {
     }
 }
 
-fn clone_dir_fallback_readable(src: &Path, dst: &Path) -> Result<(), AfuseError> {
-    let orig = fs::symlink_metadata(src)
-        .map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))?
-        .permissions()
-        .mode()
-        & 0o7777;
+fn clone_dir_fallback_readable(src: &Path, dst: &Path, orig: u32) -> Result<(), AfuseError> {
     let _sg = TempPermGuard::ensure(src, 0o500);
     fs::create_dir_all(dst).map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))?;
     let _ = fs::set_permissions(dst, fs::Permissions::from_mode(orig | 0o700));
@@ -70,13 +65,13 @@ pub(crate) fn clonefile_readable(src: &Path, dst: &Path) -> Result<(), AfuseErro
                         }
                         return Ok(());
                     }
-                    Err(e) if is_dir && e.code == ERR_EACCES => return clone_dir_fallback_readable(src, dst),
+                    Err(e) if is_dir && e.code == ERR_EACCES => return clone_dir_fallback_readable(src, dst, orig),
                     Err(e) => return Err(e),
                 }
             }
             return match clonefile_nofollow(src, dst) {
                 Ok(()) => Ok(()),
-                Err(e) if is_dir && e.code == ERR_EACCES => clone_dir_fallback_readable(src, dst),
+                Err(e) if is_dir && e.code == ERR_EACCES => clone_dir_fallback_readable(src, dst, orig),
                 Err(e) => Err(e),
             };
         }

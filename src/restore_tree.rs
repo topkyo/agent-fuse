@@ -183,13 +183,29 @@ impl NestedIgnoredGuard {
         })
     }
 
+    fn is_real_dir_chain(root: &Path, rel: &Path, dir_guard: &mut UnlockedDirsGuard) -> bool {
+        let mut cur = root.to_path_buf();
+        for comp in rel.components() {
+            cur.push(comp);
+            match fs::symlink_metadata(&cur) {
+                Ok(m) if !m.file_type().is_symlink() && m.file_type().is_dir() => {
+                    if dir_guard.unlock_if_needed(&cur).is_err() {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        true
+    }
+
     pub fn restore_back(&mut self) -> Result<(), AfuseError> {
         let mut dir_guard = UnlockedDirsGuard::new();
         let items = std::mem::take(&mut self.moved);
         let mut first_err: Option<AfuseError> = None;
         for item in items {
             let parent_rel = item.rel.parent().unwrap_or(Path::new(""));
-            if !parent_rel.as_os_str().is_empty() && !self.ws.join(parent_rel).is_dir() {
+            if !parent_rel.as_os_str().is_empty() && !Self::is_real_dir_chain(&self.ws, parent_rel, &mut dir_guard) {
                 let _ = force_remove_all(&item.staged);
                 continue;
             }
