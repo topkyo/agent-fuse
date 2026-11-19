@@ -249,4 +249,84 @@ mod tests_trash_targets {
         let _ = crate::prune_snapshots_filtered_with_vault(&ws, Some(&vault), 0, None).unwrap();
         assert!(!ws_vault.exists());
     }
+
+    #[test]
+    fn expanded_forbidden_boundaries_leaf_names_owner_gate_and_single_file_manifest() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let sb = ScopedDir::new("boundary-rules");
+        let vault = sb.0.join("vault");
+        let home = crate::apfs::real_home_dir().unwrap();
+
+        for p in [
+            PathBuf::from("/private"),
+            PathBuf::from("/PRIVATE"),
+            PathBuf::from("/opt"),
+            PathBuf::from("/OPT"),
+            PathBuf::from("/Users/Shared"),
+            PathBuf::from("/private/var/root"),
+            PathBuf::from("/private/var/root/sub"),
+            PathBuf::from("/private/var/db"),
+            home.join("Pictures"),
+            home.join("pictures"),
+            home.join("Movies"),
+            home.join("Music"),
+            home.join("Public"),
+            home.join(".ssh"),
+            home.join(".ssh/id_ed25519"),
+            home.join(".gnupg"),
+            home.join(".aws"),
+            home.join(".kube"),
+            home.join("Applications"),
+        ] {
+            let err = crate::reject_forbidden_workspace_paths(&p).unwrap_err();
+            assert_eq!(err.code, crate::error::ERR_EINVAL, "expected EINVAL for {}", p.display());
+        }
+
+        let host_tmp_proj = sb.0.join("host-var-folders-ok");
+        fs::create_dir_all(&host_tmp_proj).unwrap();
+        fs::write(host_tmp_proj.join("ok.txt"), b"ok").unwrap();
+        assert!(crate::validate_workspace_binding_with_vault(&host_tmp_proj, Some(&vault)).is_ok());
+
+        let git_leaf = sb.0.join("repo/.git");
+        fs::create_dir_all(&git_leaf).unwrap();
+        assert_eq!(crate::validate_workspace_binding_with_vault(&git_leaf, Some(&vault)).unwrap_err().code, crate::error::ERR_EINVAL);
+
+        let ds_file = sb.0.join(".DS_Store");
+        fs::write(&ds_file, b"ds").unwrap();
+        assert_eq!(crate::validate_workspace_binding_with_vault(&ds_file, Some(&vault)).unwrap_err().code, crate::error::ERR_EINVAL);
+
+        let nm_dir = sb.0.join("node_modules");
+        fs::create_dir_all(&nm_dir).unwrap();
+        assert_eq!(crate::validate_workspace_binding_with_vault(&nm_dir, Some(&vault)).unwrap_err().code, crate::error::ERR_EINVAL);
+
+        let cargo_parent = sb.0.join("rust_app");
+        fs::create_dir_all(cargo_parent.join("target")).unwrap();
+        fs::write(cargo_parent.join("Cargo.toml"), b"[package]\nname=\"x\"\n").unwrap();
+        assert_eq!(crate::validate_workspace_binding_with_vault(&cargo_parent.join("target"), Some(&vault)).unwrap_err().code, crate::error::ERR_EINVAL);
+
+        let ro_owned = sb.0.join("own-ro");
+        fs::create_dir_all(&ro_owned).unwrap();
+        fs::write(ro_owned.join("f.rs"), b"v1").unwrap();
+        fs::set_permissions(&ro_owned, fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(crate::validate_workspace_binding_with_vault(&ro_owned, Some(&vault)).is_ok());
+        fs::set_permissions(&ro_owned, fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(crate::validate_workspace_binding_with_vault(&ro_owned, Some(&vault)).is_ok());
+        let euid = crate::apfs::current_euid();
+        assert_eq!(
+            crate::vault_policy::check_owner_rw_gate(&ro_owned, euid.wrapping_add(1), euid).unwrap_err().code,
+            crate::error::ERR_EACCES
+        );
+        fs::set_permissions(&ro_owned, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let sf = sb.0.join("single.rs");
+        fs::write(&sf, b"v1").unwrap();
+        let meta = crate::create_snapshot_with_vault(&sf, Some(&vault), "manual-sf").unwrap();
+        let (expected_sha, fc, _, _) = crate::manifest::compute_single_file_manifest(&sf).unwrap();
+        assert_eq!(fc, 1);
+        assert_eq!(meta.tree_sha256, expected_sha);
+        fs::write(&sf, b"mutated").unwrap();
+        let rep = restore_snapshot_with_vault(&sf, Some(&vault), &meta.id, false).unwrap();
+        assert_eq!(rep.tree_sha256, expected_sha);
+        assert_eq!(fs::read_to_string(&sf).unwrap(), "v1");
+    }
 }

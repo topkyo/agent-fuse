@@ -203,6 +203,17 @@ int afuse_can_write(const char *path) {
     return 0;
 }
 
+int afuse_can_read_write(const char *path) {
+    if (!path || access(path, R_OK | W_OK) != 0) {
+        return errno ? errno : EACCES;
+    }
+    return 0;
+}
+
+unsigned int afuse_current_euid(void) {
+    return (unsigned int)geteuid();
+}
+
 void afuse_freeze_kill_reap_pgid(int pgid) {
     if (pgid <= 1) {
         return;

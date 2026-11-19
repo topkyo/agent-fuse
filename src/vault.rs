@@ -4,7 +4,9 @@ use crate::apfs::{
 use crate::error::{AfuseError, ERR_EACCES, ERR_EINVAL, ERR_ENOENT, ERR_ENOTSUP, ERR_EXDEV};
 use crate::sha256::sha256_hex;
 pub use crate::vault_policy::reject_forbidden_workspace_paths;
-use crate::vault_policy::{enforce_vault_target_kind, lexical_normalize_path};
+use crate::vault_policy::{
+    enforce_target_leaf_and_access, enforce_vault_target_kind, lexical_normalize_path,
+};
 use std::env;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
@@ -108,9 +110,7 @@ fn verify_leaf_regular_or_dir(candidate: &Path) -> Result<(PathBuf, fs::Metadata
     Ok((trimmed, sym))
 }
 
-pub fn check_workspace_path_rules(
-    candidate: &Path,
-) -> Result<(PathBuf, fs::Metadata, String, TargetKind), AfuseError> {
+fn resolve_live_target(candidate: &Path) -> Result<(PathBuf, fs::Metadata, TargetKind), AfuseError> {
     let (trimmed, _) = verify_leaf_regular_or_dir(candidate)?;
     let ws = fs::canonicalize(&trimmed).map_err(|e| {
         AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), "target path does not exist or is inaccessible")
@@ -122,7 +122,16 @@ pub fn check_workspace_path_rules(
         return Err(AfuseError::new(ERR_EINVAL, "target must be a regular directory or regular file"));
     }
     let _real_home = reject_forbidden_workspace_paths(&ws)?;
-    if ft.is_file() {
+    let kind = if ft.is_file() { TargetKind::SingleFile } else { TargetKind::Directory };
+    enforce_target_leaf_and_access(&ws, &meta, kind)?;
+    Ok((ws, meta, kind))
+}
+
+pub fn check_workspace_path_rules(
+    candidate: &Path,
+) -> Result<(PathBuf, fs::Metadata, String, TargetKind), AfuseError> {
+    let (ws, meta, kind) = resolve_live_target(candidate)?;
+    if kind == TargetKind::SingleFile {
         return Ok((ws, meta, "file".to_string(), TargetKind::SingleFile));
     }
     let marker = PROJECT_MARKERS
@@ -249,21 +258,7 @@ pub fn prepare_live_workspace_vault_with(
     workspace: &Path,
     vault_override: Option<&Path>,
 ) -> Result<(PathBuf, PathBuf), AfuseError> {
-    let (trimmed, _) = verify_leaf_regular_or_dir(workspace)?;
-    let ws = fs::canonicalize(&trimmed).map_err(|e| {
-        AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), "target path does not exist or is inaccessible")
-    })?;
-    let ft = fs::symlink_metadata(&ws)
-        .map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), "cannot stat target path"))?
-        .file_type();
-    if !ft.is_dir() && !ft.is_file() {
-        return Err(AfuseError::new(ERR_EINVAL, "target must be a regular directory or regular file"));
-    }
-    let live_kind = if ft.is_file() {
-        TargetKind::SingleFile
-    } else {
-        TargetKind::Directory
-    };
+    let (ws, _meta, live_kind) = resolve_live_target(workspace)?;
     let (resolved_ws, ws_vault) = workspace_vault_common(&ws, stat_dir_for(&ws), vault_override, true)?;
     enforce_vault_target_kind(&ws_vault, live_kind)?;
     Ok((resolved_ws, ws_vault))

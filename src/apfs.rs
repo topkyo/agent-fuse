@@ -29,6 +29,8 @@ extern "C" {
     fn afuse_try_wait_pid(pid: i32, out_exited: *mut i32, out_code: *mut i32) -> i32;
     fn afuse_fsgetpath(fsid0: i32, fsid1: i32, obj_id: u64, buf: *mut i8, len: usize) -> i32;
     fn afuse_can_write(path: *const i8) -> i32;
+    fn afuse_can_read_write(path: *const i8) -> i32;
+    fn afuse_current_euid() -> u32;
     fn afuse_freeze_kill_reap_pgid(pgid: i32);
 }
 
@@ -295,4 +297,14 @@ pub(crate) fn can_write_path(p: &Path) -> Result<(), AfuseError> {
     } else {
         Err(AfuseError::new(rc, format!("path not writable {}: errno={}", p.display(), rc)))
     }
+}
+
+pub(crate) fn can_read_write(p: &Path) -> bool {
+    c_path(p)
+        .map(|cp| unsafe { afuse_can_read_write(cp.as_ptr()) } == 0)
+        .unwrap_or(false)
+}
+
+pub(crate) fn current_euid() -> u32 {
+    unsafe { afuse_current_euid() }
 }

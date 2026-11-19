@@ -188,6 +188,12 @@ pub(crate) fn create_snapshot_unlocked_opts(
             tree_dir.clone()
         };
         compute_fast_fingerprint(&fp_target, target_kind)?
+    } else if target_kind == TargetKind::SingleFile {
+        let fname = ws
+            .file_name()
+            .ok_or_else(|| AfuseError::new(ERR_EINVAL, "missing single-file name"))?;
+        let (sha, fc, lb, _) = compute_single_file_manifest(&tree_dir.join(fname))?;
+        (sha, fc, lb)
     } else {
         let (sha, fc, lb, _) = compute_tree_manifest(&tree_dir)?;
         (sha, fc, lb)

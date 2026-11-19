@@ -1,10 +1,43 @@
-use crate::apfs::real_home_dir;
-use crate::error::{AfuseError, ERR_EINVAL};
+use crate::apfs::{can_read_write, current_euid, real_home_dir};
+use crate::error::{AfuseError, ERR_EACCES, ERR_EINVAL};
 use crate::meta::read_meta;
-use crate::vault::TargetKind;
+use crate::vault::{is_ignored_name, TargetKind};
 use std::env;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+
+fn path_eq_icase(a: &Path, b: &Path) -> bool {
+    let (ab, bb) = (a.as_os_str().as_bytes(), b.as_os_str().as_bytes());
+    ab.len() == bb.len()
+        && ab
+            .iter()
+            .zip(bb)
+            .all(|(x, y)| x.to_ascii_lowercase() == y.to_ascii_lowercase())
+}
+
+fn path_starts_with_icase(ws: &Path, sub: &Path) -> bool {
+    let mut wi = ws.components();
+    let mut si = sub.components();
+    loop {
+        match (si.next(), wi.next()) {
+            (None, _) => return true,
+            (Some(_), None) => return false,
+            (Some(sc), Some(wc)) => {
+                let (sb, wb) = (sc.as_os_str().as_bytes(), wc.as_os_str().as_bytes());
+                if sb.len() != wb.len()
+                    || !sb
+                        .iter()
+                        .zip(wb)
+                        .all(|(x, y)| x.to_ascii_lowercase() == y.to_ascii_lowercase())
+                {
+                    return false;
+                }
+            }
+        }
+    }
+}
 
 pub(crate) fn lexical_normalize_path(path: &Path) -> Result<PathBuf, AfuseError> {
     let abs = if path.is_absolute() {
@@ -44,24 +77,31 @@ pub fn reject_forbidden_workspace_paths(ws: &Path) -> Result<PathBuf, AfuseError
     let forbidden_exact = [
         PathBuf::from("/"),
         PathBuf::from("/Users"),
+        PathBuf::from("/Users/Shared"),
         PathBuf::from("/Volumes"),
         PathBuf::from("/tmp"),
+        PathBuf::from("/private"),
         PathBuf::from("/private/tmp"),
         PathBuf::from("/var"),
         PathBuf::from("/private/var"),
+        PathBuf::from("/opt"),
         real_home.clone(),
         real_home.join("Desktop"),
         real_home.join("Documents"),
         real_home.join("Downloads"),
+        real_home.join("Pictures"),
+        real_home.join("Movies"),
+        real_home.join("Music"),
+        real_home.join("Public"),
     ];
-    if env_home.as_deref() == Some(ws)
+    if env_home.as_deref().map(|h| path_eq_icase(ws, h)).unwrap_or(false)
         || forbidden_exact
             .iter()
-            .any(|ex| ws == ex || ws == &resolve_norm_or_canon(ex))
+            .any(|ex| path_eq_icase(ws, ex) || path_eq_icase(ws, &resolve_norm_or_canon(ex)))
     {
         return Err(AfuseError::new(
             ERR_EINVAL,
-            "binding system root, HOME, or top-level Desktop/Documents/Downloads folder itself is forbidden",
+            "binding system root, HOME, or protected user/top-level folder itself is forbidden",
         ));
     }
     let forbidden_subtrees = vec![
@@ -75,9 +115,21 @@ pub fn reject_forbidden_workspace_paths(ws: &Path) -> Result<PathBuf, AfuseError
         PathBuf::from("/etc"),
         PathBuf::from("/private/etc"),
         PathBuf::from("/cores"),
+        PathBuf::from("/private/var/db"),
+        PathBuf::from("/private/var/log"),
+        PathBuf::from("/private/var/root"),
+        PathBuf::from("/private/var/vm"),
+        PathBuf::from("/private/var/run"),
+        PathBuf::from("/private/var/spool"),
+        PathBuf::from("/private/var/audit"),
         real_home.join(".agent-fuse"),
         real_home.join(".Trash"),
         real_home.join("Library"),
+        real_home.join("Applications"),
+        real_home.join(".ssh"),
+        real_home.join(".gnupg"),
+        real_home.join(".aws"),
+        real_home.join(".kube"),
     ];
     let env_paths: Vec<PathBuf> = ["AFUSE_TRASH_DIR"]
         .iter()
@@ -90,7 +142,7 @@ pub fn reject_forbidden_workspace_paths(ws: &Path) -> Result<PathBuf, AfuseError
         .collect();
     for sub in forbidden_subtrees.iter().chain(env_paths.iter()) {
         let canon_sub = resolve_norm_or_canon(sub);
-        if ws == sub || ws.starts_with(sub) || ws == &canon_sub || ws.starts_with(&canon_sub) {
+        if path_starts_with_icase(ws, sub) || path_starts_with_icase(ws, &canon_sub) {
             return Err(AfuseError::new(
                 ERR_EINVAL,
                 "binding protected/system/trash subtree is forbidden",
@@ -102,7 +154,7 @@ pub fn reject_forbidden_workspace_paths(ws: &Path) -> Result<PathBuf, AfuseError
         .filter(|s| !s.trim().is_empty())
         .map(|s| resolve_norm_or_canon(Path::new(s.trim())))
     {
-        if ws == &v_canon || ws.starts_with(&v_canon) || v_canon.starts_with(ws) {
+        if path_starts_with_icase(ws, &v_canon) || path_starts_with_icase(&v_canon, ws) {
             return Err(AfuseError::new(
                 ERR_EINVAL,
                 "self-ingestion forbidden: vault and target must not overlap",
@@ -110,6 +162,46 @@ pub fn reject_forbidden_workspace_paths(ws: &Path) -> Result<PathBuf, AfuseError
         }
     }
     Ok(real_home)
+}
+
+pub(crate) fn check_owner_rw_gate(path: &Path, uid: u32, euid: u32) -> Result<(), AfuseError> {
+    if !can_read_write(path) && uid != euid {
+        return Err(AfuseError::new(
+            ERR_EACCES,
+            format!("insufficient permissions on '{}' (not owner or missing rw access)", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn enforce_target_leaf_and_access(
+    ws: &Path,
+    meta: &fs::Metadata,
+    kind: TargetKind,
+) -> Result<(), AfuseError> {
+    if let Some(name) = ws.file_name().and_then(|n| n.to_str()) {
+        let is_cargo_target = name == "target"
+            && ws
+                .parent()
+                .map(|p| fs::symlink_metadata(p.join("Cargo.toml")).is_ok())
+                .unwrap_or(false);
+        if name == ".git" || (is_ignored_name(name) && (name != "target" || is_cargo_target)) {
+            return Err(AfuseError::new(
+                ERR_EINVAL,
+                format!("binding protected or ignored leaf '{}' is forbidden", name),
+            ));
+        }
+    }
+    let euid = current_euid();
+    check_owner_rw_gate(ws, meta.uid(), euid)?;
+    if kind == TargetKind::SingleFile {
+        if let Some(parent) = ws.parent() {
+            if let Ok(pm) = fs::symlink_metadata(parent) {
+                check_owner_rw_gate(parent, pm.uid(), euid)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn enforce_vault_target_kind(
