@@ -240,8 +240,9 @@ pub(crate) fn purge_trashed_counterparts(
             }
         }
     }
-    read_inode_file(&ws_vault.join("latest_inodes.txt"), &mut cands, &mut seen);
     read_inode_file(&ws_vault.join("retained_inodes.txt"), &mut cands, &mut seen);
+    let root_cands: BTreeSet<u64> = cands.iter().copied().collect();
+    read_inode_file(&ws_vault.join("latest_inodes.txt"), &mut cands, &mut seen);
     read_inode_file(&snap_dir.join("inodes.txt"), &mut cands, &mut seen);
 
     let canon_ws = fs::canonicalize(restored_ws).unwrap_or_else(|_| restored_ws.to_path_buf());
@@ -314,25 +315,35 @@ pub(crate) fn purge_trashed_counterparts(
     }
 
     let live_root = lstat_inode_mode(restored_ws).map(|x| x.0).unwrap_or(0);
-    if !saw_tcc_denied {
-        let stale_cands: BTreeSet<u64> = cands.iter().copied()
+    if !saw_tcc_denied && !purged_any {
+        let stale_roots: BTreeSet<u64> = root_cands.iter().copied()
             .filter(|ino| !live_inodes.contains(ino) && !purged_inos.contains(ino))
             .collect();
-        if !stale_cands.is_empty() {
+        if !stale_roots.is_empty() {
+            let icloud_trash = home.as_deref()
+                .map(|h| h.join("Library/Mobile Documents/com~apple~CloudDocs/.Trash"))
+                .and_then(|p| fs::canonicalize(&p).ok());
+            let is_icloud_desk_doc = home.as_deref().map(|h| {
+                canon_ws.starts_with(h.join("Desktop")) || canon_ws.starts_with(h.join("Documents"))
+            }).unwrap_or(false) && icloud_trash.as_ref().map(|p| fs::read_dir(p).is_ok()).unwrap_or(false);
+            let local_trash = home.as_deref().and_then(|h| fs::canonicalize(h.join(".Trash")).ok());
             for tr in &trash_roots {
+                if is_icloud_desk_doc && local_trash.as_deref() == Some(tr.as_path()) {
+                    continue;
+                }
                 match fs::read_dir(tr) {
                     Err(e) if matches!(e.raw_os_error(), Some(c) if c == ERR_EPERM || c == ERR_EACCES) => {
                         saw_tcc_denied = true;
-                        denied_inos.extend(stale_cands.iter().copied());
+                        denied_inos.extend(stale_roots.iter().copied());
                         break;
                     }
                     Ok(rd) => {
                         let has_match = rd.flatten().any(|ent| {
-                            fs::symlink_metadata(ent.path()).map(|m| stale_cands.contains(&m.ino())).unwrap_or(false)
+                            fs::symlink_metadata(ent.path()).map(|m| stale_roots.contains(&m.ino())).unwrap_or(false)
                         });
                         if has_match && matches!(can_write_path(tr), Err(e) if e.code == ERR_EPERM || e.code == ERR_EACCES) {
                             saw_tcc_denied = true;
-                            denied_inos.extend(stale_cands.iter().copied());
+                            denied_inos.extend(stale_roots.iter().copied());
                             break;
                         }
                     }
@@ -342,13 +353,12 @@ pub(crate) fn purge_trashed_counterparts(
         }
     }
     let retained = if saw_tcc_denied {
-        let mut keep_roots = denied_inos;
+        let mut keep_roots = Vec::new();
+        if live_root > 0 { keep_roots.push(live_root); }
         if target_meta.root_inode > 0 && !purged_inos.contains(&target_meta.root_inode) {
             keep_roots.push(target_meta.root_inode);
         }
-        if live_root > 0 {
-            keep_roots.push(live_root);
-        }
+        keep_roots.extend(denied_inos.into_iter().filter(|ino| root_cands.contains(ino)));
         update_retained_root_inodes(ws_vault, &keep_roots, &purged_inos)
     } else {
         let clean_roots: Vec<u64> = if live_root > 0 { vec![live_root] } else { Vec::new() };

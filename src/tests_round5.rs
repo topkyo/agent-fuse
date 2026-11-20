@@ -93,4 +93,94 @@ mod tests_round5 {
         assert_eq!(rep2.trash_cleanup, TrashCleanupStatus::NotInTrash, "empty 0500 Trash must not false-alarm tcc_denied");
         assert_eq!(purge2, TrashCleanupStatus::NotInTrash, "purge-trash on empty 0500 Trash must return NotInTrash");
     }
+
+    #[test]
+    fn large_dir_tcc_denied_never_evicts_live_root_and_purges_both_generations() {
+        let _guard = crate::tests::ENV_LOCK.lock().unwrap();
+        let sb = R5ScopedDir::new("large-dir-root-prio");
+        let vault = sb.0.join("vault");
+        let ws = sb.0.join("proj");
+        let trash = sb.0.join("trash");
+        fs::create_dir_all(&vault).unwrap();
+        fs::create_dir_all(&ws).unwrap();
+        fs::create_dir_all(&trash).unwrap();
+        for i in 0..32 {
+            fs::write(ws.join(format!("f{:02}.txt", i)), format!("data-{}\n", i)).unwrap();
+        }
+        let prev_trash_env = std::env::var_os("AFUSE_TRASH_DIR");
+        std::env::set_var("AFUSE_TRASH_DIR", &trash);
+
+        let snap = create_snapshot_opts_with_vault(&ws, Some(&vault), "init", true).unwrap();
+        let gen1 = trash.join("proj-gen1");
+        fs::rename(&ws, &gen1).unwrap();
+        fs::set_permissions(&trash, fs::Permissions::from_mode(0o500)).unwrap();
+
+        let rep1 = restore_snapshot_with_vault(&ws, Some(&vault), &snap.id, false).unwrap();
+        assert_eq!(rep1.trash_cleanup, TrashCleanupStatus::TccDenied);
+        let live_gen2_ino = fs::symlink_metadata(&ws).unwrap().ino();
+        let (_, ws_vault) = crate::vault::resolve_workspace_vault_recovery(&ws, Some(&vault)).unwrap();
+        let ret_lines: Vec<u64> = fs::read_to_string(ws_vault.join("retained_inodes.txt"))
+            .unwrap()
+            .lines()
+            .filter_map(|l| l.trim().parse::<u64>().ok())
+            .collect();
+        assert_eq!(ret_lines.first().copied(), Some(live_gen2_ino), "live_root must stay at index 0: {:?}", ret_lines);
+        assert!(ret_lines.len() <= 4, "child inodes must not bloat retained_inodes: {:?}", ret_lines);
+
+        // Grant Trash write permission and move gen2 into Trash too -> both gen1 & gen2 must purge cleanly
+        fs::set_permissions(&trash, fs::Permissions::from_mode(0o700)).unwrap();
+        let gen2 = trash.join("proj-gen2");
+        fs::rename(&ws, &gen2).unwrap();
+        let rep2 = restore_snapshot_with_vault(&ws, Some(&vault), &snap.id, false).unwrap();
+
+        match prev_trash_env {
+            Some(v) => std::env::set_var("AFUSE_TRASH_DIR", v),
+            None => std::env::remove_var("AFUSE_TRASH_DIR"),
+        }
+        assert_eq!(rep2.trash_cleanup, TrashCleanupStatus::Purged);
+        assert!(!gen1.exists(), "gen1 trashed dir must be purged");
+        assert!(!gen2.exists(), "gen2 trashed dir must be purged");
+    }
+
+    #[test]
+    fn purged_copy_with_stale_ghost_inodes_does_not_false_alarm_tcc_denied() {
+        let _guard = crate::tests::ENV_LOCK.lock().unwrap();
+        let sb = R5ScopedDir::new("purged-no-ghost-tcc");
+        let vault = sb.0.join("vault");
+        let ws = sb.0.join("resume.pdf");
+        let icloud_trash = sb.0.join("icloud-trash");
+        fs::create_dir_all(&vault).unwrap();
+        fs::create_dir_all(&icloud_trash).unwrap();
+        fs::write(&ws, b"%PDF-1.4 v1\n").unwrap();
+
+        let prev_trash_env = std::env::var_os("AFUSE_TRASH_DIR");
+        std::env::set_var("AFUSE_TRASH_DIR", &icloud_trash);
+        let snap = create_snapshot_opts_with_vault(&ws, Some(&vault), "init", true).unwrap();
+        let (_, ws_vault) = crate::vault::resolve_workspace_vault_recovery(&ws, Some(&vault)).unwrap();
+        // Inject 5 stale ghost inodes (matching real-world accumulated history)
+        let orig_ino = fs::symlink_metadata(&ws).unwrap().ino();
+        fs::write(
+            ws_vault.join("retained_inodes.txt"),
+            format!("{}\n999991\n999992\n999993\n999994\n999995\n", orig_ino),
+        )
+        .unwrap();
+
+        let trashed = icloud_trash.join("resume.pdf");
+        fs::rename(&ws, &trashed).unwrap();
+        let rep = restore_snapshot_with_vault(&ws, Some(&vault), &snap.id, false).unwrap();
+
+        match prev_trash_env {
+            Some(v) => std::env::set_var("AFUSE_TRASH_DIR", v),
+            None => std::env::remove_var("AFUSE_TRASH_DIR"),
+        }
+        assert_eq!(rep.trash_cleanup, TrashCleanupStatus::Purged, "successful purge must not be overridden to TccDenied");
+        assert!(!trashed.exists());
+        let new_live_ino = fs::symlink_metadata(&ws).unwrap().ino();
+        let ret_lines: Vec<u64> = fs::read_to_string(ws_vault.join("retained_inodes.txt"))
+            .unwrap()
+            .lines()
+            .filter_map(|l| l.trim().parse::<u64>().ok())
+            .collect();
+        assert_eq!(ret_lines, vec![new_live_ino], "ghost inodes must be cleared after clean purge");
+    }
 }
