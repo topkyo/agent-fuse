@@ -118,6 +118,15 @@ mod tests_round6 {
         fs::remove_dir_all(&d3).unwrap();
         let err = relocate_workspace_vault_with(&d3, &d2, Some(&vault), Some(d2_ino)).unwrap_err();
         assert_eq!(err.code, ERR_EEXIST);
+
+        // Zero-snapshot relocate (before initial vault dir is created) succeeds cleanly
+        let d4 = sb.0.join("fresh_src");
+        let d5 = sb.0.join("fresh_dst");
+        fs::create_dir_all(&d4).unwrap();
+        let d4_ino = fs::symlink_metadata(&d4).unwrap().ino();
+        fs::rename(&d4, &d5).unwrap();
+        let fresh_rel = relocate_workspace_vault_with(&d4, &d5, Some(&vault), Some(d4_ino)).unwrap();
+        assert_eq!(fresh_rel.snapshots_updated, 0);
     }
 
     #[test]

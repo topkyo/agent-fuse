@@ -191,14 +191,17 @@ pub fn relocate_workspace_vault_with(
             return Err(AfuseError::new(ERR_EEXIST, "source path still exists on disk"));
         }
     }
-    if !vault_p1.is_dir() {
-        return Err(AfuseError::new(ERR_ENOENT, "source workspace vault does not exist"));
-    }
-    let _guard = lock_vault(&vault_p1)?;
-    enforce_vault_target_kind(&vault_p1, validated.kind)?;
     if vault_p2.exists() {
         return Err(AfuseError::new(ERR_EEXIST, "destination vault already exists"));
     }
+    if !vault_p1.is_dir() {
+        return Ok(RelocateReport {
+            from: old_ws, to: new_ws, kind: validated.kind,
+            dev: validated.dev, ino: validated.ino, snapshots_updated: 0,
+        });
+    }
+    let _guard = lock_vault(&vault_p1)?;
+    enforce_vault_target_kind(&vault_p1, validated.kind)?;
     fs::rename(&vault_p1, &vault_p2).map_err(|e| {
         AfuseError::new(e.raw_os_error().unwrap_or(1), format!("vault rename failed: {}", e))
     })?;
