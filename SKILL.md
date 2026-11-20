@@ -67,11 +67,14 @@ afuse --workspace "$PWD" --json guard --max-delete 15 --max-write-mb 256 --auto-
 
 - Exit code `99` indicates the circuit breaker tripped and rolled back the workspace cleanly.
 
-### E. Snapshot Garbage Collection & Manual Upgrade (`prune` / `upgrade`)
- Automatic `auto:*` snapshots self-cap at `AFUSE_MAX_AUTO_SNAPS` (`50` by default). You can also prune explicitly or check for verified CLI releases on manual demand:
+### E. Relocation, Orphan Cleanup & Manual Upgrade (`locate` / `relocate` / `prune` / `upgrade`)
+ Automatic `auto:*` snapshots self-cap at `AFUSE_MAX_AUTO_SNAPS` (`50` by default). You can also track moved targets, prune stale snapshots or orphan vaults, or check for verified CLI releases on manual demand:
 
 ```bash
+afuse --workspace "$OLD_PATH" --json locate --ino "$INO"
+afuse --json relocate --from "$OLD_PATH" --to "$NEW_PATH" --ino "$INO"
 afuse --workspace "$PWD" --json prune --keep 20 --label-prefix "auto:hook:"
+afuse --json prune --orphans --min-age-days 7 --dry-run
 afuse --json upgrade --check
 ```
 

@@ -14,6 +14,7 @@
 //! - `snapshot` / `diff`: Atomic snapshot creation, fast dedup & NFD-safe workspace diffing.
 //! - `restore` / `restore_tree`: Atomic root-Inode-preserving full/selective restore & ignored-subtree stash.
 //! - `trash`: Darwin `fsgetpath` exact `(fsid, ino)` Trash cleanup & TCC degradation handling.
+//! - `relocate`: Same-volume `fsgetpath` target locate, atomic `O(1)` vault relocation & orphan vault GC.
 //! - `prune`: Orphan staging cleanup, `auto:*` rolling quota GC & label-filtered pruning.
 //! - `hook_json` / `hook_config` / `hook`: Opt-in zsh preexec & Claude Code PreToolUse auto-snap.
 //! - `guard`: Isolated process-group fuse tripping on runaway deletes, renames or truncation spikes.
@@ -33,6 +34,7 @@ pub mod hook_json;
 pub mod manifest;
 mod meta;
 pub mod prune;
+pub mod relocate;
 pub mod restore;
 pub mod restore_tree;
 pub mod sha256;
@@ -71,6 +73,10 @@ pub use prune::{
     parse_prune_args, prune_snapshots, prune_snapshots_filtered,
     prune_snapshots_filtered_with_vault, prune_snapshots_with_vault,
 };
+pub use relocate::{
+    inspect_vault_orphans, locate_workspace_target_with_vault, prune_orphan_vaults_with,
+    relocate_workspace_vault_with, LocateOutcome, OrphanPruneReport, RelocateReport,
+};
 pub use restore::{
     restore_snapshot, restore_snapshot_paths, restore_snapshot_paths_with_vault,
     restore_snapshot_with_vault, RestoreReport,
@@ -107,5 +113,7 @@ mod tests_round3;
 mod tests_round4;
 #[cfg(test)]
 mod tests_round5;
+#[cfg(test)]
+mod tests_round6;
 #[cfg(test)]
 mod tests_trash_targets;

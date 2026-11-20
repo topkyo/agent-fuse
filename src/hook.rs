@@ -179,6 +179,16 @@ pub fn execute_hook_auto_snap(
     Ok(Some(meta))
 }
 
+fn is_destructive_bash_command(cmd: &str) -> bool {
+    let low = cmd.to_ascii_lowercase();
+    for kw in ["rm ", "rm\t", "mv ", "mv\t", "git reset", "git clean", "git checkout", "chmod ", "truncate ", "dd ", "> ", ">>"] {
+        if low.contains(kw) {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn run_claude_hook_exec_from_reader<R: Read>(
     mut reader: R,
     vault_override: Option<&Path>,
@@ -202,10 +212,15 @@ pub fn run_claude_hook_exec_from_reader<R: Read>(
         return None;
     }
     let cwd_path = Path::new(&cwd_str);
-    let throttle_ms = env::var("AFUSE_HOOK_THROTTLE_MS")
-        .ok()
-        .and_then(|v| v.parse::<u128>().ok())
-        .unwrap_or(HOOK_DEFAULT_THROTTLE_MS);
+    let destructive_bash = tool == "Bash" && payload.bash_command.as_deref().map(is_destructive_bash_command).unwrap_or(false);
+    let throttle_ms = if destructive_bash {
+        0
+    } else {
+        env::var("AFUSE_HOOK_THROTTLE_MS")
+            .ok()
+            .and_then(|v| v.parse::<u128>().ok())
+            .unwrap_or(HOOK_DEFAULT_THROTTLE_MS)
+    };
     let label = if tool.is_empty() { "auto:claude".to_string() } else { format!("auto:claude:{}", tool) };
 
     let mut cands = payload.candidate_paths;
@@ -216,11 +231,22 @@ pub fn run_claude_hook_exec_from_reader<R: Read>(
             }
         }
     }
+    let mut snapped: Vec<PathBuf> = Vec::new();
+    let mut first_meta: Option<SnapshotMeta> = None;
     for raw in cands {
         let resolved = resolve_candidate_path(cwd_path, &raw);
         if let Some(bound) = find_existing_bound_target(&resolved, vault_override) {
-            return execute_hook_auto_snap(&bound, &label, vault_override, throttle_ms).ok().flatten();
+            if !snapped.contains(&bound) {
+                if let Some(m) = execute_hook_auto_snap(&bound, &label, vault_override, throttle_ms).ok().flatten() {
+                    if first_meta.is_none() { first_meta = Some(m); }
+                }
+                snapped.push(bound);
+                if snapped.len() >= 2 { break; }
+            }
         }
+    }
+    if !snapped.is_empty() {
+        return first_meta;
     }
     execute_hook_auto_snap(cwd_path, &label, vault_override, throttle_ms).ok().flatten()
 }

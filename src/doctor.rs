@@ -1,7 +1,9 @@
-use crate::apfs::{clonefile_nofollow, statfs_info, TMP_SEQ};
+use crate::apfs::{clonefile_nofollow, real_home_dir, statfs_info, TMP_SEQ};
 use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
 use crate::manifest::json_escape;
+use crate::relocate::inspect_vault_orphans;
 use crate::snapshot::list_snapshots_unlocked;
+use crate::trash::allowed_trash_roots;
 use crate::vault::{
     check_workspace_path_rules, resolve_vault_base, resolve_workspace_vault_recovery,
 };
@@ -23,6 +25,10 @@ pub struct DoctorReport {
     pub vault_writable: bool,
     pub workspace_valid: bool,
     pub snapshot_count: usize,
+    pub trash_roots_readable: bool,
+    pub icloud_trash_detected: bool,
+    pub vault_dir_count: usize,
+    pub orphan_vault_count: usize,
 }
 
 impl DoctorReport {
@@ -33,7 +39,7 @@ impl DoctorReport {
 
 pub fn format_doctor_json(rep: &DoctorReport) -> String {
     format!(
-        "{{\"ok\":{},\"version\":\"{}\",\"os\":\"{}\",\"arch\":\"{}\",\"apfs_verified\":{},\"clonefile_probe_us\":{},\"free_gib\":{:.2},\"vault_writable\":{},\"workspace_valid\":{},\"snapshot_count\":{}}}",
+        "{{\"ok\":{},\"version\":\"{}\",\"os\":\"{}\",\"arch\":\"{}\",\"apfs_verified\":{},\"clonefile_probe_us\":{},\"free_gib\":{:.2},\"vault_writable\":{},\"workspace_valid\":{},\"snapshot_count\":{},\"trash_roots_readable\":{},\"icloud_trash_detected\":{},\"vault_dir_count\":{},\"orphan_vault_count\":{}}}",
         rep.ok,
         json_escape(&rep.version),
         json_escape(&rep.os),
@@ -43,7 +49,11 @@ pub fn format_doctor_json(rep: &DoctorReport) -> String {
         rep.free_gib,
         rep.vault_writable,
         rep.workspace_valid,
-        rep.snapshot_count
+        rep.snapshot_count,
+        rep.trash_roots_readable,
+        rep.icloud_trash_detected,
+        rep.vault_dir_count,
+        rep.orphan_vault_count
     )
 }
 
@@ -148,6 +158,12 @@ pub fn run_doctor_with_opts(
     }
 
     let ok = apfs_verified && vault_writable && clonefile_probe_us > 0 && workspace_valid;
+    let trash_roots = allowed_trash_roots();
+    let trash_roots_readable = !trash_roots.is_empty() && trash_roots.iter().all(|t| fs::read_dir(t).is_ok());
+    let icloud_trash_detected = real_home_dir()
+        .map(|h| h.join("Library/Mobile Documents/com~apple~CloudDocs/.Trash").exists())
+        .unwrap_or(false);
+    let (vault_dir_count, orphan_dirs) = inspect_vault_orphans(vault_override, 0);
 
     Ok(DoctorReport {
         ok,
@@ -160,5 +176,9 @@ pub fn run_doctor_with_opts(
         vault_writable,
         workspace_valid,
         snapshot_count,
+        trash_roots_readable,
+        icloud_trash_detected,
+        vault_dir_count,
+        orphan_vault_count: orphan_dirs.len(),
     })
 }

@@ -218,7 +218,12 @@ pub(crate) fn cmd_guard(workspace: &Path, rest: &[String], mut json: bool) -> ! 
     while i < rest.len() {
         match rest[i].as_str() {
             "--help" | "-h" => {
-                println!("USAGE: afuse [--workspace <DIR>] [--json] guard [--max-delete N] [--max-write-mb M] [--poll-ms MS] [--auto-rollback] -- <CMD...>");
+                let u = "USAGE: afuse [--workspace <DIR>] [--json] guard [--max-delete N] [--max-write-mb M] [--poll-ms MS] [--auto-rollback] -- <CMD...>";
+                if json {
+                    println!("{{\"ok\":true,\"usage\":\"{}\"}}", json_escape(u));
+                } else {
+                    println!("{}", u);
+                }
                 process::exit(0);
             }
             "--" => {
@@ -296,12 +301,19 @@ pub(crate) fn cmd_doctor(workspace: &Path, explicit_ws: bool, rest: &[String], m
         Err(e) => emit_error(json, &e),
     };
     if want_help {
-        println!("USAGE: afuse [-w | --workspace <DIR>] [--json] doctor [<DIR>]");
+        let u = "USAGE: afuse [-w | --workspace <DIR>] [--json] doctor [<DIR>]";
+        if json {
+            println!("{{\"ok\":true,\"usage\":\"{}\"}}", json_escape(u));
+        } else {
+            println!("{}", u);
+        }
         process::exit(0);
     }
     json = doc_json;
     let target_ws = doc_ws.as_deref().unwrap_or(workspace);
-    let skip_ws_check = doc_ws.is_none() && !explicit_ws && target_ws == Path::new("/");
+    let skip_ws_check = doc_ws.is_none()
+        && !explicit_ws
+        && agent_fuse::reject_forbidden_workspace_paths(target_ws).is_err();
     match run_doctor_with_opts(target_ws, None, skip_ws_check) {
         Ok(rep) => {
             if json {

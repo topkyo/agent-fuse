@@ -28,9 +28,13 @@ fn print_usage() {
            hook <zsh|claude>                     Print opt-in hook snippet to stdout (never edits files)\n\
            hook uninstall [--apply]              Dry-run scan (or remove with backup) afuse hook blocks\n\
            validate [<DIR>]                      Validate safe APFS project root binding\n\
+           locate [--ino <N>]                    Locate moved/trashed target by APFS inode\n\
+           relocate --from <P1> --to <P2>        Atomically migrate vault history after move/rename\n\
            purge-trash                           Purge stale restored copies remaining in Trash\n\
            doctor [--json] [<DIR>]               Print privacy-safe APFS & vault diagnostics\n\
            prune --keep <N> [--label-prefix P]   Reclaim snapshots & stale incomplete directories\n\
+           prune --orphans [--min-age-days D] [--dry-run]\n\
+                                                 Scan or reclaim orphan vaults whose target is gone\n\
            upgrade [--check]                     On-demand release check or self-upgrade CLI binary\n",
         VERSION
     );
@@ -60,6 +64,131 @@ fn cmd_purge_trash(workspace: &Path, rest: &[String], mut json: bool) {
                 println!("{{\"ok\":true,\"trash_cleanup\":\"{}\"}}", st.as_str());
             } else {
                 println!("TRASH_CLEANUP {}", st.as_str());
+            }
+        }
+        Err(e) => emit_error(json, &e),
+    }
+}
+
+fn cmd_locate(workspace: &Path, rest: &[String], mut json: bool) {
+    let mut hint_ino: Option<u64> = None;
+    let mut i = 0usize;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--json" => { json = true; i += 1; }
+            "--help" | "-h" => {
+                let u = "USAGE: afuse [-w | --workspace <DIR>] [--json] locate [--ino <N>]";
+                if json { println!("{{\"ok\":true,\"usage\":\"{}\"}}", json_escape(u)); } else { println!("{}", u); }
+                return;
+            }
+            "--ino" => {
+                if i + 1 >= rest.len() { emit_error(json, &AfuseError::new(22, "--ino requires an integer")); }
+                match rest[i + 1].parse::<u64>() {
+                    Ok(v) => hint_ino = Some(v),
+                    Err(_) => emit_error(json, &AfuseError::new(22, "invalid --ino integer")),
+                }
+                i += 2;
+            }
+            other => emit_error(json, &AfuseError::new(22, format!("unknown locate option '{}'", sanitize_terminal_text(other)))),
+        }
+    }
+    match agent_fuse::locate_workspace_target_with_vault(workspace, None, hint_ino) {
+        Ok(out) => {
+            if json { println!("{}", out.to_json()); } else { println!("{}", out.to_json()); }
+        }
+        Err(e) => emit_error(json, &e),
+    }
+}
+
+fn cmd_relocate(rest: &[String], mut json: bool) {
+    let mut from_p: Option<PathBuf> = None;
+    let mut to_p: Option<PathBuf> = None;
+    let mut exp_ino: Option<u64> = None;
+    let mut i = 0usize;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--json" => { json = true; i += 1; }
+            "--help" | "-h" => {
+                let u = "USAGE: afuse [--json] relocate --from <OLD_PATH> --to <NEW_PATH> [--ino <N>]";
+                if json { println!("{{\"ok\":true,\"usage\":\"{}\"}}", json_escape(u)); } else { println!("{}", u); }
+                return;
+            }
+            "--from" => {
+                if i + 1 >= rest.len() { emit_error(json, &AfuseError::new(22, "--from requires a path")); }
+                from_p = Some(PathBuf::from(&rest[i + 1]));
+                i += 2;
+            }
+            "--to" => {
+                if i + 1 >= rest.len() { emit_error(json, &AfuseError::new(22, "--to requires a path")); }
+                to_p = Some(PathBuf::from(&rest[i + 1]));
+                i += 2;
+            }
+            "--ino" => {
+                if i + 1 >= rest.len() { emit_error(json, &AfuseError::new(22, "--ino requires an integer")); }
+                match rest[i + 1].parse::<u64>() {
+                    Ok(v) => exp_ino = Some(v),
+                    Err(_) => emit_error(json, &AfuseError::new(22, "invalid --ino integer")),
+                }
+                i += 2;
+            }
+            other => emit_error(json, &AfuseError::new(22, format!("unknown relocate option '{}'", sanitize_terminal_text(other)))),
+        }
+    }
+    let (Some(from_path), Some(to_path)) = (from_p, to_p) else {
+        emit_error(json, &AfuseError::new(22, "relocate requires --from <OLD_PATH> and --to <NEW_PATH>"));
+    };
+    match agent_fuse::relocate_workspace_vault_with(&from_path, &to_path, None, exp_ino) {
+        Ok(rep) => {
+            if json {
+                println!(
+                    "{{\"ok\":true,\"from\":\"{}\",\"to\":\"{}\",\"kind\":\"{}\",\"dev\":{},\"ino\":{},\"snapshots_updated\":{}}}",
+                    json_escape(&rep.from.to_string_lossy()),
+                    json_escape(&rep.to.to_string_lossy()),
+                    rep.kind.as_str(), rep.dev, rep.ino, rep.snapshots_updated
+                );
+            } else {
+                println!("RELOCATED {} -> {} (snapshots_updated={})", rep.from.display(), rep.to.display(), rep.snapshots_updated);
+            }
+        }
+        Err(e) => emit_error(json, &e),
+    }
+}
+
+fn cmd_prune_orphans(rest: &[String], mut json: bool) {
+    let mut min_age_days = 7u64;
+    let mut dry_run = false;
+    let mut i = 0usize;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--orphans" => i += 1,
+            "--dry-run" => { dry_run = true; i += 1; }
+            "--json" => { json = true; i += 1; }
+            "--min-age-days" => {
+                if i + 1 >= rest.len() { emit_error(json, &AfuseError::new(22, "--min-age-days requires an integer")); }
+                match rest[i + 1].parse::<u64>() {
+                    Ok(v) => min_age_days = v,
+                    Err(_) => emit_error(json, &AfuseError::new(22, "invalid --min-age-days integer")),
+                }
+                i += 2;
+            }
+            "--help" | "-h" => {
+                let u = "USAGE: afuse [--json] prune --orphans [--min-age-days <D>] [--dry-run]";
+                if json { println!("{{\"ok\":true,\"usage\":\"{}\"}}", json_escape(u)); } else { println!("{}", u); }
+                return;
+            }
+            other => emit_error(json, &AfuseError::new(22, format!("unknown prune --orphans option '{}'", sanitize_terminal_text(other)))),
+        }
+    }
+    match agent_fuse::prune_orphan_vaults_with(None, min_age_days, dry_run) {
+        Ok(rep) => {
+            if json {
+                let cands: Vec<String> = rep.candidates.iter().map(|s| format!("\"{}\"", json_escape(s))).collect();
+                println!(
+                    "{{\"ok\":true,\"scanned\":{},\"candidates\":[{}],\"removed\":{},\"dry_run\":{}}}",
+                    rep.scanned, cands.join(","), rep.removed, rep.dry_run
+                );
+            } else {
+                println!("Orphan vaults scanned={} candidates={} removed={} dry_run={}", rep.scanned, rep.candidates.len(), rep.removed, rep.dry_run);
             }
         }
         Err(e) => emit_error(json, &e),
@@ -132,7 +261,7 @@ fn main() {
 
     let sub = raw_args[idx].as_str();
     let raw_rest = &raw_args[idx + 1..];
-    let allow_post_global = !(sub == "hook" && raw_rest.iter().any(|a| a == "--exec"));
+    let allow_post_global = sub != "guard" && !(sub == "hook" && raw_rest.iter().any(|a| a == "--exec"));
     let mut rest_owned: Vec<String> = Vec::with_capacity(raw_rest.len());
     let mut r_idx = 0usize;
     while r_idx < raw_rest.len() {
@@ -163,10 +292,13 @@ fn main() {
     match sub {
         "snap" => cli_cmds::cmd_snap(&workspace, rest, json),
         "validate" => cli_cmds::cmd_validate(&workspace, rest, json),
+        "locate" => cmd_locate(&workspace, rest, json),
+        "relocate" => cmd_relocate(rest, json),
         "purge-trash" => cmd_purge_trash(&workspace, rest, json),
         "list" => cli_cmds::cmd_list(&workspace, rest, json),
         "diff" => cli_cmds::cmd_diff(&workspace, rest, json),
         "restore" => cli_cmds::cmd_restore(&workspace, rest, json),
+        "prune" if rest.iter().any(|a| a == "--orphans") => cmd_prune_orphans(rest, json),
         "prune" => cli_cmds::cmd_prune(&workspace, rest, json),
         "hook" => cli_ops::cmd_hook(workspace, rest, json),
         "guard" => cli_ops::cmd_guard(&workspace, rest, json),

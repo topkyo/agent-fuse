@@ -457,6 +457,31 @@ r_txt = subprocess.check_output([bin_p, "upgrade"], env=env, text=True)
 assert "no GitHub Release has been published yet" in r_txt, r_txt
 PY
 
+# R6 CLI contract checks: locate/relocate, guard passthrough flags, doctor default HOME pass, prune --orphans
+"$BIN_PATH" guard --json --help | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] is True and "USAGE:" in d["usage"], d'
+"$BIN_PATH" doctor --json --help | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] is True and "USAGE:" in d["usage"], d'
+DOC_HOME_DEF="$(cd "$REAL_HOME" && AFUSE_VAULT_DIR="$VAULT" "$BIN_PATH" --json doctor)"
+printf '%s' "$DOC_HOME_DEF" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] is True and "orphan_vault_count" in d, d'
+REL_V="$TMP_SANDBOX/rel-vault"
+REL_A="$TMP_SANDBOX/rel-a.txt"
+REL_B="$TMP_SANDBOX/rel-b.txt"
+mkdir -p "$REL_V"
+printf "rel-v1\n" > "$REL_A"
+REL_INO=$(stat -f%i "$REL_A")
+AFUSE_VAULT_DIR="$REL_V" "$BIN_PATH" --workspace "$REL_A" --json snap -m "rel-base" >/dev/null
+mv "$REL_A" "$REL_B"
+LOC_J=$(AFUSE_VAULT_DIR="$REL_V" "$BIN_PATH" --workspace "$REL_A" --json locate --ino "$REL_INO")
+printf '%s' "$LOC_J" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] is True and d["status"] == "moved_valid", d'
+AFUSE_VAULT_DIR="$REL_V" "$BIN_PATH" --json relocate --from "$REL_A" --to "$REL_B" --ino "$REL_INO" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] is True and d["snapshots_updated"] == 1, d'
+printf "rel-v2\n" > "$REL_B"
+AFUSE_VAULT_DIR="$REL_V" "$BIN_PATH" --workspace "$REL_B" --json restore latest >/dev/null
+[ "$(cat "$REL_B")" = "rel-v1" ] || { echo "FAIL: relocated single-file restore mismatch" >&2; exit 1; }
+AFUSE_VAULT_DIR="$REL_V" "$BIN_PATH" --json prune --orphans --min-age-days 0 --dry-run | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] is True and d["dry_run"] is True, d'
+GUARD_ARGS_OUT="$TMP_SANDBOX/guard-args.txt"
+GUARD_PASS=$(AFUSE_VAULT_DIR="$VAULT" "$BIN_PATH" --workspace "$WS" --json guard -- sh -c 'printf "%s:%s" "$2" "$3" > "$1"' _ "$GUARD_ARGS_OUT" -w --json)
+[ "$(cat "$GUARD_ARGS_OUT")" = "-w:--json" ] || { echo "FAIL: guard swallowed child flags: $(cat "$GUARD_ARGS_OUT")" >&2; exit 1; }
+printf '%s' "$GUARD_PASS" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] is True and d["exit_code"] == 0, d'
+
 "$BIN_PATH" --workspace "$WS" --json prune --keep 0 >/dev/null
 AFUSE_VAULT_DIR="$HOOK_VAULT" "$BIN_PATH" --workspace "$HOOK_REPO" --json prune --keep 0 >/dev/null
 echo "PASS: Gate 2 verified (1,000 files restored, root Inode=$INO_AFTER preserved, binary=${BIN_BYTES}B, RSS=${RSS_BYTES}B, 64MiB_RSS=${BIG_RSS}B, hook & deep-audit suite green)."
