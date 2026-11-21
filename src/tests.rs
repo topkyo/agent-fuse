@@ -1108,3 +1108,37 @@ struct ScopedDir(PathBuf);
         assert_eq!(df.modified, vec![String::from("a.rs")]);
         assert_eq!(df.deleted, vec![String::from("b.rs")]);
     }
+
+    #[test]
+    fn doctor_low_space_and_upgrade_codesign_identity_checks() {
+        assert!(!crate::doctor::compute_doctor_ok(true, true, 500, true, 1.99));
+        assert!(crate::doctor::compute_doctor_ok(true, true, 500, true, 2.00));
+
+        let adhoc = crate::upgrade_verify::parse_codesign_identity(
+            "Identifier=afuse\nTeamIdentifier=not set\nSignature=adhoc\n",
+        );
+        assert!(adhoc.team_id.is_none());
+        let dev_id = crate::upgrade_verify::parse_codesign_identity(
+            "Identifier=afuse\nAuthority=Developer ID Application: Studio (TEAM999999)\nTeamIdentifier=TEAM999999\n",
+        );
+        assert_eq!(dev_id.team_id.as_deref(), Some("TEAM999999"));
+        let wrong_team = crate::upgrade_verify::parse_codesign_identity(
+            "Authority=Developer ID Application: Other (TEAM000000)\nTeamIdentifier=TEAM000000\n",
+        );
+        let wrong_auth = crate::upgrade_verify::parse_codesign_identity(
+            "Authority=Apple Development: Dev (TEAM999999)\nTeamIdentifier=TEAM999999\n",
+        );
+
+        assert!(crate::upgrade_verify::validate_candidate_codesign_identity(&adhoc, true, &dev_id).is_ok());
+        assert!(crate::upgrade_verify::validate_candidate_codesign_identity(&dev_id, true, &dev_id).is_ok());
+        assert!(crate::upgrade_verify::validate_candidate_codesign_identity(&dev_id, false, &dev_id).is_err());
+        assert!(crate::upgrade_verify::validate_candidate_codesign_identity(&dev_id, true, &adhoc).is_err());
+        assert!(crate::upgrade_verify::validate_candidate_codesign_identity(&dev_id, true, &wrong_team).is_err());
+        assert!(crate::upgrade_verify::validate_candidate_codesign_identity(&dev_id, true, &wrong_auth).is_err());
+
+        let sb = ScopedDir::new("probe-ver");
+        let bin = sb.0.join("afuse-cand");
+        compile_dummy_afuse_macho(&bin, "0.9.0");
+        assert!(crate::upgrade_verify::probe_staged_version(&bin, Some("0.9.0")).is_ok());
+        assert!(crate::upgrade_verify::probe_staged_version(&bin, Some("0.9.1")).is_err());
+    }

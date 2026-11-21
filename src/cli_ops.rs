@@ -330,6 +330,11 @@ pub(crate) fn cmd_doctor(workspace: &Path, explicit_ws: bool, rest: &[String], m
                             "  Fix: verify write permissions on ~/.agent-fuse (chmod 700 ~/.agent-fuse) or check AFUSE_VAULT_DIR."
                         }),
                     )
+                } else if rep.workspace_valid && rep.free_gib < 2.0 {
+                    (
+                        "Result: [FAIL] Low free space (< 2.00 GiB required for safe snapshots).",
+                        Some("  Fix: free at least 2.00 GiB on your APFS volume before snapshotting."),
+                    )
                 } else {
                     (
                         "Result: [FAIL] Workspace path rejected by safety policy.",
@@ -337,10 +342,17 @@ pub(crate) fn cmd_doctor(workspace: &Path, explicit_ws: bool, rest: &[String], m
                     )
                 };
                 println!(
-                    "afuse doctor v{} ({}/{})\n  apfs_verified: {}\n  clonefile_probe_us: {} us\n  free_gib: {:.2} GiB\n  vault_writable: {}\n  workspace_valid: {}\n  snapshot_count: {}\n{}",
+                    "afuse doctor v{} ({}/{})\n  apfs_verified: {}\n  clonefile_probe_us: {} us\n  free_gib: {:.2} GiB\n  vault_writable: {}\n  workspace_valid: {}\n  snapshot_count: {}\n  trash_roots_readable: {}\n  orphan_vault_count: {}\n{}",
                     rep.version, rep.os, rep.arch, rep.apfs_verified, rep.clonefile_probe_us,
-                    rep.free_gib, rep.vault_writable, rep.workspace_valid, rep.snapshot_count, verdict
+                    rep.free_gib, rep.vault_writable, rep.workspace_valid, rep.snapshot_count,
+                    rep.trash_roots_readable, rep.orphan_vault_count, verdict
                 );
+                if !rep.trash_roots_readable {
+                    println!("  Warning: Trash directory unreadable (grant Full Disk Access for ~/.Trash cleanup).");
+                }
+                if rep.orphan_vault_count > 0 {
+                    println!("  Warning: {} orphan vault(s) found (run 'afuse prune --orphans').", rep.orphan_vault_count);
+                }
                 if let Some(hint) = fix_hint {
                     println!("{}", hint);
                 }

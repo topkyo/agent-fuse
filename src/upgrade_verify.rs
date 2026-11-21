@@ -1,5 +1,6 @@
 use crate::error::{AfuseError, ERR_EINVAL};
 use crate::upgrade_json::ReleaseAsset;
+use std::env;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -101,8 +102,89 @@ pub(crate) fn verify_executable_magic(path: &Path) -> Result<(), AfuseError> {
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodesignIdentity {
+    pub(crate) team_id: Option<String>,
+    pub(crate) authorities: Vec<String>,
+}
+
+pub(crate) fn parse_codesign_identity(text: &str) -> CodesignIdentity {
+    let mut team_id = None;
+    let mut authorities = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if let Some(val) = line.strip_prefix("TeamIdentifier=") {
+            let v = val.trim();
+            if !v.is_empty() && v != "not set" {
+                team_id = Some(v.to_string());
+            }
+        } else if let Some(val) = line.strip_prefix("Authority=") {
+            let v = val.trim();
+            if !v.is_empty() {
+                authorities.push(v.to_string());
+            }
+        }
+    }
+    CodesignIdentity { team_id, authorities }
+}
+
 #[cfg(target_os = "macos")]
-fn ensure_macos_codesign(staged_bin: &Path) -> Result<(), AfuseError> {
+fn probe_codesign_identity(path: &Path) -> CodesignIdentity {
+    let Ok(out) = Command::new("/usr/bin/codesign")
+        .args(["-dvv"])
+        .arg(path)
+        .stdin(Stdio::null())
+        .output()
+    else {
+        return CodesignIdentity { team_id: None, authorities: Vec::new() };
+    };
+    let merged = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    parse_codesign_identity(&merged)
+}
+
+pub(crate) fn validate_candidate_codesign_identity(
+    host: &CodesignIdentity,
+    cand_strict_ok: bool,
+    cand: &CodesignIdentity,
+) -> Result<(), AfuseError> {
+    let Some(host_team) = host.team_id.as_deref() else {
+        return Ok(());
+    };
+    if !cand_strict_ok {
+        return Err(AfuseError::new(
+            ERR_EINVAL,
+            "staged binary rejected: strict codesign verification failed against signed host",
+        ));
+    }
+    if cand.team_id.as_deref() != Some(host_team) {
+        return Err(AfuseError::new(
+            ERR_EINVAL,
+            format!(
+                "staged binary TeamIdentifier mismatch ({} != {})",
+                cand.team_id.as_deref().unwrap_or("none"),
+                host_team
+            ),
+        ));
+    }
+    if !cand
+        .authorities
+        .iter()
+        .any(|a| a.starts_with("Developer ID Application:"))
+    {
+        return Err(AfuseError::new(
+            ERR_EINVAL,
+            "staged binary missing Developer ID Application authority",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_macos_codesign(staged_bin: &Path, host_exe: Option<&Path>) -> Result<(), AfuseError> {
     let verify_ok = |p: &Path| -> bool {
         Command::new("/usr/bin/codesign")
             .args(["--verify", "--strict"])
@@ -113,6 +195,18 @@ fn ensure_macos_codesign(staged_bin: &Path) -> Result<(), AfuseError> {
             .map(|s| s.success())
             .unwrap_or(false)
     };
+    let host_id = host_exe
+        .filter(|p| verify_ok(p))
+        .map(probe_codesign_identity)
+        .unwrap_or(CodesignIdentity {
+            team_id: None,
+            authorities: Vec::new(),
+        });
+    if host_id.team_id.is_some() {
+        let strict_ok = verify_ok(staged_bin);
+        let cand_id = probe_codesign_identity(staged_bin);
+        return validate_candidate_codesign_identity(&host_id, strict_ok, &cand_id);
+    }
     if verify_ok(staged_bin) {
         return Ok(());
     }
@@ -137,7 +231,10 @@ fn ensure_macos_codesign(staged_bin: &Path) -> Result<(), AfuseError> {
     Ok(())
 }
 
-fn probe_staged_version(staged_bin: &Path) -> Result<(), AfuseError> {
+pub(crate) fn probe_staged_version(
+    staged_bin: &Path,
+    expected_version: Option<&str>,
+) -> Result<(), AfuseError> {
     let mut child = Command::new(staged_bin)
         .arg("--version")
         .stdin(Stdio::null())
@@ -192,14 +289,37 @@ fn probe_staged_version(staged_bin: &Path) -> Result<(), AfuseError> {
             "staged binary '--version' probe output missing 'afuse'",
         ));
     }
+    if let Some(exp_raw) = expected_version {
+        let norm = exp_raw.trim().trim_start_matches('v');
+        if !norm.is_empty()
+            && !stdout
+                .split_whitespace()
+                .any(|tok| tok == norm || tok == format!("v{}", norm))
+        {
+            return Err(AfuseError::new(
+                ERR_EINVAL,
+                format!(
+                    "staged binary '--version' mismatch: expected {}, got '{}'",
+                    norm,
+                    stdout.trim()
+                ),
+            ));
+        }
+    }
     Ok(())
 }
 
-pub(crate) fn prepare_and_verify_staged_binary(staged_bin: &Path) -> Result<(), AfuseError> {
+pub(crate) fn prepare_and_verify_staged_binary(
+    staged_bin: &Path,
+    expected_version: Option<&str>,
+) -> Result<(), AfuseError> {
     verify_executable_magic(staged_bin)?;
     #[cfg(target_os = "macos")]
-    ensure_macos_codesign(staged_bin)?;
-    probe_staged_version(staged_bin)
+    {
+        let host_exe = env::current_exe().ok();
+        ensure_macos_codesign(staged_bin, host_exe.as_deref())?;
+    }
+    probe_staged_version(staged_bin, expected_version)
 }
 
 pub fn validate_release_asset_url(url: &str) -> Result<(), AfuseError> {

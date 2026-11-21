@@ -68,6 +68,16 @@ pub fn run_doctor_with_vault(
     run_doctor_with_opts(workspace, vault_override, false)
 }
 
+pub(crate) fn compute_doctor_ok(
+    apfs_verified: bool,
+    vault_writable: bool,
+    clonefile_probe_us: u64,
+    workspace_valid: bool,
+    free_gib: f64,
+) -> bool {
+    apfs_verified && vault_writable && clonefile_probe_us > 0 && workspace_valid && free_gib >= 2.0
+}
+
 pub fn run_doctor_with_opts(
     workspace: &Path,
     vault_override: Option<&Path>,
@@ -157,7 +167,13 @@ pub fn run_doctor_with_opts(
         }
     }
 
-    let ok = apfs_verified && vault_writable && clonefile_probe_us > 0 && workspace_valid;
+    let ok = compute_doctor_ok(
+        apfs_verified,
+        vault_writable,
+        clonefile_probe_us,
+        workspace_valid,
+        free_gib,
+    );
     let trash_roots = allowed_trash_roots();
     let trash_roots_readable = !trash_roots.is_empty() && trash_roots.iter().all(|t| fs::read_dir(t).is_ok());
     let icloud_trash_detected = real_home_dir()

@@ -334,7 +334,7 @@ pub fn perform_upgrade_on_exe(exe_path: &Path) -> Result<UpgradeApplyReport, Afu
         ));
     }
     let _ = fs::set_permissions(&staged_bin, fs::Permissions::from_mode(0o755));
-    if let Err(e) = prepare_and_verify_staged_binary(&staged_bin) {
+    if let Err(e) = prepare_and_verify_staged_binary(&staged_bin, Some(&rel.latest_version)) {
         let _ = force_remove_all(&staged_bin);
         return Err(e);
     }
