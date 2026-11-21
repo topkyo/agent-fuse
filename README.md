@@ -47,7 +47,7 @@ Measured on a **2015 MacBook Pro (`Intel Core i5-5257U`, 8 GB RAM, `macOS 12.7.6
 | Disk allocation at snapshot time (`t=0`) | Object copy | Duplicate copies | **`0 Bytes` CoW (`clonefile(2)`) + Auto-GC cap (`AFUSE_MAX_AUTO_SNAPS=50`)** |
 | Preserves active shell `cwd` root Inode | Yes | Yes | **Yes (`renamex_np` atomic entry swap)** |
 | Kills runaway subshell process groups | No | No | **`SIGSTOP` -> `SIGKILL -pgid` + auto-rollback** |
-| Binary / DMG size & peak RAM | N/A | `500 MB+` Electron | **`695 KiB` stripped CLI (`1.67 MiB` 1k-file RSS · `1.29 MiB` 64 MiB-file RSS) · `< 5 MiB` Universal DMG (`3.10 MiB` single-arch)** |
+| Binary / DMG size & peak RAM | N/A | `500 MB+` Electron | **`~750 KiB` stripped CLI (`1.67 MiB` 1k-file RSS · `1.29 MiB` 64 MiB-file RSS) · `< 5 MiB` Universal DMG (`~2.5 MiB` single-arch)** |
 
 ---
 
@@ -84,12 +84,12 @@ Automatic `auto:*` checkpoints enforce a rolling ring cap via `AFUSE_MAX_AUTO_SN
 <a id="agentfuse-pro"></a>
 ## **AgentFuse Pro** Native Menu Bar & Control Window App (`$19` / `¥98` One-Time)
 
-Prefer a zero-friction native macOS desktop shield (pure AppKit + QuartzCore + CoreGraphics Swift, `< 400` LOC per module, `1.02 MiB` stripped GUI shell, `< 5 MiB` Universal DMG / `3.10 MiB` single-arch, `89.24 ms` cold start, `3.04 ms` CPU across a 2s 2-repo idle window)?
+Prefer a zero-friction native macOS desktop shield (pure AppKit + QuartzCore + CoreGraphics Swift, `< 400` LOC per module, `1.02 MiB` stripped GUI shell, `< 5 MiB` Universal DMG / `~2.5 MiB` single-arch, `89.24 ms` cold start, `3.04 ms` CPU across a 2s 2-repo idle window)?
 
 - **Native Menu Bar & `500×410` Control Window**: Drop any plain folder (no `.git` needed) or single file, try the **5-Second Safe Demo**, inspect colored file diffs, and switch `English / 简体中文` live.
-- **Continuous Background Guard + Selective Restore**: Watches up to `5` targets (including sub-items inside `~/Desktop`, `~/Documents`, and `~/Downloads`) with sibling isolation, optional `--background` login start, and single-file recovery menus.
+- **Continuous Background Guard + Selective Restore**: Watches unlimited targets concurrently (200-target local responsiveness guardrail, including sub-items inside `~/Desktop`, `~/Documents`, and `~/Downloads`) with sibling isolation, optional `--background` login start, and single-file recovery menus.
 - **Privacy-Safe APFS Recovery Receipt (`1200×630` PNG)**: Shows an instant rescue overlay with timing and Merkle verification status, with one-click **Copy Receipt**, `𝕏`, `WeChat`, and **Save PNG** actions (never touches your clipboard automatically).
-- **Verified In-App Updates & Perpetual `$19` / `¥98` License**: Free Edition protects `1` target forever; Pro unlocks `5` concurrent targets across `3` Macs offline (`100%` local, optional GitHub `.dmg` updates verified by SHA-256 + code signature, 14-day refund). [Download Universal DMG](https://github.com/topkyo/agent-fuse/releases/latest).
+- **Verified In-App Updates & Perpetual `$19` / `¥98` License**: Free Edition protects `1` target forever; Pro unlocks unlimited concurrent targets (200-target local guardrail) across `3` Macs offline (`100%` local, optional GitHub `.dmg` updates verified by SHA-256 + code signature, 14-day refund). [Download Universal DMG](https://github.com/topkyo/agent-fuse/releases/latest).
 
 ---
 
@@ -120,4 +120,4 @@ Prefer a zero-friction native macOS desktop shield (pure AppKit + QuartzCore + C
 5. **Does `afuse` phone home for update checks or fill up my disk with automatic snapshots?**
    Neither. Startup and background watching perform `0` network requests (`afuse upgrade --check` runs strictly on manual demand). Automatic `auto:*` snapshots self-prune beyond `AFUSE_MAX_AUTO_SNAPS` (default `50`), while manual snapshots stay preserved until explicitly pruned.
 6. **What is the difference between the Free Edition and `$19` / `¥98` AgentFuse Pro?**
-   The `afuse` CLI is MIT `$0`. The desktop app watches `1` target (any plain folder or single file) forever on the Free Edition with zero countdown timers. AgentFuse Pro (`$19` USD Global / `¥98` CNY China Mainland, one-time payment) unlocks up to `5` concurrent targets across up to `3` Macs with an offline `Ed25519` license key. Download on [GitHub Releases](https://github.com/topkyo/agent-fuse/releases/latest) or read [`llms.txt`](./llms.txt).
+   The `afuse` CLI is MIT `$0`. The desktop app watches `1` target (any plain folder or single file) forever on the Free Edition with zero countdown timers. AgentFuse Pro (`$19` USD Global / `¥98` CNY China Mainland, one-time payment) unlocks unlimited concurrent targets (200-target local responsiveness guardrail) across up to `3` Macs with an offline `Ed25519` license key. Download on [GitHub Releases](https://github.com/topkyo/agent-fuse/releases/latest) or read [`llms.txt`](./llms.txt).

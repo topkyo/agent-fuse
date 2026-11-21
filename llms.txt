@@ -12,8 +12,8 @@ Autonomous CLI coding agents run `rm -rf`, `mv`, or mass file overwrites on dirt
 4. **Zero-Dotfile-Mutation Hooks & Opt-In Verified Upgrade**: `afuse hook zsh | claude` prints auditable snippets to stdout without editing dotfiles. `afuse upgrade [--check]` performs zero background polling, exposes trusted GitHub `dmg_url` + `dmg_sha256_url` metadata in `--check` JSON, and verifies `SHA256SUMS` + Mach-O `codesign` strictly upon manual invocation. For the desktop `.app`, opt-in in-app `.dmg` updates enforce bundle identifier & version anti-downgrade verification, non-symlink bundle checks, detached post-exit relaunch, and `FD_CLOEXEC` single-instance lock hygiene.
 
 ## Verified Benchmarks (2015 MacBook Pro, Core i5-5257U, 8 GB RAM, macOS 12.7.6 APFS)
-- `afuse` MIT CLI binary: `695 KiB` (`711,320 B`) stripped (`0` external Rust crates, links only `libSystem.B.dylib`)
-- `AgentFuse-0.6.1-macos.dmg`: `< 5 MiB` Universal (`3.10 MiB` single-arch `3,248,793 B` AppKit HIG GUI `1.02 MiB` / `1,072,736 B` + Retina `AppIcon.icns` + embedded CLI)
+- `afuse` MIT CLI binary: `~750 KiB` stripped (`0` external Rust crates, links only `libSystem.B.dylib`)
+- `AgentFuse-0.6.1-macos.dmg`: `< 5 MiB` Universal (`~2.5 MiB` single-arch AppKit HIG GUI `1.02 MiB` + Retina `AppIcon.icns` + embedded CLI)
 - Peak RSS: `1.67 MiB` (`1,748,992 B`) on 1,000-file snapshot (`2.49 MiB` / `2,613,248 B` guard+restore); `1.29 MiB` (`1,347,584 B`) on 64 MiB streaming SHA-256 snapshot
 - 142-file dirty repo `snap`: `6.46 ms` | in-place `restore` (with `auto:pre-restore` + Merkle verify): `12.60 ms`
 - 1,000-file `snap --fast`: `26.90 ms` (`30.22 ms` with full streaming Merkle SHA-256)
@@ -44,7 +44,7 @@ afuse doctor --json
 
 ## Licensing & Pricing
 - **MIT Open-Source CLI (`afuse`)**: `$0` forever (bilingual English `README.md` & Simplified Chinese `README.zh-CN.md`).
-- **AgentFuse Pro (macOS AppKit App)**: Free Edition watches 1 target (plain folder or single file) forever (no countdown timers, Timeline Restore never locked). Adaptive macOS HIG vibrancy Control Window with decoupled Status Bar & Actions menus (`SF Symbols`, `Window` `⌘W`), opt-in verified in-app `.dmg` SHA-256 update & relaunch, up to 5 concurrent targets, selective single-file menu restore for directories, automatic `(fsid, ino)` `~/.Trash` duplicate purging on rebuild, native mass-delete banner notifications, bilingual `APFS Recovery Receipt` (`1200×630` PNG), up to 3 Macs, `100%` offline `Ed25519` license key, `0` telemetry.
+- **AgentFuse Pro (macOS AppKit App)**: Free Edition watches 1 target (plain folder or single file) forever (no countdown timers, Timeline Restore never locked). Adaptive macOS HIG vibrancy Control Window with decoupled Status Bar & Actions menus (`SF Symbols`, `Window` `⌘W`), opt-in verified in-app `.dmg` SHA-256 update & relaunch, unlimited concurrent targets (200-target local responsiveness guardrail), selective single-file menu restore for directories, automatic `(fsid, ino)` `~/.Trash` duplicate purging on rebuild, native mass-delete banner notifications, bilingual `APFS Recovery Receipt` (`1200×630` PNG), up to 3 Macs, `100%` offline `Ed25519` license key, `0` telemetry.
   - Global One-Time License: `$19 USD` (Creem.io).
   - China Mainland One-Time License: `¥98 CNY` (Mianbaoduo / WeChat & Alipay).
   - Releases & Downloads: https://github.com/topkyo/agent-fuse/releases/latest
