@@ -9,7 +9,7 @@ mod tests_round6 {
         locate_workspace_target_with_vault, prune_orphan_vaults_with,
         relocate_workspace_vault_with, LocateOutcome,
     };
-    use crate::restore::restore_snapshot_with_vault;
+    use crate::restore::{restore_snapshot_paths_with_vault, restore_snapshot_with_vault};
     use crate::snapshot::{create_snapshot_opts_with_vault, list_snapshots_with_vault};
     use crate::vault::TargetKind;
     use std::fs;
@@ -186,5 +186,43 @@ mod tests_round6 {
         assert_eq!(dry.removed, 0);
         let live = prune_orphan_vaults_with(Some(&vault), 0, false).unwrap();
         assert_eq!(live.removed, 1);
+    }
+
+    #[test]
+    fn nested_dir_diff_excludes_dir_entries_and_matches_project_files() {
+        let sb = R6ScopedDir::new("nested-diff-count");
+        let vault = sb.0.join("vault");
+        let ws = sb.0.join("nested-ws");
+        fs::create_dir_all(ws.join("a/b/c/d")).unwrap();
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(ws.join("root.txt"), "r").unwrap();
+        fs::write(ws.join("a/mid.txt"), "m").unwrap();
+        fs::write(ws.join("a/b/c/d/leaf.txt"), "l").unwrap();
+
+        let snap = create_snapshot_opts_with_vault(&ws, Some(&vault), "init", true).unwrap();
+        assert_eq!(snap.project_files, 3);
+
+        fs::remove_dir_all(&ws).unwrap();
+        let d_fast = diff_snapshot_opts_with_vault(&ws, Some(&vault), &snap.id, true).unwrap();
+        let d_full = diff_snapshot_opts_with_vault(&ws, Some(&vault), &snap.id, false).unwrap();
+        for d in [&d_fast, &d_full] {
+            assert_eq!(d.deleted.len(), 3, "deleted must exclude directory entries: {:?}", d.deleted);
+            assert!(d.added.is_empty() && d.modified.is_empty());
+            assert!(!d.deleted.iter().any(|p| p == "a" || p == "a/b" || p == "a/b/c" || p == "a/b/c/d"));
+        }
+
+        let sel = restore_snapshot_paths_with_vault(&ws, Some(&vault), &snap.id, true, &["root.txt".into()]).unwrap();
+        assert_eq!(sel.project_files, 1);
+        let d_part = diff_snapshot_opts_with_vault(&ws, Some(&vault), &snap.id, true).unwrap();
+        assert_eq!(d_part.deleted.len(), 2, "partial diff must only list remaining 2 files: {:?}", d_part.deleted);
+
+        let full_rep = restore_snapshot_with_vault(&ws, Some(&vault), &snap.id, false).unwrap();
+        assert_eq!(full_rep.project_files, 3);
+
+        // Replacing a regular file with a directory still reports modified (heterogeneous swap).
+        fs::remove_file(ws.join("root.txt")).unwrap();
+        fs::create_dir_all(ws.join("root.txt")).unwrap();
+        let d_hetero = diff_snapshot_opts_with_vault(&ws, Some(&vault), &snap.id, true).unwrap();
+        assert!(d_hetero.modified.contains(&"root.txt".to_string()), "heterogeneous file->dir must appear in modified: {:?}", d_hetero);
     }
 }

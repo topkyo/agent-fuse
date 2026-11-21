@@ -97,9 +97,13 @@ pub fn diff_snapshot_opts_with_vault(
     let all_keys: BTreeSet<&String> = snap_norm.keys().chain(live_norm.keys()).collect();
     for k in all_keys {
         match (snap_norm.get(k), live_norm.get(k)) {
-            (None, Some((live_k, _))) => added.push(live_k.clone()),
-            (Some((snap_k, _)), None) => deleted.push(snap_k.clone()),
-            (Some((snap_k, sv)), Some((_, lv))) if sv != lv => modified.push(snap_k.clone()),
+            (None, Some((live_k, lv))) if !lv.starts_with("D:") => added.push(live_k.clone()),
+            (Some((snap_k, sv)), None) if !sv.starts_with("D:") => deleted.push(snap_k.clone()),
+            (Some((snap_k, sv)), Some((_, lv)))
+                if sv != lv && !(sv.starts_with("D:") && lv.starts_with("D:")) =>
+            {
+                modified.push(snap_k.clone());
+            }
             _ => {}
         }
     }
