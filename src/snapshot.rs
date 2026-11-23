@@ -1,14 +1,16 @@
 use crate::apfs::{force_remove_all, lstat_inode_mode, TMP_SEQ};
 use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
 pub use crate::diff::{diff_snapshot, diff_snapshot_with_vault, DiffReport};
+use crate::diff::diff_fast_unlocked;
 use crate::fs_guard::clonefile_readable;
 use crate::manifest::{
     clone_filtered_tree, compute_fast_entries, compute_single_file_manifest,
     compute_snap_tree_manifest, compute_tree_manifest, count_non_git_entries, read_meta, write_meta,
     SnapshotMeta,
 };
-use crate::sha256::Sha256;
 use crate::prune::{dedup_and_calibrate_history_unlocked, snap_tree_fast_fp};
+use crate::rolling::{enforce_pre_delete_quota_unlocked, PRE_DELETE_LABEL};
+use crate::sha256::Sha256;
 pub use crate::restore::{
     restore_snapshot, restore_snapshot_paths, restore_snapshot_paths_with_vault,
     restore_snapshot_with_vault, RestoreReport,
@@ -94,7 +96,16 @@ pub(crate) fn create_snapshot_fast_dedup_unlocked(
             let cur_fp = format!("fast:{}", h.finalize_hex());
             let existing = list_snapshots_unlocked(ws_vault)?;
             if let Some(latest) = existing.iter().find(|m| m.label != "auto:pre-restore") {
-                if snap_tree_fast_fp(ws_vault, latest).as_deref() == Some(cur_fp.as_str()) {
+                let fp_same = snap_tree_fast_fp(ws_vault, latest).as_deref() == Some(cur_fp.as_str());
+                let content_same = fp_same
+                    || diff_fast_unlocked(ws, ws_vault, latest)
+                        .map(|d| {
+                            d.report.added.is_empty()
+                                && d.report.modified.is_empty()
+                                && d.report.deleted.is_empty()
+                        })
+                        .unwrap_or(false);
+                if content_same {
                     if kind == TargetKind::SingleFile {
                         record_live_target_inode_if_new(ws, kind, ws_vault);
                     }
@@ -262,6 +273,9 @@ fn enforce_auto_snap_quota_unlocked(ws_vault: &Path, label: &str) -> Result<(), 
         }
         return Ok(());
     }
+    if label == PRE_DELETE_LABEL {
+        return enforce_pre_delete_quota_unlocked(ws_vault);
+    }
     if !label.starts_with("auto:") {
         return Ok(());
     }
@@ -272,7 +286,11 @@ fn enforce_auto_snap_quota_unlocked(ws_vault: &Path, label: &str) -> Result<(), 
     }
     for m in list_snapshots_unlocked(ws_vault)?
         .into_iter()
-        .filter(|m| m.label.starts_with("auto:") && m.label != "auto:pre-restore")
+        .filter(|m| {
+            m.label.starts_with("auto:")
+                && m.label != "auto:pre-restore"
+                && m.label != PRE_DELETE_LABEL
+        })
         .skip(max_keep)
     {
         force_remove_all(&ws_vault.join("snapshots").join(&m.id))?;

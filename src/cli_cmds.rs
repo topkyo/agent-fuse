@@ -1,15 +1,15 @@
 use agent_fuse::{
-    create_snapshot, create_snapshot_fast_dedup, create_snapshot_if_changed, diff_snapshot,
-    diff_snapshot_fast, json_escape, list_snapshots, parse_prune_args, prune_snapshots_filtered,
-    restore_snapshot, restore_snapshot_paths, sanitize_terminal_text, short_hash,
-    validate_workspace_binding, AfuseError, RestoreReport,
+    create_snapshot, create_snapshot_fast_dedup, create_snapshot_if_changed,
+    create_snapshot_rolling, diff_snapshot, diff_snapshot_fast, json_escape, list_snapshots,
+    parse_prune_args, prune_snapshots_filtered, restore_snapshot, restore_snapshot_paths,
+    sanitize_terminal_text, short_hash, validate_workspace_binding, AfuseError, RestoreReport,
 };
 use std::path::{Path, PathBuf};
 use std::process;
 
 fn subcmd_usage(sub: &str) -> &'static str {
     match sub {
-        "snap" => "USAGE: afuse [--workspace <DIR>] [--json] snap [-m <LABEL>] [--fast] [--if-changed]",
+        "snap" => "USAGE: afuse [--workspace <DIR>] [--json] snap [-m <LABEL>] [--fast] [--rolling] [--if-changed]",
         "list" => "USAGE: afuse [--workspace <DIR>] [--json] list",
         "diff" => "USAGE: afuse [--workspace <DIR>] [--json] diff [<SNAP_ID|latest>] [--fast]",
         "restore" => "USAGE: afuse [--workspace <DIR>] [--json] restore [<SNAP_ID|latest>] [--no-backup] [-- <REL_PATH>...]",
@@ -104,6 +104,7 @@ pub(crate) fn cmd_snap(workspace: &Path, rest: &[String], mut json: bool) {
     let mut has_label = false;
     let mut if_changed = false;
     let mut fast = false;
+    let mut rolling = false;
     let mut i = 0;
     while i < rest.len() {
         let a = rest[i].as_str();
@@ -128,6 +129,10 @@ pub(crate) fn cmd_snap(workspace: &Path, rest: &[String], mut json: bool) {
                 fast = true;
                 i += 1;
             }
+            "--rolling" => {
+                rolling = true;
+                i += 1;
+            }
             flag if flag.starts_with('-') => {
                 crate::emit_error(json, &AfuseError::new(22, "unknown snap option"));
             }
@@ -141,35 +146,35 @@ pub(crate) fn cmd_snap(workspace: &Path, rest: &[String], mut json: bool) {
             }
         }
     }
-    let res = if if_changed {
-        create_snapshot_if_changed(workspace, &label)
+    let res = if rolling {
+        create_snapshot_rolling(workspace, &label).map(|r| (r.meta, r.deduplicated, r.skipped, r.reason))
+    } else if if_changed {
+        create_snapshot_if_changed(workspace, &label).map(|(m, d)| (m, d, false, None))
     } else if fast {
-        create_snapshot_fast_dedup(workspace, &label)
+        create_snapshot_fast_dedup(workspace, &label).map(|(m, d)| (m, d, false, None))
     } else {
-        create_snapshot(workspace, &label).map(|m| (m, false))
+        create_snapshot(workspace, &label).map(|m| (m, false, false, None))
     };
-    match res {
-        Ok((m, dedup)) => {
-            if json {
-                println!(
-                    "{{\"ok\":true,\"id\":\"{}\",\"label\":\"{}\",\"deduplicated\":{},\"created_ms\":{},\"root_inode\":{},\"file_count\":{},\"project_files\":{},\"logical_bytes\":{},\"tree_sha256\":\"{}\",\"elapsed_us\":{}}}",
-                    json_escape(&m.id), json_escape(&m.label), dedup, m.created_ms,
-                    m.root_inode, m.file_count, m.project_files, m.logical_bytes, json_escape(&m.tree_sha256), m.elapsed_us
-                );
-            } else if dedup {
-                println!(
-                    "SNAP {} (UNCHANGED · deduplicated) | files={} | sha256={}..",
-                    sanitize_terminal_text(&m.id), m.file_count, short_hash(&m.tree_sha256, 12)
-                );
-            } else {
-                println!(
-                    "SNAP {} | {:.3} ms | files={} | sha256={}.. | label={}",
-                    sanitize_terminal_text(&m.id), m.elapsed_us as f64 / 1000.0,
-                    m.file_count, short_hash(&m.tree_sha256, 12), sanitize_terminal_text(&m.label)
-                );
-            }
-        }
+    let (m, dedup, skipped, reason) = match res {
+        Ok(v) => v,
         Err(e) => crate::emit_error(json, &e),
+    };
+    if json {
+        let extra = reason
+            .filter(|_| skipped)
+            .map(|r| format!(",\"skipped\":true,\"reason\":\"{}\"", json_escape(r)))
+            .unwrap_or_default();
+        println!(
+            "{{\"ok\":true,\"id\":\"{}\",\"label\":\"{}\",\"deduplicated\":{},\"created_ms\":{},\"root_inode\":{},\"file_count\":{},\"project_files\":{},\"logical_bytes\":{},\"tree_sha256\":\"{}\",\"elapsed_us\":{}{}}}",
+            json_escape(&m.id), json_escape(&m.label), dedup, m.created_ms,
+            m.root_inode, m.file_count, m.project_files, m.logical_bytes, json_escape(&m.tree_sha256), m.elapsed_us, extra
+        );
+    } else if skipped {
+        println!("SNAP {} (SKIPPED · {}) | files={} | sha256={}..", sanitize_terminal_text(&m.id), reason.unwrap_or("skipped"), m.file_count, short_hash(&m.tree_sha256, 12));
+    } else if dedup {
+        println!("SNAP {} (UNCHANGED · deduplicated) | files={} | sha256={}..", sanitize_terminal_text(&m.id), m.file_count, short_hash(&m.tree_sha256, 12));
+    } else {
+        println!("SNAP {} | {:.3} ms | files={} | sha256={}.. | label={}", sanitize_terminal_text(&m.id), m.elapsed_us as f64 / 1000.0, m.file_count, short_hash(&m.tree_sha256, 12), sanitize_terminal_text(&m.label));
     }
 }
 

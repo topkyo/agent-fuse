@@ -125,7 +125,7 @@ pub fn compute_tree_stats_fast(root: &Path) -> Result<(u64, u64), AfuseError> {
     Ok((files, bytes))
 }
 
-fn hash_file_streaming(path: &Path) -> Result<String, AfuseError> {
+pub(crate) fn hash_file_streaming(path: &Path) -> Result<String, AfuseError> {
     let _file_guard = TempPermGuard::ensure(path, 0o400);
     let mut f = fs::File::open(path).map_err(|e| {
         AfuseError::new(

@@ -70,7 +70,7 @@ pub(crate) fn dedup_and_calibrate_history_unlocked(ws_vault: &Path) -> Result<us
     let mut prev_fp: Option<String> = None;
     let mut removed = 0usize;
     for m in all {
-        if m.label == "auto:pre-restore" {
+        if m.label == "auto:pre-restore" || m.label == "auto:pro:pre-delete" {
             continue;
         }
         let cur_fp = snap_tree_fast_fp(ws_vault, &m);

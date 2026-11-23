@@ -11,7 +11,7 @@
 //! - `fs_guard`: Temporary readonly permission unlocker & single-file sibling isolation guards.
 //! - `meta`: `SnapshotMeta` key-value serializer, JSON escaping & terminal text sanitizer.
 //! - `manifest`: Filtered tree cloning, fast tree stats, Merkle SHA-256 & `meta.kv` persistence.
-//! - `snapshot` / `diff`: Atomic snapshot creation, fast dedup & NFD-safe workspace diffing.
+//! - `snapshot` / `diff` / `rolling`: Atomic snapshot creation, fast dedup, NFD-safe diffing & delete-aware rolling baseline.
 //! - `restore` / `restore_tree`: Atomic root-Inode-preserving full/selective restore & ignored-subtree stash.
 //! - `trash`: Darwin `fsgetpath` exact `(fsid, ino)` Trash cleanup & TCC degradation handling.
 //! - `relocate`: Same-volume `fsgetpath` target locate, atomic `O(1)` vault relocation & orphan vault GC.
@@ -37,6 +37,7 @@ pub mod prune;
 pub mod relocate;
 pub mod restore;
 pub mod restore_tree;
+pub mod rolling;
 pub mod sha256;
 pub mod snapshot;
 pub mod trash;
@@ -82,6 +83,10 @@ pub use restore::{
     restore_snapshot_with_vault, RestoreReport,
 };
 pub use diff::{diff_snapshot, diff_snapshot_fast, diff_snapshot_opts_with_vault, diff_snapshot_with_vault, DiffReport};
+pub use rolling::{
+    create_snapshot_rolling, create_snapshot_rolling_with_vault, RollingSnapReport,
+    PRE_DELETE_LABEL,
+};
 pub use snapshot::{
     create_snapshot, create_snapshot_fast, create_snapshot_fast_dedup,
     create_snapshot_fast_dedup_with_vault, create_snapshot_if_changed,
@@ -115,5 +120,7 @@ mod tests_round4;
 mod tests_round5;
 #[cfg(test)]
 mod tests_round6;
+#[cfg(test)]
+mod tests_round7;
 #[cfg(test)]
 mod tests_trash_targets;
