@@ -2,6 +2,7 @@ use crate::apfs::force_remove_all;
 use crate::diff::{diff_fast_unlocked, parse_fast_file_sig, FAST_REHASH_MAX_BYTES};
 use crate::error::{AfuseError, ERR_EINVAL};
 use crate::manifest::{hash_file_streaming, write_meta, SnapshotMeta};
+use crate::meta::{encode_summary, summarize_project_diff};
 use crate::snapshot::{
     create_snapshot_fast_dedup_unlocked, create_snapshot_unlocked_opts, list_snapshots_unlocked,
 };
@@ -25,6 +26,10 @@ fn is_project_path(rel: &str) -> bool {
     rel != ".git" && !rel.starts_with(".git/")
 }
 
+fn is_git_ref_change(rel: &str) -> bool {
+    rel == ".git/HEAD" || (rel.starts_with(".git/refs/") && !rel.ends_with(".lock"))
+}
+
 pub(crate) fn enforce_pre_delete_quota_unlocked(ws_vault: &Path) -> Result<(), AfuseError> {
     for m in list_snapshots_unlocked(ws_vault)?
         .into_iter()
@@ -39,6 +44,7 @@ pub(crate) fn enforce_pre_delete_quota_unlocked(ws_vault: &Path) -> Result<(), A
 fn promote_latest_to_pre_delete_unlocked(
     ws_vault: &Path,
     latest: &SnapshotMeta,
+    proj_deleted: &[String],
 ) -> Result<Option<String>, AfuseError> {
     if !latest.label.starts_with("auto:")
         || latest.label == "auto:pre-restore"
@@ -48,6 +54,9 @@ fn promote_latest_to_pre_delete_unlocked(
     }
     let mut promoted = latest.clone();
     promoted.label = PRE_DELETE_LABEL.to_string();
+    if let Some(first_del) = proj_deleted.first() {
+        promoted.summary = Some(encode_summary('H', first_del, proj_deleted.len()));
+    }
     let meta_path = ws_vault
         .join("snapshots")
         .join(&promoted.id)
@@ -208,6 +217,25 @@ pub fn create_snapshot_rolling_with_vault(
         .cloned()
         .collect();
 
+    if proj_added.is_empty() && proj_modified.is_empty() && proj_deleted.is_empty() {
+        let has_git_ref = detail
+            .report
+            .added
+            .iter()
+            .chain(detail.report.modified.iter())
+            .chain(detail.report.deleted.iter())
+            .any(|p| is_git_ref_change(p));
+        if !has_git_ref {
+            return Ok(RollingSnapReport {
+                meta: latest.clone(),
+                deduplicated: true,
+                skipped: true,
+                reason: Some("no_project_changes"),
+                promoted_pre_delete_id: None,
+            });
+        }
+    }
+
     if !proj_deleted.is_empty() && proj_added.is_empty() && proj_modified.is_empty() {
         return Ok(RollingSnapReport {
             meta: latest.clone(),
@@ -230,11 +258,15 @@ pub fn create_snapshot_rolling_with_vault(
             &proj_added,
         );
         if !pure_rename {
-            promoted_id = promote_latest_to_pre_delete_unlocked(&ws_vault, latest)?;
+            promoted_id = promote_latest_to_pre_delete_unlocked(&ws_vault, latest, &proj_deleted)?;
         }
     }
 
-    let meta = create_snapshot_unlocked_opts(&ws, &ws_vault, label, true)?;
+    let mut meta = create_snapshot_unlocked_opts(&ws, &ws_vault, label, true)?;
+    if let Some(sum) = summarize_project_diff(&proj_added, &proj_modified, &proj_deleted) {
+        meta.summary = Some(sum);
+        let _ = write_meta(&ws_vault.join("snapshots").join(&meta.id).join("meta.kv"), &meta);
+    }
     Ok(RollingSnapReport {
         meta,
         deduplicated: false,

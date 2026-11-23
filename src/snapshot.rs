@@ -8,6 +8,7 @@ use crate::manifest::{
     compute_snap_tree_manifest, compute_tree_manifest, count_non_git_entries, read_meta, write_meta,
     SnapshotMeta,
 };
+use crate::meta::summarize_project_diff;
 use crate::prune::{dedup_and_calibrate_history_unlocked, snap_tree_fast_fp};
 use crate::rolling::{enforce_pre_delete_quota_unlocked, PRE_DELETE_LABEL};
 use crate::sha256::Sha256;
@@ -78,13 +79,24 @@ pub fn create_snapshot_opts_with_vault(
     create_snapshot_unlocked_opts(&ws, &ws_vault, label, false)
 }
 
+fn matches_snap_content(ws: &Path, ws_vault: &Path, snap: &SnapshotMeta, cur_fp: &str) -> bool {
+    if snap_tree_fast_fp(ws_vault, snap).as_deref() == Some(cur_fp) {
+        return true;
+    }
+    diff_fast_unlocked(ws, ws_vault, snap)
+        .map(|d| d.report.added.is_empty() && d.report.modified.is_empty() && d.report.deleted.is_empty())
+        .unwrap_or(false)
+}
+
 pub(crate) fn create_snapshot_fast_dedup_unlocked(
     ws: &Path,
     ws_vault: &Path,
     label: &str,
 ) -> Result<(SnapshotMeta, bool), AfuseError> {
     let kind = if ws.is_file() { TargetKind::SingleFile } else { TargetKind::Directory };
-    if label.starts_with("auto:") && label != "auto:pre-restore" {
+    let existing = list_snapshots_unlocked(ws_vault)?;
+    let latest_primary = existing.iter().find(|m| m.label != "auto:pre-restore");
+    if label.starts_with("auto:") {
         if let Ok((entries, _, _, _)) = compute_fast_entries(ws, kind) {
             let mut h = Sha256::new();
             for (rel, sig) in &entries {
@@ -94,27 +106,40 @@ pub(crate) fn create_snapshot_fast_dedup_unlocked(
                 h.update(b"\n");
             }
             let cur_fp = format!("fast:{}", h.finalize_hex());
-            let existing = list_snapshots_unlocked(ws_vault)?;
-            if let Some(latest) = existing.iter().find(|m| m.label != "auto:pre-restore") {
-                let fp_same = snap_tree_fast_fp(ws_vault, latest).as_deref() == Some(cur_fp.as_str());
-                let content_same = fp_same
-                    || diff_fast_unlocked(ws, ws_vault, latest)
-                        .map(|d| {
-                            d.report.added.is_empty()
-                                && d.report.modified.is_empty()
-                                && d.report.deleted.is_empty()
-                        })
-                        .unwrap_or(false);
-                if content_same {
-                    if kind == TargetKind::SingleFile {
-                        record_live_target_inode_if_new(ws, kind, ws_vault);
-                    }
-                    return Ok((latest.clone(), true));
+            let matched = if label == "auto:pre-restore" {
+                let last_pre = existing.iter().find(|m| m.label == "auto:pre-restore");
+                last_pre
+                    .filter(|m| matches_snap_content(ws, ws_vault, m, &cur_fp))
+                    .or_else(|| latest_primary.filter(|m| matches_snap_content(ws, ws_vault, m, &cur_fp)))
+            } else {
+                latest_primary.filter(|m| matches_snap_content(ws, ws_vault, m, &cur_fp))
+            };
+            if let Some(hit) = matched {
+                if kind == TargetKind::SingleFile {
+                    record_live_target_inode_if_new(ws, kind, ws_vault);
                 }
+                return Ok((hit.clone(), true));
             }
         }
     }
-    Ok((create_snapshot_unlocked_opts(ws, ws_vault, label, true)?, false))
+    let pending_summary = if label != "auto:pre-restore" {
+        latest_primary.and_then(|lp| {
+            diff_fast_unlocked(ws, ws_vault, lp).ok().and_then(|d| {
+                let pa: Vec<_> = d.report.added.into_iter().filter(|p| p != ".git" && !p.starts_with(".git/")).collect();
+                let pm: Vec<_> = d.report.modified.into_iter().filter(|p| p != ".git" && !p.starts_with(".git/")).collect();
+                let pd: Vec<_> = d.report.deleted.into_iter().filter(|p| p != ".git" && !p.starts_with(".git/")).collect();
+                summarize_project_diff(&pa, &pm, &pd)
+            })
+        })
+    } else {
+        None
+    };
+    let mut meta = create_snapshot_unlocked_opts(ws, ws_vault, label, true)?;
+    if let Some(sum) = pending_summary {
+        meta.summary = Some(sum);
+        let _ = write_meta(&ws_vault.join("snapshots").join(&meta.id).join("meta.kv"), &meta);
+    }
+    Ok((meta, false))
 }
 
 pub fn create_snapshot_fast_dedup_with_vault(
@@ -254,13 +279,14 @@ pub(crate) fn create_snapshot_unlocked_opts(
         tree_sha256,
         elapsed_us: clone_elapsed_us,
         target_kind,
+        summary: None,
     };
     write_meta(&snap_dir.join("meta.kv"), &meta)?;
     enforce_auto_snap_quota_unlocked(ws_vault, &meta.label)?;
     Ok(meta)
 }
 
-const MAX_PRE_RESTORE_SNAPS: usize = 10;
+const MAX_PRE_RESTORE_SNAPS: usize = 3;
 
 fn enforce_auto_snap_quota_unlocked(ws_vault: &Path, label: &str) -> Result<(), AfuseError> {
     if label == "auto:pre-restore" {

@@ -1,8 +1,9 @@
 use agent_fuse::{
     create_snapshot, create_snapshot_fast_dedup, create_snapshot_if_changed,
     create_snapshot_rolling, diff_snapshot, diff_snapshot_fast, json_escape, list_snapshots,
-    parse_prune_args, prune_snapshots_filtered, restore_snapshot, restore_snapshot_paths,
-    sanitize_terminal_text, short_hash, validate_workspace_binding, AfuseError, RestoreReport,
+    parse_prune_args, prune_snapshots_filtered, restore_snapshot, restore_snapshot_fast,
+    restore_snapshot_paths, sanitize_terminal_text, short_hash, validate_workspace_binding,
+    AfuseError, RestoreReport,
 };
 use std::path::{Path, PathBuf};
 use std::process;
@@ -12,7 +13,7 @@ fn subcmd_usage(sub: &str) -> &'static str {
         "snap" => "USAGE: afuse [--workspace <DIR>] [--json] snap [-m <LABEL>] [--fast] [--rolling] [--if-changed]",
         "list" => "USAGE: afuse [--workspace <DIR>] [--json] list",
         "diff" => "USAGE: afuse [--workspace <DIR>] [--json] diff [<SNAP_ID|latest>] [--fast]",
-        "restore" => "USAGE: afuse [--workspace <DIR>] [--json] restore [<SNAP_ID|latest>] [--no-backup] [-- <REL_PATH>...]",
+        "restore" => "USAGE: afuse [--workspace <DIR>] [--json] restore [<SNAP_ID|latest>] [--fast] [--no-backup] [-- <REL_PATH>...]",
         "validate" => "USAGE: afuse [--json] validate [<DIR>]",
         "prune" => "USAGE: afuse [--workspace <DIR>] [--json] prune --keep <N> [--label-prefix <P>]",
         _ => "USAGE: afuse [--workspace <DIR>] [--json] <SUBCOMMAND> [OPTIONS]",
@@ -231,10 +232,11 @@ pub(crate) fn cmd_list(workspace: &Path, rest: &[String], mut json: bool) {
                 let items: Vec<String> = list
                     .iter()
                     .map(|m| {
+                        let sum = m.summary.as_ref().map(|s| format!("\"{}\"", json_escape(s))).unwrap_or_else(|| "null".to_string());
                         format!(
-                            "{{\"id\":\"{}\",\"label\":\"{}\",\"created_ms\":{},\"file_count\":{},\"project_files\":{},\"logical_bytes\":{},\"tree_sha256\":\"{}\",\"elapsed_us\":{}}}",
+                            "{{\"id\":\"{}\",\"label\":\"{}\",\"created_ms\":{},\"file_count\":{},\"project_files\":{},\"logical_bytes\":{},\"tree_sha256\":\"{}\",\"elapsed_us\":{},\"summary\":{}}}",
                             json_escape(&m.id), json_escape(&m.label), m.created_ms,
-                            m.file_count, m.project_files, m.logical_bytes, json_escape(&m.tree_sha256), m.elapsed_us
+                            m.file_count, m.project_files, m.logical_bytes, json_escape(&m.tree_sha256), m.elapsed_us, sum
                         )
                     })
                     .collect();
@@ -316,6 +318,7 @@ pub(crate) fn cmd_restore(workspace: &Path, rest: &[String], mut json: bool) {
     scan_help_and_json(rest, "restore", &mut json);
     let mut target: Option<String> = None;
     let mut safety_backup = true;
+    let mut fast = false;
     let mut rel_paths: Vec<String> = Vec::new();
     let mut i = 0usize;
     while i < rest.len() {
@@ -330,6 +333,7 @@ pub(crate) fn cmd_restore(workspace: &Path, rest: &[String], mut json: bool) {
         }
         match a {
             "--no-backup" => safety_backup = false,
+            "--fast" => fast = true,
             flag if flag.starts_with('-') => {
                 crate::emit_error(json, &AfuseError::new(22, "unknown restore option"));
             }
@@ -343,10 +347,12 @@ pub(crate) fn cmd_restore(workspace: &Path, rest: &[String], mut json: bool) {
         i += 1;
     }
     let t = target.as_deref().unwrap_or("latest");
-    let res = if rel_paths.is_empty() {
-        restore_snapshot(workspace, t, safety_backup)
-    } else {
+    let res = if !rel_paths.is_empty() {
         restore_snapshot_paths(workspace, t, safety_backup, &rel_paths)
+    } else if fast {
+        restore_snapshot_fast(workspace, t, safety_backup)
+    } else {
+        restore_snapshot(workspace, t, safety_backup)
     };
     match res {
         Ok(r) => print_restore_report(&r, json),

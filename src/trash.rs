@@ -144,6 +144,7 @@ pub(crate) fn record_snapshot_inodes(ws: &Path, kind: TargetKind, snap_dir: &Pat
         }
     }
     write_inode_file(&ws_vault.join("latest_inodes.txt"), &latest);
+    crate::trash_map::record_snapshot_inode_map(ws, kind, snap_dir, ws_vault);
 }
 
 pub(crate) fn refresh_latest_inodes(ws: &Path, kind: TargetKind, ws_vault: &Path) {

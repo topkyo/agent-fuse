@@ -3,12 +3,16 @@ mod tests_round7 {
     use crate::apfs::force_remove_all;
     use crate::diff::diff_snapshot_opts_with_vault;
     use crate::error::ERR_EINVAL;
-    use crate::restore::restore_snapshot_paths_with_vault;
+    use crate::meta::encode_summary;
+    use crate::restore::{
+        restore_snapshot_opts_with_vault, restore_snapshot_paths_with_vault,
+    };
     use crate::rolling::{create_snapshot_rolling_with_vault, PRE_DELETE_LABEL};
     use crate::snapshot::{
         create_snapshot_fast_dedup_with_vault, create_snapshot_opts_with_vault,
         list_snapshots_with_vault,
     };
+    use crate::trash::TrashCleanupStatus;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -177,5 +181,126 @@ mod tests_round7 {
         let r2 = create_snapshot_rolling_with_vault(&ws, Some(&vault), "auto:pro:fsevents").unwrap();
         assert!(!r2.skipped);
         assert!(r2.promoted_pre_delete_id.is_some(), "deleting 2 identical files with only 1 added must count 1 unmatched real delete");
+    }
+
+    #[test]
+    fn selective_restore_purges_only_restored_file_trash_preserves_sibling_and_prefix() {
+        let _guard = crate::tests::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sb = R7ScopedDir::new("sel-trash");
+        let vault = sb.0.join("vault");
+        let trash = sb.0.join("trash");
+        let ws = sb.0.join("ws");
+        fs::create_dir_all(&vault).unwrap();
+        fs::create_dir_all(&trash).unwrap();
+        fs::create_dir_all(&ws).unwrap();
+
+        fs::write(ws.join("a"), b"file-a").unwrap();
+        fs::write(ws.join("ab.txt"), b"prefix-sibling").unwrap();
+        fs::write(ws.join("sibling.txt"), b"other-sibling").unwrap();
+        fs::write(ws.join("keep.txt"), b"stay").unwrap();
+
+        let prev_trash = std::env::var_os("AFUSE_TRASH_DIR");
+        std::env::set_var("AFUSE_TRASH_DIR", &trash);
+
+        let snap = create_snapshot_opts_with_vault(&ws, Some(&vault), "auto:pro:init", true).unwrap();
+        fs::rename(ws.join("a"), trash.join("a")).unwrap();
+        fs::rename(ws.join("ab.txt"), trash.join("ab.txt")).unwrap();
+        fs::rename(ws.join("sibling.txt"), trash.join("sibling.txt")).unwrap();
+
+        let rep = restore_snapshot_paths_with_vault(&ws, Some(&vault), &snap.id, false, &["a".into()]).unwrap();
+        match prev_trash {
+            Some(v) => std::env::set_var("AFUSE_TRASH_DIR", v),
+            None => std::env::remove_var("AFUSE_TRASH_DIR"),
+        }
+
+        assert_eq!(rep.trash_cleanup, TrashCleanupStatus::Purged);
+        assert_eq!(rep.tree_sha256.len(), 64);
+        assert!(!rep.tree_sha256.starts_with("fast:"));
+        assert_eq!(fs::read_to_string(ws.join("a")).unwrap(), "file-a");
+        assert!(!trash.join("a").exists(), "restored file trashed copy must be purged");
+        assert!(trash.join("ab.txt").exists(), "prefix-similar trashed file ab.txt must be preserved");
+        assert!(trash.join("sibling.txt").exists(), "unrestored sibling in trash must be preserved");
+    }
+
+    #[test]
+    fn restore_fast_directory_and_selective_verify_receipts_and_strict_merkle_stays() {
+        let sb = R7ScopedDir::new("fast-restore-opts");
+        let vault = sb.0.join("vault");
+        let ws = sb.0.join("ws");
+        fs::create_dir_all(&vault).unwrap();
+        fs::create_dir_all(&ws).unwrap();
+        fs::write(ws.join("f1.txt"), b"v1").unwrap();
+        fs::write(ws.join("f2.txt"), b"v2").unwrap();
+
+        let fast_snap = create_snapshot_opts_with_vault(&ws, Some(&vault), "auto:pro:init", true).unwrap();
+        fs::write(ws.join("f1.txt"), b"changed").unwrap();
+        fs::write(ws.join("extra.txt"), b"added").unwrap();
+
+        let rep_fast = restore_snapshot_opts_with_vault(&ws, Some(&vault), &fast_snap.id, true, true).unwrap();
+        assert_eq!(rep_fast.tree_sha256.len(), 64);
+        assert!(!rep_fast.tree_sha256.starts_with("fast:"));
+        assert_eq!(fs::read_to_string(ws.join("f1.txt")).unwrap(), "v1");
+        assert!(!ws.join("extra.txt").exists());
+
+        let rep_noop = restore_snapshot_opts_with_vault(&ws, Some(&vault), &fast_snap.id, true, true).unwrap();
+        assert!(rep_noop.safety_snapshot_id.is_none(), "fast restore on identical workspace must skip pre-restore");
+
+        fs::write(ws.join("extra2.txt"), b"to-delete").unwrap();
+        let rep_sel = restore_snapshot_paths_with_vault(&ws, Some(&vault), &fast_snap.id, false, &["extra2.txt".into()]).unwrap();
+        assert_eq!(rep_sel.tree_sha256.len(), 64);
+        assert!(!ws.join("extra2.txt").exists());
+
+        let full_snap = create_snapshot_opts_with_vault(&ws, Some(&vault), "manual", false).unwrap();
+        assert_eq!(full_snap.tree_sha256.len(), 64);
+        let rep_full_with_fast_flag = restore_snapshot_opts_with_vault(&ws, Some(&vault), &full_snap.id, false, true).unwrap();
+        assert_eq!(rep_full_with_fast_flag.tree_sha256, full_snap.tree_sha256);
+    }
+
+    #[test]
+    fn summary_pipe_filename_git_noise_skip_and_pre_restore_dedup_cap_3() {
+        let sb = R7ScopedDir::new("summary-and-noise");
+        let vault = sb.0.join("vault");
+        let ws = sb.0.join("ws");
+        fs::create_dir_all(ws.join(".git")).unwrap();
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(ws.join(".git/index"), b"idx1").unwrap();
+        fs::write(ws.join("foo|bar.txt"), b"pipe-name-data").unwrap();
+        fs::write(ws.join("main.rs"), b"v1").unwrap();
+
+        let encoded = encode_summary('H', "dir/foo|bar.txt", 2);
+        let (head, cnt) = encoded.rsplit_once('|').unwrap();
+        assert_eq!(head, "H:foo|bar.txt");
+        assert_eq!(cnt, "2");
+
+        let s0 = create_snapshot_opts_with_vault(&ws, Some(&vault), "auto:pro:init", true).unwrap();
+        fs::write(ws.join(".git/index"), b"idx2-noise-only").unwrap();
+        let git_only = create_snapshot_rolling_with_vault(&ws, Some(&vault), "auto:pro:fsevents").unwrap();
+        assert!(git_only.skipped && git_only.reason == Some("no_project_changes"));
+        assert_eq!(git_only.meta.id, s0.id);
+
+        fs::remove_file(ws.join("foo|bar.txt")).unwrap();
+        fs::write(ws.join("main.rs"), b"v2").unwrap();
+        let mixed = create_snapshot_rolling_with_vault(&ws, Some(&vault), "auto:pro:fsevents").unwrap();
+        let pid = mixed.promoted_pre_delete_id.unwrap();
+        let snaps = list_snapshots_with_vault(&ws, Some(&vault)).unwrap();
+        let promoted = snaps.iter().find(|m| m.id == pid).unwrap();
+        assert_eq!(promoted.summary.as_deref(), Some("H:foo|bar.txt|1"));
+
+        let (_, dedup_same_as_latest) = create_snapshot_fast_dedup_with_vault(&ws, Some(&vault), "auto:pre-restore").unwrap();
+        assert!(dedup_same_as_latest, "pre-restore identical to latest primary must dedup");
+
+        for k in 0..5u32 {
+            fs::write(ws.join("main.rs"), format!("pre-val-{}", k)).unwrap();
+            let (m1, d1) = create_snapshot_fast_dedup_with_vault(&ws, Some(&vault), "auto:pre-restore").unwrap();
+            assert!(!d1);
+            let (m2, d2) = create_snapshot_fast_dedup_with_vault(&ws, Some(&vault), "auto:pre-restore").unwrap();
+            assert!(d2 && m2.id == m1.id, "consecutive identical pre-restore must dedup");
+        }
+        let pre_count = list_snapshots_with_vault(&ws, Some(&vault))
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.label == "auto:pre-restore")
+            .count();
+        assert_eq!(pre_count, 3, "MAX_PRE_RESTORE_SNAPS must cap at 3");
     }
 }
