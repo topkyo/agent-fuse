@@ -115,9 +115,7 @@ pub(crate) fn create_snapshot_fast_dedup_unlocked(
                 latest_primary.filter(|m| matches_snap_content(ws, ws_vault, m, &cur_fp))
             };
             if let Some(hit) = matched {
-                if kind == TargetKind::SingleFile {
-                    record_live_target_inode_if_new(ws, kind, ws_vault);
-                }
+                record_live_target_inode_if_new(ws, kind, ws_vault);
                 return Ok((hit.clone(), true));
             }
         }
@@ -175,6 +173,8 @@ pub fn create_snapshot_if_changed_with_vault(
             latest.tree_sha256.clone()
         };
         if !latest_sha.is_empty() && live_sha == latest_sha {
+            let kind = if ws.is_file() { TargetKind::SingleFile } else { TargetKind::Directory };
+            record_live_target_inode_if_new(&ws, kind, &ws_vault);
             return Ok((latest.clone(), true));
         }
     }

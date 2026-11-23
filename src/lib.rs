@@ -13,7 +13,7 @@
 //! - `manifest`: Filtered tree cloning, fast tree stats, Merkle SHA-256 & `meta.kv` persistence.
 //! - `snapshot` / `diff` / `rolling`: Atomic snapshot creation, fast dedup, NFD-safe diffing & delete-aware rolling baseline.
 //! - `restore` / `restore_tree` / `restore_fast`: Atomic root-Inode-preserving full/selective restore, fast receipt verification & ignored-subtree stash.
-//! - `trash` / `trash_map`: Darwin `fsgetpath` exact `(fsid, ino)` & selective path-inode Trash cleanup with TCC degradation handling.
+//! - `trash` / `trash_ledger`: Monotonic `known_inodes.tsv` ledger & Darwin `fsgetpath` exact `(fsid, ino)` Trash cleanup with TCC fallback.
 //! - `relocate`: Same-volume `fsgetpath` target locate, atomic `O(1)` vault relocation & orphan vault GC.
 //! - `prune`: Orphan staging cleanup, `auto:*` rolling quota GC & label-filtered pruning.
 //! - `hook_json` / `hook_config` / `hook`: Opt-in zsh preexec & Claude Code PreToolUse auto-snap.
@@ -42,7 +42,7 @@ pub mod rolling;
 pub mod sha256;
 pub mod snapshot;
 pub mod trash;
-pub(crate) mod trash_map;
+pub(crate) mod trash_ledger;
 pub mod unicode_norm;
 pub mod upgrade;
 pub mod upgrade_json;
@@ -125,5 +125,7 @@ mod tests_round5;
 mod tests_round6;
 #[cfg(test)]
 mod tests_round7;
+#[cfg(test)]
+mod tests_trash_ledger;
 #[cfg(test)]
 mod tests_trash_targets;

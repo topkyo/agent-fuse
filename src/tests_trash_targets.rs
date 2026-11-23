@@ -209,7 +209,7 @@ mod tests_trash_targets {
         assert!(trashed3.join("code.rs").is_file());
         assert!(ws.join("code.rs").is_file());
         let (_, ws_vault) = crate::vault::resolve_workspace_vault_recovery(&ws, Some(&vault)).unwrap();
-        assert!(fs::read_to_string(ws_vault.join("latest_inodes.txt")).unwrap().contains(&trashed3_ino.to_string()));
+        assert!(crate::trash_ledger::load_ledger(&ws_vault).contains_key(&trashed3_ino));
 
         // Round 3: Restore again after granting permissions (0700) without re-trashing -> retained inode purges trashed3 cleanly
         fs::set_permissions(&trash, fs::Permissions::from_mode(0o700)).unwrap();

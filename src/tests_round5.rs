@@ -119,13 +119,10 @@ mod tests_round5 {
         assert_eq!(rep1.trash_cleanup, TrashCleanupStatus::TccDenied);
         let live_gen2_ino = fs::symlink_metadata(&ws).unwrap().ino();
         let (_, ws_vault) = crate::vault::resolve_workspace_vault_recovery(&ws, Some(&vault)).unwrap();
-        let ret_lines: Vec<u64> = fs::read_to_string(ws_vault.join("retained_inodes.txt"))
-            .unwrap()
-            .lines()
-            .filter_map(|l| l.trim().parse::<u64>().ok())
-            .collect();
-        assert_eq!(ret_lines.first().copied(), Some(live_gen2_ino), "live_root must stay at index 0: {:?}", ret_lines);
-        assert!(ret_lines.len() <= 4, "child inodes must not bloat retained_inodes: {:?}", ret_lines);
+        let roots = crate::trash_ledger::load_root_inodes(&ws_vault);
+        assert!(roots.contains(&live_gen2_ino), "live_root must be retained in known_inodes.tsv: {:?}", roots);
+        assert!(roots.contains(&snap.root_inode), "gen1 trashed root must stay retained during TccDenied: {:?}", roots);
+        assert!(roots.len() <= 4, "child inodes must not bloat root entries: {:?}", roots);
 
         // Grant Trash write permission and move gen2 into Trash too -> both gen1 & gen2 must purge cleanly
         fs::set_permissions(&trash, fs::Permissions::from_mode(0o700)).unwrap();
@@ -176,11 +173,8 @@ mod tests_round5 {
         assert_eq!(rep.trash_cleanup, TrashCleanupStatus::Purged, "successful purge must not be overridden to TccDenied");
         assert!(!trashed.exists());
         let new_live_ino = fs::symlink_metadata(&ws).unwrap().ino();
-        let ret_lines: Vec<u64> = fs::read_to_string(ws_vault.join("retained_inodes.txt"))
-            .unwrap()
-            .lines()
-            .filter_map(|l| l.trim().parse::<u64>().ok())
-            .collect();
-        assert_eq!(ret_lines, vec![new_live_ino], "ghost inodes must be cleared after clean purge");
+        let ledger = crate::trash_ledger::load_ledger(&ws_vault);
+        assert_eq!(ledger.get(&new_live_ino).map(String::as_str), Some("."), "new live inode must be recorded in known_inodes.tsv");
+        assert!(!ledger.contains_key(&orig_ino), "purged inode must be retired from known_inodes.tsv");
     }
 }

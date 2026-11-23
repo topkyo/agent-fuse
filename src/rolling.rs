@@ -6,7 +6,8 @@ use crate::meta::{encode_summary, summarize_project_diff};
 use crate::snapshot::{
     create_snapshot_fast_dedup_unlocked, create_snapshot_unlocked_opts, list_snapshots_unlocked,
 };
-use crate::vault::{lock_vault, prepare_live_workspace_vault_with};
+use crate::trash::record_live_target_inode_if_new;
+use crate::vault::{lock_vault, prepare_live_workspace_vault_with, TargetKind};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
@@ -186,6 +187,7 @@ pub fn create_snapshot_rolling_with_vault(
         && detail.report.modified.is_empty()
         && detail.report.deleted.is_empty()
     {
+        record_live_target_inode_if_new(&ws, TargetKind::Directory, &ws_vault);
         return Ok(RollingSnapReport {
             meta: latest.clone(),
             deduplicated: true,
@@ -226,6 +228,7 @@ pub fn create_snapshot_rolling_with_vault(
             .chain(detail.report.deleted.iter())
             .any(|p| is_git_ref_change(p));
         if !has_git_ref {
+            record_live_target_inode_if_new(&ws, TargetKind::Directory, &ws_vault);
             return Ok(RollingSnapReport {
                 meta: latest.clone(),
                 deduplicated: true,
@@ -237,6 +240,7 @@ pub fn create_snapshot_rolling_with_vault(
     }
 
     if !proj_deleted.is_empty() && proj_added.is_empty() && proj_modified.is_empty() {
+        record_live_target_inode_if_new(&ws, TargetKind::Directory, &ws_vault);
         return Ok(RollingSnapReport {
             meta: latest.clone(),
             deduplicated: true,

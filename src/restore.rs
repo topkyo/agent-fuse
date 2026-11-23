@@ -20,8 +20,7 @@ use crate::restore_tree::{
 use crate::snapshot::{
     create_snapshot_fast_dedup_unlocked, create_snapshot_unlocked_opts, resolve_snapshot_id,
 };
-use crate::trash::{purge_trashed_counterparts, TrashCleanupStatus};
-use crate::trash_map::purge_trashed_selective_paths;
+use crate::trash::{purge_trashed_counterparts, purge_trashed_selective_paths, TrashCleanupStatus};
 use crate::unicode_norm::components_equal_casefold_nfd;
 use crate::vault::{is_ignored_name, lock_vault, resolve_workspace_vault_recovery, TargetKind};
 use std::collections::{BTreeMap, BTreeSet};

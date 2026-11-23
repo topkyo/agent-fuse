@@ -3,6 +3,7 @@ use crate::error::{AfuseError, ERR_EEXIST, ERR_EINVAL, ERR_ENOENT, ERR_EPERM, ER
 use crate::manifest::{compute_fast_fingerprint, compute_single_file_manifest, json_escape, read_meta, write_meta};
 use crate::snapshot::list_snapshots_unlocked;
 use crate::trash::{allowed_trash_roots_for, record_live_target_inode_if_new};
+use crate::trash_ledger::load_root_inodes;
 use crate::vault::{
     lock_vault, resolve_vault_base, resolve_workspace_vault_recovery, try_lock_vault,
     validate_workspace_binding_with_vault, TargetKind,
@@ -86,12 +87,8 @@ pub fn locate_workspace_target_with_vault(
     if let Some(h) = hint_ino.filter(|&x| x > 0) {
         if seen.insert(h) { cands.push(h); }
     }
-    if let Ok(raw) = fs::read_to_string(ws_vault.join("retained_inodes.txt")) {
-        for line in raw.lines() {
-            if let Ok(ino) = line.trim().parse::<u64>() {
-                if ino > 0 && seen.insert(ino) { cands.push(ino); }
-            }
-        }
+    for ino in load_root_inodes(&ws_vault) {
+        if ino > 0 && seen.insert(ino) { cands.push(ino); }
     }
     let mut expected_kind: Option<TargetKind> = None;
     if let Ok(snaps) = list_snapshots_unlocked(&ws_vault) {
