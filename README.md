@@ -1,6 +1,6 @@
 # ⚡️ `agent-fuse` (`afuse`) v0.6.1
 
-**English** | **[简体中文](./README.zh-CN.md)** · **[Contributing](./CONTRIBUTING.md)** · **[Security](./SECURITY.md)**
+**English** | **[简体中文](./README.zh-CN.md)** · **[Website](https://agentfuse.topkyo.dev/)** · **[Contributing](./CONTRIBUTING.md)** · **[Security](./SECURITY.md)**
 
 **APFS Copy-on-Write Workspace Time Machine, Opt-In Agent Hooks & Runaway Circuit Breaker for AI Coding Agents.**
 
@@ -82,14 +82,14 @@ Automatic `auto:*` checkpoints enforce a rolling ring cap via `AFUSE_MAX_AUTO_SN
 ---
 
 <a id="agentfuse-pro"></a>
-## **AgentFuse Pro** Native Menu Bar & Control Window App (`$19` / `¥98` One-Time)
+## **AgentFuse Pro** Native Menu Bar & Control Window App (`$19` One-Time)
 
 Prefer a zero-friction native macOS desktop shield (pure AppKit + QuartzCore + CoreGraphics Swift, `< 400` LOC per module, `1.02 MiB` stripped GUI shell, `< 5 MiB` Universal DMG / `~2.5 MiB` single-arch, `89.24 ms` cold start, `3.04 ms` CPU across a 2s 2-repo idle window)?
 
 - **Native Menu Bar & `500×410` Control Window**: Drop any plain folder (no `.git` needed) or single file, try the **5-Second Safe Demo**, preview historical snapshots inline via `Version: Latest ▾`, inspect colored file diffs with inline `[Restore]` / `[Remove]` row links, and switch `English / 简体中文` live.
 - **Continuous Background Guard + Inline Per-File Restore**: Watches unlimited targets concurrently (200-target local responsiveness guardrail, including sub-items inside `~/Desktop`, `~/Documents`, and `~/Downloads`) with sibling isolation, Move/Rename auto-follow, optional `--background` login start, and one-click per-file row restore directly in the diff card.
 - **Privacy-Safe APFS Recovery Receipt (`1200×630` PNG)**: Shows an instant rescue overlay with timing and Merkle verification status, with one-click **Copy Receipt**, `𝕏`, `WeChat`, and **Save PNG** actions (never touches your clipboard automatically).
-- **Verified In-App Updates & Perpetual `$19` / `¥98` License**: Free Edition protects `1` target forever; Pro unlocks unlimited concurrent targets (200-target local guardrail) across `3` Macs offline (`100%` local, optional GitHub `.dmg` updates verified by SHA-256 + code signature, 14-day refund). [Download Universal DMG](https://github.com/topkyo/agent-fuse/releases/latest).
+- **Verified In-App Updates & Perpetual `$19` License**: Free Edition protects `1` target forever; Pro (`$19` USD one-time via Creem.io, supporting Alipay, Cards, Apple Pay, Google Pay, and Company Tax Invoice) unlocks unlimited concurrent targets (200-target local guardrail) across `3` Macs offline (`100%` local, key emailed by `license@topkyo.dev` within 1 minute, optional GitHub `.dmg` updates verified by SHA-256 + code signature, 14-day refund). Visit [agentfuse.topkyo.dev](https://agentfuse.topkyo.dev/) or [Download Universal DMG](https://github.com/topkyo/agent-fuse/releases/latest). For private order, key, or refund support, email `support@topkyo.dev`.
 
 ---
 
@@ -112,12 +112,12 @@ Prefer a zero-friction native macOS desktop shield (pure AppKit + QuartzCore + C
 1. **Claude Code `/rewind` or `git checkout` did not recover files deleted by `rm -rf`. Can `afuse` restore them?**
    Yes, provided a snapshot was taken beforehand (manually, via `afuse hook claude`, or via the desktop `FSEvents` watcher). It works on plain folders with zero `.git` as well as single protected files. Unlike Claude Code `/rewind`, which ignores shell `Bash` mutations, `afuse` clones targets via APFS `clonefile(2)` (`0 Bytes` at `t=0`), restores 142 files in `~12.6 ms`, purges identical `(fsid, ino)` copies left in `~/.Trash` upon rebuild, or restores individual paths via `afuse restore latest -- <path>`.
 2. **How does `afuse` compare to `Provenrail` ($9/mo) or `git stash -u`?**
-   `git stash -u` locks `.git/index` and requires a Git repo. `Provenrail` writes copies into a shadow Git repository (`$9/month`). `afuse` uses kernel APFS `clonefile(2)` on any Git repo, plain directory, or single file with zero Git overhead, runs an out-of-band `-pgid` circuit breaker (`SIGSTOP` -> `SIGKILL`), and offers an MIT CLI (`$0`) plus a `$19` / `¥98` one-time desktop Pro app.
+   `git stash -u` locks `.git/index` and requires a Git repo. `Provenrail` writes copies into a shadow Git repository (`$9/month`). `afuse` uses kernel APFS `clonefile(2)` on any Git repo, plain directory, or single file with zero Git overhead, runs an out-of-band `-pgid` circuit breaker (`SIGSTOP` -> `SIGKILL`), and offers an MIT CLI (`$0`) plus a `$19` one-time desktop Pro app.
 3. **Why does `restore` preserve my terminal `cwd` without `cd .. && cd -`?**
    `afuse restore` stages cloned entries beside the workspace and swaps top-level entries using Darwin's `renamex_np(..., RENAME_SWAP)`, keeping the workspace root directory inode intact for active shells and LSP servers.
 4. **Why do manual `.dmg` drags trigger a macOS Gatekeeper warning?**
    Early v0.6.x releases prior to Apple Developer ID notarization use ad-hoc signatures. Install with `brew install --cask --no-quarantine topkyo/tap/agent-fuse`, or run `xattr -cr /Applications/AgentFuse.app` once after manual copy.
 5. **Does `afuse` phone home for update checks or fill up my disk with automatic snapshots?**
    Neither. Startup and background watching perform `0` network requests (`afuse upgrade --check` runs strictly on manual demand). Automatic `auto:*` snapshots self-prune beyond `AFUSE_MAX_AUTO_SNAPS` (default `50`), while manual snapshots stay preserved until explicitly pruned.
-6. **What is the difference between the Free Edition and `$19` / `¥98` AgentFuse Pro?**
-   The `afuse` CLI is MIT `$0`. The desktop app watches `1` target (any plain folder or single file) forever on the Free Edition with zero countdown timers. AgentFuse Pro (`$19` USD Global / `¥98` CNY China Mainland, one-time payment) unlocks unlimited concurrent targets (200-target local responsiveness guardrail) across up to `3` Macs with an offline `Ed25519` license key. Download on [GitHub Releases](https://github.com/topkyo/agent-fuse/releases/latest) or read [`llms.txt`](./llms.txt).
+6. **What is the difference between the Free Edition and `$19` AgentFuse Pro?**
+   The `afuse` CLI is MIT `$0`. The desktop app watches `1` target (any plain folder or single file) forever on the Free Edition with zero countdown timers. AgentFuse Pro (`$19` USD one-time via Creem.io, supporting Alipay, Cards, Apple Pay, Google Pay, and Company Tax Invoice) unlocks unlimited concurrent targets (200-target local responsiveness guardrail) across up to `3` Macs with an offline `Ed25519` license key auto-emailed by `license@topkyo.dev` within 1 minute (check Spam/Junk if delayed). For private order, key, or 14-day refund support, email `support@topkyo.dev`. Visit [agentfuse.topkyo.dev](https://agentfuse.topkyo.dev/), download on [GitHub Releases](https://github.com/topkyo/agent-fuse/releases/latest), or read [`llms.txt`](./llms.txt).

@@ -1,6 +1,6 @@
 # ⚡️ `agent-fuse` (`afuse`) v0.6.1
 
-**[English](./README.md)** | **简体中文** · **[参与贡献](./CONTRIBUTING.md)** · **[安全策略](./SECURITY.md)**
+**[English](./README.md)** | **简体中文** · **[官网](https://agentfuse.topkyo.dev/)** · **[参与贡献](./CONTRIBUTING.md)** · **[安全策略](./SECURITY.md)**
 
 **面向 AI 编程 Agent 的 macOS APFS 写时复制毫秒时光机、可选挂载钩子与失控进程组熔断器。**
 
@@ -82,14 +82,14 @@ afuse upgrade --check         # 仅在手动执行时查询 GitHub Releases 新�
 ---
 
 <a id="agentfuse-pro"></a>
-## **AgentFuse Pro** 原生菜单栏与毛玻璃主控桌面端（`¥98` / `$19` 一次买断）
+## **AgentFuse Pro** 原生菜单栏与毛玻璃主控桌面端（`$19` USD 约 `¥138` 一次买断）
 
 需要零配置成本的原生 macOS 桌面级守护壳（纯手写 AppKit + QuartzCore + CoreGraphics Swift，单模块严格 `< 400` 行，主壳 `1.02 MiB`，双架构 DMG `< 5 MiB` / 单架构 `~2.5 MiB`，冷启动实测 `89.24 ms`，双仓静默守护 2 秒窗口 CPU 占用 `3.04 ms`）？
 
 - **原生菜单栏与 `500×410` 毛玻璃主控台**：支持拖入无 `.git` 普通文件夹或单文件，提供**5 秒安全演练**、主窗内联「版本：最新安全点 ▾」历史预览、彩色差异列表及行内单文件 `[还原]` / `[移除]` 链接，支持 **简体中文 / English** 实时切换。
 - **后台零干扰守护与行内单文件精准恢复**：支持不限目标数量并发守护（底层内置 `200` 项单机流畅护栏，含桌面、文稿、下载目录子项），单文件同级互不干扰、移动/重命名自动跟随，支持开机静默启动与差异卡片行内单文件一键还原。
 - **隐私脱敏「APFS 原位恢复凭证」（`1200×630` PNG）**：恢复瞬间展示耗时与 Merkle 校验状态，不自动改写系统剪贴板，提供一键**复制凭证图**、分享至 `𝕏` / `微信` 及导出 PNG。
-- **签名校验更新与终身买断授权**：免费版永久守护 `1` 个目标；Pro 版（`¥98` / `$19` 一次买断）离线解锁不限目标数量并发守护（`200` 项单机护栏）与最多 `3` 台本人 Mac，支持 SHA-256 与签名校验的按需更新与 14 天退款保障。[下载通用 DMG](https://github.com/topkyo/agent-fuse/releases/latest)。
+- **签名校验更新与终身买断授权**：免费版永久守护 `1` 个目标；Pro 版（`$19` USD 约 `¥138` 一次买断，Creem.io 全球托管，支持支付宝 / 国际卡 / Apple Pay / Google Pay / 企业报销发票；英文结账页填邮箱付款后 1 分钟内由 `license@topkyo.dev` 自动发码，未收到请查垃圾箱）离线解锁不限目标数量并发守护（`200` 项单机护栏）与最多 `3` 台本人 Mac，支持 SHA-256 与签名校验的按需更新与 14 天退款保障。访问 [官方主页 agentfuse.topkyo.dev](https://agentfuse.topkyo.dev/) 或 [下载通用 DMG](https://github.com/topkyo/agent-fuse/releases/latest)；订单、发码与退款请私密邮件联系 `support@topkyo.dev`。
 
 ---
 
@@ -112,12 +112,12 @@ afuse upgrade --check         # 仅在手动执行时查询 GitHub Releases 新�
 1. **Claude Code 的 `/rewind` 或 `git checkout` 无法找回被 `rm -rf` 删掉的文件，`afuse` 能救回吗？**
    只要误删前拍摄过快照（手动执行、挂载 `afuse hook claude` 或开启桌面端 `FSEvents` 守护），即可完整救回，且支持无 `.git` 的普通文件夹与单个关键文件。Claude Code `/rewind` 不追踪 Shell `Bash` 命令造成的文件删除；`afuse` 通过 APFS `clonefile(2)` 克隆目标，可在 `~12.6 ms` 内还原 142 个文件、自动按 `(fsid, ino)` 清除 `~/.Trash` 废纸篓同名副本，或通过 `afuse restore latest -- <路径>` 精准恢复指定文件。
 2. **`afuse` 与 `Provenrail`（`$9/月`）或 `git stash -u` 有何本质区别？**
-   `git stash -u` 依赖 Git 仓库且争抢 `.git/index` 锁；`Provenrail` 向影子 Git 仓库复制文件且按月收费（`$108/年`）。`afuse` 直接调用内核 `clonefile(2)` 对 Git 仓库、普通目录或单文件实现零 Git 开销守护，配备独立进程组熔断器（`SIGSTOP` -> `SIGKILL -pgid`），提供 `$0` MIT CLI 与 `¥98` / `$19` 一次买断的原生桌面端。
+   `git stash -u` 依赖 Git 仓库且争抢 `.git/index` 锁；`Provenrail` 向影子 Git 仓库复制文件且按月收费（`$108/年`）。`afuse` 直接调用内核 `clonefile(2)` 对 Git 仓库、普通目录或单文件实现零 Git 开销守护，配备独立进程组熔断器（`SIGSTOP` -> `SIGKILL -pgid`），提供 `$0` MIT CLI 与 `$19`（约 `¥138`）一次买断的原生桌面端。
 3. **为什么 `afuse restore` 恢复后当前终端不需要重新 `cd .. && cd -`？**
    `afuse restore` 先在工作区同卷旁路克隆目标条目，再调用 Darwin 内核 `renamex_np(..., RENAME_SWAP)` 原子交换顶层目录项，始终保留工作区根目录本身的 Inode 不变，因此终端会话与语言服务器（LSP）不会悬空失效。
 4. **手动拖拽 `.dmg` 安装为什么会提示“无法验证开发者”？**
    早期版本在启用 Apple Developer ID 公证前采用本地 Ad-hoc 签名。使用 `brew install --cask --no-quarantine topkyo/tap/agent-fuse` 可直接免弹窗安装，或在拖入 `/Applications` 后执行一次 `xattr -cr /Applications/AgentFuse.app`。
 5. **`afuse` 会在后台偷偷联网检查更新吗？自动快照会把硬盘塞满吗？**
    均不会。启动与守护全程 `0` 网络请求，仅在用户手动运行 `afuse upgrade` 或点击菜单“检查更新”时按需查询。自动快照默认受 `AFUSE_MAX_AUTO_SNAPS=50` 滚动上限管控，超限自动回收最旧自动快照，手动快照永久保留。
-6. **社区免费版与 `¥98` / `$19` 的 AgentFuse Pro 终身买断版有何区别？**
-   `afuse` 命令行内核采用 MIT 协议完全免费开源（`$0`）。桌面端免费版可永久守护 `1` 个活跃目标（普通目录或单文件），无试用倒计时。AgentFuse Pro（中国大陆 `¥98` / 海外 `$19` 一次买断）解锁不限目标数量并发守护（底层内置 `200` 项单机流畅护栏），支持至多 `3` 台本人 Mac，采用 100% 离线 `Ed25519` 授权验证。可前往 [GitHub Releases](https://github.com/topkyo/agent-fuse/releases/latest) 下载或阅读 [`llms.txt`](./llms.txt)。
+6. **社区免费版与 `$19`（约 `¥138`）的 AgentFuse Pro 终身买断版有何区别？**
+   `afuse` 命令行内核采用 MIT 协议完全免费开源（`$0`）。桌面端免费版可永久守护 `1` 个活跃目标（普通目录或单文件），无试用倒计时。AgentFuse Pro（`$19` USD 约 `¥138` 一次买断，由 Creem.io 托管支持支付宝、国际卡、Apple Pay 与企业报销发票；英文结账页填邮箱付款后 1 分钟内由 `license@topkyo.dev` 自动发码，未收到请查垃圾箱）解锁不限目标数量并发守护（底层内置 `200` 项单机流畅护栏），支持至多 `3` 台本人 Mac，采用 100% 离线 `Ed25519` 授权验证。订单、补发或 14 天退款请私密邮件联系 `support@topkyo.dev`。可访问 [官方主页](https://agentfuse.topkyo.dev/)、[GitHub Releases](https://github.com/topkyo/agent-fuse/releases/latest) 或阅读 [`llms.txt`](./llms.txt)。

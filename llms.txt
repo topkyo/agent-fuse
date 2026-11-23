@@ -45,8 +45,9 @@ afuse doctor --json
 ## Licensing & Pricing
 - **MIT Open-Source CLI (`afuse`)**: `$0` forever (bilingual English `README.md` & Simplified Chinese `README.zh-CN.md`).
 - **AgentFuse Pro (macOS AppKit App)**: Free Edition watches 1 target (plain folder or single file) forever (no countdown timers, inline version preview & per-file row restore never locked). Adaptive macOS HIG vibrancy Control Window with decoupled Status Bar & Actions menus (`SF Symbols`, `Window` `⌘W`), inline version preview picker (`Version: Latest ▾`) and one-click per-file `[Restore]` / `[Remove]` row links inside the diff view, opt-in verified in-app `.dmg` SHA-256 update & relaunch, unlimited concurrent targets (200-target local responsiveness guardrail), automatic `(fsid, ino)` `~/.Trash` duplicate purging on rebuild, native mass-delete banner notifications, bilingual `APFS Recovery Receipt` (`1200×630` PNG), up to 3 Macs, `100%` offline `Ed25519` license key, `0` telemetry.
-  - Global One-Time License: `$19 USD` (Creem.io).
-  - China Mainland One-Time License: `¥98 CNY` (Mianbaoduo / WeChat & Alipay).
+  - Official Website: https://agentfuse.topkyo.dev/
+  - One-Time License: `$19 USD` one-time (Creem.io: Alipay, Cards, Apple Pay, Google Pay, Company Tax Invoice; license key auto-emailed by `license@topkyo.dev` within 1 minute).
+  - Private Order, License & Refund Support: `support@topkyo.dev` (use GitHub Issues for public technical bugs).
   - Releases & Downloads: https://github.com/topkyo/agent-fuse/releases/latest
   - Source Repo: https://github.com/topkyo/agent-fuse
 
@@ -58,4 +59,4 @@ afuse doctor --json
 - **Q: How does `afuse diff --fast` stay fast on large workspaces?**
   `afuse diff --fast` compares file sizes and nanosecond modification times instead of streaming full-file SHA-256 digests, listing `+added`, `~modified`, and `-deleted` entries immediately.
 - **Q: Does selective `afuse restore <snap> -- <path>` delete other files in macOS `~/.Trash`?**
-  No. Selective path restores preserve unrelated files in `~/.Trash`; only full workspace restores purge exact `(fsid, ino)` trashed duplicates of restored targets.
+  No. Starting in v0.6.1, selective path restore (`afuse restore <id> -- <path>`) uses an exact `inode -> rel_path` map to purge only the matching same-inode `~/.Trash` duplicate of the file being restored, while leaving un-restored sibling files and unrelated Trash entries 100% intact.
