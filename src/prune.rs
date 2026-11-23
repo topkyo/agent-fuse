@@ -2,7 +2,10 @@ use crate::apfs::force_remove_all;
 use crate::error::{AfuseError, ERR_EINVAL};
 use crate::manifest::{
     compute_fast_fingerprint, count_project_files, read_meta, write_meta, SnapshotMeta,
+    SnapshotOrigin,
 };
+use crate::meta::PIN_CONTAINS_DELETED;
+use crate::rolling::{enforce_pre_delete_quota_unlocked, is_delete_pinned, PRE_DELETE_LABEL};
 use crate::snapshot::list_snapshots_unlocked;
 use crate::vault::{lock_vault, resolve_workspace_vault_recovery, TargetKind};
 use std::fs;
@@ -10,6 +13,49 @@ use std::path::Path;
 use std::time::SystemTime;
 
 pub(crate) const ORPHAN_MAX_AGE_SECS: u64 = 60;
+pub(crate) const MAX_PRE_RESTORE_SNAPS: usize = 10;
+
+pub(crate) fn is_primary_snapshot(m: &SnapshotMeta) -> bool {
+    m.origin != SnapshotOrigin::BeforeRestore && m.label != "auto:pre-restore"
+}
+
+pub(crate) fn enforce_auto_snap_quota_unlocked(
+    ws_vault: &Path,
+    label: &str,
+    origin: SnapshotOrigin,
+) -> Result<(), AfuseError> {
+    if origin == SnapshotOrigin::BeforeRestore || label == "auto:pre-restore" {
+        for m in list_snapshots_unlocked(ws_vault)?
+            .into_iter()
+            .filter(|m| !is_primary_snapshot(m))
+            .skip(MAX_PRE_RESTORE_SNAPS)
+        {
+            force_remove_all(&ws_vault.join("snapshots").join(&m.id))?;
+        }
+        return Ok(());
+    }
+    if label == PRE_DELETE_LABEL {
+        return enforce_pre_delete_quota_unlocked(ws_vault);
+    }
+    if !label.starts_with("auto:") {
+        return Ok(());
+    }
+    let max_keep = std::env::var("AFUSE_MAX_AUTO_SNAPS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(50);
+    if max_keep == 0 {
+        return Ok(());
+    }
+    for m in list_snapshots_unlocked(ws_vault)?
+        .into_iter()
+        .filter(|m| m.label.starts_with("auto:") && is_primary_snapshot(m) && !is_delete_pinned(m))
+        .skip(max_keep)
+    {
+        force_remove_all(&ws_vault.join("snapshots").join(&m.id))?;
+    }
+    Ok(())
+}
 
 pub(crate) fn snap_tree_fast_fp(ws_vault: &Path, meta: &SnapshotMeta) -> Option<String> {
     if meta.tree_sha256.starts_with("fast:") {
@@ -70,7 +116,13 @@ pub(crate) fn dedup_and_calibrate_history_unlocked(ws_vault: &Path) -> Result<us
     let mut prev_fp: Option<String> = None;
     let mut removed = 0usize;
     for m in all {
-        if m.label == "auto:pre-restore" || m.label == "auto:pro:pre-delete" {
+        let protected = m.origin == SnapshotOrigin::BeforeRestore
+            || m.origin == SnapshotOrigin::RestoredFrom
+            || m.label == "auto:pre-restore"
+            || m.label == "auto:pro:pre-delete"
+            || m.retention_pin.as_deref() == Some(PIN_CONTAINS_DELETED);
+        if protected {
+            prev_fp = None;
             continue;
         }
         let cur_fp = snap_tree_fast_fp(ws_vault, &m);
@@ -119,6 +171,14 @@ pub(crate) fn cleanup_orphan_snapshots_unlocked(ws_vault: &Path, min_age_secs: u
     cleaned
 }
 
+pub(crate) fn is_prune_protected(m: &SnapshotMeta) -> bool {
+    is_delete_pinned(m)
+        || m.origin == SnapshotOrigin::BeforeRestore
+        || m.origin == SnapshotOrigin::Initial
+        || m.label == "auto:pre-restore"
+        || m.label == "auto:pro:init"
+}
+
 pub(crate) fn prune_unlocked(
     ws_vault: &Path,
     keep_latest: usize,
@@ -140,9 +200,10 @@ pub(crate) fn prune_unlocked(
     let all = list_snapshots_unlocked(ws_vault)?;
     match label_prefix {
         Some(pfx) => {
+            let protect_special = keep_latest > 0 && pfx == "auto:";
             for m in all
                 .into_iter()
-                .filter(|m| m.label.starts_with(pfx))
+                .filter(|m| m.label.starts_with(pfx) && (!protect_special || !is_prune_protected(m)))
                 .skip(keep_latest)
             {
                 let dir = ws_vault.join("snapshots").join(&m.id);

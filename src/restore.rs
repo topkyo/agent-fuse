@@ -1,24 +1,21 @@
 use crate::apfs::{
     force_remove_all, force_unlock, lstat_inode_mode, statfs_info, swap_paths, TMP_SEQ,
 };
-use crate::error::{AfuseError, ERR_EACCES, ERR_EINVAL, ERR_ENOENT};
+use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
 use crate::fs_guard::clonefile_readable;
 use crate::manifest::{
-    compute_fast_fingerprint, compute_single_file_manifest, compute_snap_tree_manifest,
-    compute_tree_manifest, count_project_files, SnapshotMeta,
+    compute_single_file_manifest, compute_tree_manifest, count_project_files, SnapshotMeta,
 };
 use crate::restore_fast::{
-    compute_fast_receipt_hex, verify_selective_restored_paths, workspace_differs_fast_check,
+    append_post_restore_head, compute_fast_receipt_hex, find_latest_primary,
+    live_matches_snapshot_unlocked, take_pre_restore_unconditional,
+    verify_selective_restored_paths, verify_snapshot_tree, workspace_differs_fast_check,
 };
 use crate::restore_tree::{
     align_ancestor_case, clear_heterogeneous_path_if_needed, find_single_snap_file,
-    force_unlock_tree_recursive, lock_guard_single_dir, prepare_ancestors_writable,
-    resolve_disk_rel_path, same_disk_entry, selective_differs, top_level_nfd_key,
-    validate_rel_restore_path, workspace_differs_full, workspace_has_visible_files,
-    NestedIgnoredGuard, UnlockedDirsGuard,
-};
-use crate::snapshot::{
-    create_snapshot_fast_dedup_unlocked, create_snapshot_unlocked_opts, resolve_snapshot_id,
+    lock_guard_single_dir, prepare_ancestors_writable, resolve_disk_rel_path, same_disk_entry,
+    selective_differs, top_level_nfd_key, validate_rel_restore_path, workspace_differs_full,
+    workspace_has_visible_files, NestedIgnoredGuard, UnlockedDirsGuard,
 };
 use crate::trash::{purge_trashed_counterparts, purge_trashed_selective_paths, TrashCleanupStatus};
 use crate::unicode_norm::components_equal_casefold_nfd;
@@ -35,6 +32,7 @@ use std::time::Instant;
 pub struct RestoreReport {
     pub snapshot_id: String,
     pub safety_snapshot_id: Option<String>,
+    pub post_snapshot_id: Option<String>,
     pub root_inode_before: u64,
     pub root_inode_after: u64,
     pub tree_sha256: String,
@@ -46,55 +44,7 @@ pub struct RestoreReport {
     pub trash_cleanup: TrashCleanupStatus,
 }
 
-fn verify_snapshot_tree(ws: &Path, ws_vault: &Path, target_id: &str) -> Result<(SnapshotMeta, PathBuf, Option<String>), AfuseError> {
-    if !ws_vault.join("snapshots").is_dir() {
-        return Err(AfuseError::new(ERR_ENOENT, "no snapshots exist for this workspace"));
-    }
-    let meta = resolve_snapshot_id(ws_vault, target_id)?;
-    let snap_tree = ws_vault.join("snapshots").join(&meta.id).join("tree");
-    if !snap_tree.is_dir() {
-        return Err(AfuseError::new(ERR_ENOENT, format!("snapshot tree missing on disk: {}", snap_tree.display())));
-    }
-    let vault_hash = if meta.tree_sha256 == "fast" {
-        None
-    } else if meta.tree_sha256.starts_with("fast:") {
-        let fp_target = if meta.target_kind == TargetKind::SingleFile {
-            find_single_snap_file(ws, &snap_tree)
-                .ok_or_else(|| AfuseError::new(ERR_ENOENT, "snapshot file missing in tree"))?
-        } else {
-            snap_tree.clone()
-        };
-        let (actual_fp, _, _) = compute_fast_fingerprint(&fp_target, meta.target_kind)?;
-        if actual_fp != meta.tree_sha256 {
-            return Err(AfuseError::new(
-                ERR_EINVAL,
-                format!("fast snapshot integrity mismatch: expected {}, found {}", meta.tree_sha256, actual_fp),
-            ));
-        }
-        None
-    } else {
-        let (vh, _, _, _) = compute_snap_tree_manifest(&snap_tree, ws, meta.target_kind)?;
-        if vh != meta.tree_sha256 {
-            return Err(AfuseError::new(ERR_EINVAL, format!("snapshot integrity mismatch: expected {}, found {}", meta.tree_sha256, vh)));
-        }
-        Some(vh)
-    };
-    Ok((meta, snap_tree, vault_hash))
-}
-
-fn take_pre_restore_backup(ws: &Path, ws_vault: &Path, safety_backup: bool) -> Result<Option<String>, AfuseError> {
-    if !safety_backup { return Ok(None); }
-    match create_snapshot_fast_dedup_unlocked(ws, ws_vault, "auto:pre-restore") {
-        Ok((m, _)) => Ok(Some(m.id)),
-        Err(e) if e.code == ERR_EACCES => {
-            force_unlock_tree_recursive(ws);
-            Ok(create_snapshot_unlocked_opts(ws, ws_vault, "auto:pre-restore", true).ok().map(|m| m.id))
-        }
-        Err(e) => Err(e),
-    }
-}
-
-fn prepare_restore_stage(ws: &Path, ws_vault: &Path, safety_backup: bool) -> Result<(u64, Option<String>), AfuseError> {
+fn prepare_restore_stage(ws: &Path, ws_vault: &Path, need_backup: bool) -> Result<(u64, Option<String>), AfuseError> {
     let cleared = clear_heterogeneous_path_if_needed(ws, true)?;
     if cleared || fs::symlink_metadata(ws).is_err() {
         fs::create_dir_all(ws).map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), format!("cannot recreate workspace dir: {}", e)))?;
@@ -102,8 +52,8 @@ fn prepare_restore_stage(ws: &Path, ws_vault: &Path, safety_backup: bool) -> Res
     }
     let (ino_before, _) = lstat_inode_mode(ws)?;
     force_unlock(ws);
-    let safety_id = if workspace_has_visible_files(ws) {
-        take_pre_restore_backup(ws, ws_vault, safety_backup)?
+    let safety_id = if need_backup && workspace_has_visible_files(ws) {
+        take_pre_restore_unconditional(ws, ws_vault)?
     } else {
         None
     };
@@ -159,7 +109,7 @@ fn stage_and_replace(parent: &Path, tag: &str, snap_item: &Path, target: &Path) 
 #[allow(clippy::too_many_arguments)]
 fn finalize_restore_unlocked(
     ws: &Path, kind: TargetKind, ws_vault: &Path, meta: &SnapshotMeta,
-    ino_before: u64, ino_after: u64, safety_id: Option<String>,
+    ino_before: u64, ino_after: u64, safety_id: Option<String>, should_append_post: bool,
     selective: bool, restored_paths: usize, vault_hash: Option<&str>,
     fast_receipt: bool, selective_ctx: Option<(&Path, &[(Option<PathBuf>, Option<PathBuf>)], &[PathBuf])>,
     t0: Instant,
@@ -181,6 +131,11 @@ fn finalize_restore_unlocked(
             return Err(AfuseError::new(ERR_EINVAL, format!("post-restore Merkle mismatch: expected {}, got {}", expected, live_hash)));
         }
     }
+    let post_snapshot_id = if !selective && should_append_post {
+        Some(append_post_restore_head(ws, ws_vault, &meta.id)?)
+    } else {
+        None
+    };
     let snap_dir = ws_vault.join("snapshots").join(&meta.id);
     let trash_cleanup = if selective {
         let clean_paths = selective_ctx.map(|x| x.2).unwrap_or(&[]);
@@ -194,7 +149,7 @@ fn finalize_restore_unlocked(
             .unwrap_or(TrashCleanupStatus::NotInTrash)
     };
     Ok(RestoreReport {
-        snapshot_id: meta.id.clone(), safety_snapshot_id: safety_id,
+        snapshot_id: meta.id.clone(), safety_snapshot_id: safety_id, post_snapshot_id,
         root_inode_before: ino_before, root_inode_after: ino_after,
         tree_sha256: live_hash, restored_files: live_files,
         project_files: count_project_files(ws, kind), elapsed_us,
@@ -206,6 +161,11 @@ fn restore_single_file_unlocked(
     ws: &Path, ws_vault: &Path, meta: &SnapshotMeta, snap_tree: &Path,
     vault_hash: Option<&str>, safety_backup: bool, fast_receipt: bool, t0: Instant,
 ) -> Result<RestoreReport, AfuseError> {
+    let head = find_latest_primary(ws_vault);
+    let target_is_head = head.as_ref().map(|h| h.id == meta.id).unwrap_or(false);
+    let was_missing = !fs::symlink_metadata(ws)
+        .map(|m| !m.file_type().is_symlink() && m.file_type().is_file())
+        .unwrap_or(false);
     let parent = ws.parent().ok_or_else(|| AfuseError::new(ERR_EINVAL, "missing parent directory"))?;
     let ino_before = if parent.is_dir() {
         lstat_inode_mode(parent)?.0
@@ -215,12 +175,14 @@ fn restore_single_file_unlocked(
     };
     let mut parent_guard = lock_guard_single_dir(parent)?;
     let cleared_hetero = clear_heterogeneous_path_if_needed(ws, false)?;
-    let effective_backup = !cleared_hetero && safety_backup && workspace_differs_full(ws, TargetKind::SingleFile, snap_tree, vault_hash);
-    let safety_id = if !cleared_hetero && fs::symlink_metadata(ws).is_ok() {
-        let sid = take_pre_restore_backup(ws, ws_vault, effective_backup)?;
+    let differs = !was_missing && !cleared_hetero && workspace_differs_full(ws, TargetKind::SingleFile, snap_tree, vault_hash);
+    let live_eq_head = !was_missing && !cleared_hetero && head.as_ref().map(|h| live_matches_snapshot_unlocked(ws, ws_vault, h)).unwrap_or(false);
+    let safety_id = if !was_missing && !cleared_hetero && differs && safety_backup && !live_eq_head {
+        let sid = take_pre_restore_unconditional(ws, ws_vault)?;
         force_unlock(ws);
         sid
     } else {
+        if !cleared_hetero && fs::symlink_metadata(ws).is_ok() { force_unlock(ws); }
         None
     };
     let snap_file = find_single_snap_file(ws, snap_tree)
@@ -229,7 +191,8 @@ fn restore_single_file_unlocked(
     let _ = fs::set_permissions(ws, fs::Permissions::from_mode(meta.root_mode & 0o7777));
     parent_guard.restore_all();
     let ino_after = verify_root_inode(parent, ino_before)?;
-    finalize_restore_unlocked(ws, TargetKind::SingleFile, ws_vault, meta, ino_before, ino_after, safety_id, false, 0, vault_hash, fast_receipt, None, t0)
+    let should_post = (was_missing || cleared_hetero || differs) && (!target_is_head || safety_id.is_some());
+    finalize_restore_unlocked(ws, TargetKind::SingleFile, ws_vault, meta, ino_before, ino_after, safety_id, should_post, false, 0, vault_hash, fast_receipt, None, t0)
 }
 
 pub fn restore_snapshot(workspace: &Path, target_id: &str, safety_backup: bool) -> Result<RestoreReport, AfuseError> {
@@ -256,12 +219,21 @@ pub fn restore_snapshot_opts_with_vault(
     if meta.target_kind == TargetKind::SingleFile {
         return restore_single_file_unlocked(&ws, &ws_vault, &meta, &snap_tree, vault_hash.as_deref(), safety_backup, fast, t0);
     }
-    let effective_backup = safety_backup && if fast && vault_hash.is_none() {
+    let head = find_latest_primary(&ws_vault);
+    let target_is_head = head.as_ref().map(|h| h.id == meta.id).unwrap_or(false);
+    let was_missing = !fs::symlink_metadata(&ws)
+        .map(|m| !m.file_type().is_symlink() && m.file_type().is_dir())
+        .unwrap_or(false);
+    let differs = if was_missing {
+        true
+    } else if fast && vault_hash.is_none() {
         workspace_differs_fast_check(&ws, &ws_vault, &meta)
     } else {
         workspace_differs_full(&ws, TargetKind::Directory, &snap_tree, vault_hash.as_deref())
     };
-    let (ino_before, safety_id) = prepare_restore_stage(&ws, &ws_vault, effective_backup)?;
+    let live_eq_head = !was_missing && head.as_ref().map(|h| live_matches_snapshot_unlocked(&ws, &ws_vault, h)).unwrap_or(false);
+    let need_backup = safety_backup && !was_missing && differs && !live_eq_head;
+    let (ino_before, safety_id) = prepare_restore_stage(&ws, &ws_vault, need_backup)?;
     let mut nested_guard = NestedIgnoredGuard::preserve(&ws)?;
     let mut snap_children: BTreeMap<String, (OsString, PathBuf)> = BTreeMap::new();
     for entry in fs::read_dir(&snap_tree).map_err(|e| AfuseError::new(1, e.to_string()))? {
@@ -307,7 +279,8 @@ pub fn restore_snapshot_opts_with_vault(
     nested_guard.restore_back()?;
     let _ = fs::set_permissions(&ws, fs::Permissions::from_mode(meta.root_mode & 0o7777));
     let ino_after = verify_root_inode(&ws, ino_before)?;
-    finalize_restore_unlocked(&ws, TargetKind::Directory, &ws_vault, &meta, ino_before, ino_after, safety_id, false, 0, vault_hash.as_deref(), fast, None, t0)
+    let should_post = (was_missing || differs) && (!target_is_head || safety_id.is_some());
+    finalize_restore_unlocked(&ws, TargetKind::Directory, &ws_vault, &meta, ino_before, ino_after, safety_id, should_post, false, 0, vault_hash.as_deref(), fast, None, t0)
 }
 
 pub fn restore_snapshot_paths(
@@ -350,9 +323,11 @@ pub fn restore_snapshot_paths_with_vault(
         if snap_rel.is_none() && live_rel.is_none() {
             return Err(AfuseError::new(ERR_ENOENT, "requested path does not exist in snapshot or workspace"));
         }
-        resolved.push((snap_rel, live_rel));
+        let pair = (snap_rel, live_rel);
+        if !resolved.contains(&pair) { resolved.push(pair); }
     }
-    let effective_backup = safety_backup && selective_differs(&ws, &snap_tree, &resolved);
+    let touches_live = resolved.iter().any(|(_, live_opt)| live_opt.is_some());
+    let effective_backup = safety_backup && touches_live && selective_differs(&ws, &snap_tree, &resolved);
     let mut dir_guard = UnlockedDirsGuard::new();
     if ws_is_real_dir { dir_guard.unlock_if_needed(&ws)?; }
     let (ino_before, safety_id) = prepare_restore_stage(&ws, &ws_vault, effective_backup)?;
@@ -378,5 +353,5 @@ pub fn restore_snapshot_paths_with_vault(
     dir_guard.restore_all();
     nested_guard.restore_back()?;
     let ino_after = verify_root_inode(&ws, ino_before)?;
-    finalize_restore_unlocked(&ws, TargetKind::Directory, &ws_vault, &meta, ino_before, ino_after, safety_id, true, clean_paths.len(), None, true, Some((&snap_tree, &resolved, &clean_paths)), t0)
+    finalize_restore_unlocked(&ws, TargetKind::Directory, &ws_vault, &meta, ino_before, ino_after, safety_id, false, true, clean_paths.len(), None, true, Some((&snap_tree, &resolved, &clean_paths)), t0)
 }

@@ -9,10 +9,10 @@
 //! - `vault` / `vault_policy`: Arbitrary plain folder (`.git` optional) & single-file (`TargetKind`)
 //!   guardian with physical system/container-root blacklist, same-APFS check & exclusive vault flock.
 //! - `fs_guard`: Temporary readonly permission unlocker & single-file sibling isolation guards.
-//! - `meta`: `SnapshotMeta` key-value serializer, JSON escaping & terminal text sanitizer.
+//! - `meta`: `SnapshotMeta`, `SnapshotOrigin` key-value serializer, compound summaries & sanitizer.
 //! - `manifest`: Filtered tree cloning, fast tree stats, Merkle SHA-256 & `meta.kv` persistence.
-//! - `snapshot` / `diff` / `rolling`: Atomic snapshot creation, fast dedup, NFD-safe diffing & delete-aware rolling baseline.
-//! - `restore` / `restore_tree` / `restore_fast`: Atomic root-Inode-preserving full/selective restore, fast receipt verification & ignored-subtree stash.
+//! - `snapshot` / `diff` / `diff_rename` / `rolling`: Atomic snapshot creation, fast dedup, NFD-safe diffing, first-class `RenamePair` detection & append-only rolling baseline.
+//! - `restore` / `restore_tree` / `restore_fast`: Atomic root-Inode-preserving full/selective restore, append-only head progression & ignored-subtree stash.
 //! - `trash` / `trash_ledger`: Monotonic `known_inodes.tsv` ledger & Darwin `fsgetpath` exact `(fsid, ino)` Trash cleanup with TCC fallback.
 //! - `relocate`: Same-volume `fsgetpath` target locate, atomic `O(1)` vault relocation & orphan vault GC.
 //! - `prune`: Orphan staging cleanup, `auto:*` rolling quota GC & label-filtered pruning.
@@ -24,6 +24,7 @@
 
 pub mod apfs;
 pub mod diff;
+pub mod diff_rename;
 pub mod doctor;
 pub mod error;
 pub(crate) mod fs_guard;
@@ -70,8 +71,9 @@ pub use hook::{
 pub use hook_config::{render_hook_snippet, uninstall_hooks, UninstallAction};
 pub use manifest::{
     compute_single_file_manifest, compute_tree_manifest, compute_tree_stats_fast, json_escape,
-    sanitize_terminal_text, SnapshotMeta,
+    sanitize_terminal_text, SnapshotMeta, SnapshotOrigin,
 };
+pub use meta::PIN_CONTAINS_DELETED;
 pub use prune::{
     parse_prune_args, prune_snapshots, prune_snapshots_filtered,
     prune_snapshots_filtered_with_vault, prune_snapshots_with_vault,
@@ -86,6 +88,7 @@ pub use restore::{
     RestoreReport,
 };
 pub use diff::{diff_snapshot, diff_snapshot_fast, diff_snapshot_opts_with_vault, diff_snapshot_with_vault, DiffReport};
+pub use diff_rename::RenamePair;
 pub use rolling::{
     create_snapshot_rolling, create_snapshot_rolling_with_vault, RollingSnapReport,
     PRE_DELETE_LABEL,
@@ -125,6 +128,8 @@ mod tests_round5;
 mod tests_round6;
 #[cfg(test)]
 mod tests_round7;
+#[cfg(test)]
+mod tests_round8;
 #[cfg(test)]
 mod tests_trash_ledger;
 #[cfg(test)]

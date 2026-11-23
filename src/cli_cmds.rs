@@ -54,19 +54,16 @@ fn handle_common_sub_flag(arg: &str, _sub: &str, json: &mut bool) -> bool {
 
 fn print_restore_report(r: &RestoreReport, json: bool) {
     if json {
-        let sb = r
-            .safety_snapshot_id
-            .as_ref()
-            .map(|s| format!("\"{}\"", json_escape(s)))
-            .unwrap_or_else(|| "null".to_string());
+        let sb = r.safety_snapshot_id.as_ref().map(|s| format!("\"{}\"", json_escape(s))).unwrap_or_else(|| "null".to_string());
+        let pb = r.post_snapshot_id.as_ref().map(|s| format!("\"{}\"", json_escape(s))).unwrap_or_else(|| "null".to_string());
         let tail = if r.selective {
             format!(",\"selective\":true,\"restored_paths\":{}", r.restored_paths)
         } else {
             String::new()
         };
         println!(
-            "{{\"ok\":true,\"snapshot_id\":\"{}\",\"safety_snapshot_id\":{},\"root_inode_before\":{},\"root_inode_after\":{},\"restored_files\":{},\"project_files\":{},\"tree_sha256\":\"{}\",\"elapsed_us\":{},\"trash_cleanup\":\"{}\"{}}}",
-            json_escape(&r.snapshot_id), sb, r.root_inode_before, r.root_inode_after,
+            "{{\"ok\":true,\"snapshot_id\":\"{}\",\"safety_snapshot_id\":{},\"post_snapshot_id\":{},\"root_inode_before\":{},\"root_inode_after\":{},\"restored_files\":{},\"project_files\":{},\"tree_sha256\":\"{}\",\"elapsed_us\":{},\"trash_cleanup\":\"{}\"{}}}",
+            json_escape(&r.snapshot_id), sb, pb, r.root_inode_before, r.root_inode_after,
             r.restored_files, r.project_files, json_escape(&r.tree_sha256), r.elapsed_us, r.trash_cleanup.as_str(), tail
         );
     } else {
@@ -232,11 +229,13 @@ pub(crate) fn cmd_list(workspace: &Path, rest: &[String], mut json: bool) {
                 let items: Vec<String> = list
                     .iter()
                     .map(|m| {
-                        let sum = m.summary.as_ref().map(|s| format!("\"{}\"", json_escape(s))).unwrap_or_else(|| "null".to_string());
+                        let fmt_opt = |o: &Option<String>| o.as_ref().map(|s| format!("\"{}\"", json_escape(s))).unwrap_or_else(|| "null".to_string());
                         format!(
-                            "{{\"id\":\"{}\",\"label\":\"{}\",\"created_ms\":{},\"file_count\":{},\"project_files\":{},\"logical_bytes\":{},\"tree_sha256\":\"{}\",\"elapsed_us\":{},\"summary\":{}}}",
-                            json_escape(&m.id), json_escape(&m.label), m.created_ms,
-                            m.file_count, m.project_files, m.logical_bytes, json_escape(&m.tree_sha256), m.elapsed_us, sum
+                            "{{\"id\":\"{}\",\"label\":\"{}\",\"origin\":\"{}\",\"retention_pin\":{},\"restored_from_id\":{},\"created_ms\":{},\"file_count\":{},\"project_files\":{},\"logical_bytes\":{},\"tree_sha256\":\"{}\",\"elapsed_us\":{},\"summary\":{}}}",
+                            json_escape(&m.id), json_escape(&m.label), m.origin.as_str(),
+                            fmt_opt(&m.retention_pin), fmt_opt(&m.restored_from_id),
+                            m.created_ms, m.file_count, m.project_files, m.logical_bytes,
+                            json_escape(&m.tree_sha256), m.elapsed_us, fmt_opt(&m.summary)
                         )
                     })
                     .collect();
@@ -290,23 +289,24 @@ pub(crate) fn cmd_diff(workspace: &Path, rest: &[String], mut json: bool) {
                 let fmt_vec = |v: &[String]| -> String {
                     v.iter().map(|x| format!("\"{}\"", json_escape(x))).collect::<Vec<_>>().join(",")
                 };
+                let fmt_ren = d.renamed.iter()
+                    .map(|r| format!("{{\"from\":\"{}\",\"to\":\"{}\"}}", json_escape(&r.from), json_escape(&r.to)))
+                    .collect::<Vec<_>>()
+                    .join(",");
                 println!(
-                    "{{\"ok\":true,\"snapshot_id\":\"{}\",\"added\":[{}],\"modified\":[{}],\"deleted\":[{}]}}",
-                    json_escape(&d.snapshot_id), fmt_vec(&d.added), fmt_vec(&d.modified), fmt_vec(&d.deleted)
+                    "{{\"ok\":true,\"snapshot_id\":\"{}\",\"added\":[{}],\"modified\":[{}],\"deleted\":[{}],\"renamed\":[{}]}}",
+                    json_escape(&d.snapshot_id), fmt_vec(&d.added), fmt_vec(&d.modified), fmt_vec(&d.deleted), fmt_ren
                 );
             } else {
                 println!(
-                    "DIFF against {} -> +{} added, ~{} modified, -{} deleted",
-                    sanitize_terminal_text(&d.snapshot_id), d.added.len(), d.modified.len(), d.deleted.len()
+                    "DIFF against {} -> +{} added, ~{} modified, -{} deleted, R{} renamed",
+                    sanitize_terminal_text(&d.snapshot_id), d.added.len(), d.modified.len(), d.deleted.len(), d.renamed.len()
                 );
-                for p in d.added {
-                    println!("  + {}", sanitize_terminal_text(&p));
-                }
-                for p in d.modified {
-                    println!("  ~ {}", sanitize_terminal_text(&p));
-                }
-                for p in d.deleted {
-                    println!("  - {}", sanitize_terminal_text(&p));
+                for p in d.added { println!("  + {}", sanitize_terminal_text(&p)); }
+                for p in d.modified { println!("  ~ {}", sanitize_terminal_text(&p)); }
+                for p in d.deleted { println!("  - {}", sanitize_terminal_text(&p)); }
+                for r in d.renamed {
+                    println!("  R {} -> {}", sanitize_terminal_text(&r.from), sanitize_terminal_text(&r.to));
                 }
             }
         }

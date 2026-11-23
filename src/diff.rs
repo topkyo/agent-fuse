@@ -1,3 +1,4 @@
+use crate::diff_rename::{detect_renames_in_dir, RenamePair};
 use crate::error::{AfuseError, ERR_ENOENT};
 use crate::manifest::{
     compute_fast_entries, compute_single_file_manifest, compute_snap_tree_manifest,
@@ -19,12 +20,11 @@ pub struct DiffReport {
     pub added: Vec<String>,
     pub modified: Vec<String>,
     pub deleted: Vec<String>,
+    pub renamed: Vec<RenamePair>,
 }
 
 pub(crate) struct FastDiffDetail {
     pub report: DiffReport,
-    pub snap_entries: BTreeMap<String, String>,
-    pub live_entries: BTreeMap<String, String>,
     pub live_file_count: u64,
     pub live_project_files: u64,
 }
@@ -137,15 +137,27 @@ pub(crate) fn diff_fast_unlocked(
         }
     }
 
+    let renamed = if meta.target_kind == TargetKind::Directory {
+        detect_renames_in_dir(
+            &snap_root,
+            ws,
+            &snap_entries,
+            &live_entries,
+            &mut deleted,
+            &mut added,
+        )
+    } else {
+        Vec::new()
+    };
+
     Ok(FastDiffDetail {
         report: DiffReport {
             snapshot_id: meta.id.clone(),
             added,
             modified,
             deleted,
+            renamed,
         },
-        snap_entries,
-        live_entries,
         live_file_count,
         live_project_files,
     })
@@ -202,12 +214,12 @@ pub fn diff_snapshot_opts_with_vault(
     };
 
     let mut snap_norm = BTreeMap::new();
-    for (k, v) in snap_map {
-        snap_norm.insert(canonical_rel_key(&k), (k, v));
+    for (k, v) in &snap_map {
+        snap_norm.insert(canonical_rel_key(k), (k.clone(), v.clone()));
     }
     let mut live_norm = BTreeMap::new();
-    for (k, v) in live_map {
-        live_norm.insert(canonical_rel_key(&k), (k, v));
+    for (k, v) in &live_map {
+        live_norm.insert(canonical_rel_key(k), (k.clone(), v.clone()));
     }
 
     let mut added = Vec::new();
@@ -228,10 +240,24 @@ pub fn diff_snapshot_opts_with_vault(
         }
     }
 
+    let renamed = if meta.target_kind == TargetKind::Directory {
+        detect_renames_in_dir(
+            &snap_tree,
+            &ws,
+            &snap_map,
+            &live_map,
+            &mut deleted,
+            &mut added,
+        )
+    } else {
+        Vec::new()
+    };
+
     Ok(DiffReport {
         snapshot_id: meta.id,
         added,
         modified,
         deleted,
+        renamed,
     })
 }

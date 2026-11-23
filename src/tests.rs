@@ -443,11 +443,14 @@ struct ScopedDir(PathBuf);
         assert_eq!(fs::read_to_string(&f).unwrap(), "clean-secret");
 
         // Regression B4: `latest` must not resolve to `auto:pre-restore`, keeping post-restore diff clean and repeated `restore latest` idempotent
+        let post_id = rep.post_snapshot_id.as_deref().unwrap_or(&snap.id);
         let diff_after = diff_snapshot_with_vault(&ws, Some(&vault), "latest").unwrap();
-        assert_eq!(diff_after.snapshot_id, snap.id);
-        assert!(diff_after.added.is_empty() && diff_after.modified.is_empty() && diff_after.deleted.is_empty());
+        assert_eq!(diff_after.snapshot_id, post_id);
+        assert!(diff_after.added.is_empty() && diff_after.modified.is_empty() && diff_after.deleted.is_empty() && diff_after.renamed.is_empty());
         let rep_again = restore_snapshot_with_vault(&ws, Some(&vault), "latest", true).unwrap();
-        assert_eq!(rep_again.snapshot_id, snap.id);
+        assert_eq!(rep_again.snapshot_id, post_id);
+        assert!(rep_again.safety_snapshot_id.is_none());
+        assert!(rep_again.post_snapshot_id.is_none());
         assert_eq!(fs::read_to_string(&f).unwrap(), "clean-secret");
     }
 

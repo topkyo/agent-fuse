@@ -288,8 +288,10 @@ fn stateful_280_step_property_invariants_i1_and_i2() {
                 non_empty_oracle = expected_files;
             }
         }
-        // Invariant check every step: no auto snapshot (except manual) has 0 files
+        // Invariant check every step: no auto snapshot (except manual) has 0 files; prune GC'd auto snaps from test oracle
         let all = list_snapshots_unlocked(&ws_vault).unwrap();
         assert!(all.iter().filter(|m| m.label.starts_with("auto:")).all(|m| m.file_count > 0));
+        good_snaps.retain(|(id, _)| all.iter().any(|m| m.id == *id));
+        assert!(!good_snaps.is_empty());
     }
 }

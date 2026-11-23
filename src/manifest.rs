@@ -2,7 +2,7 @@ use crate::apfs::lstat_inode_mode;
 use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
 use crate::fs_guard::{clonefile_readable, TempPermGuard};
 pub(crate) use crate::meta::{read_meta, write_meta};
-pub use crate::meta::{json_escape, sanitize_terminal_text, SnapshotMeta};
+pub use crate::meta::{json_escape, sanitize_terminal_text, SnapshotMeta, SnapshotOrigin};
 use crate::sha256::{sha256_hex, Sha256};
 use crate::vault::{is_ignored_name, TargetKind};
 use std::collections::BTreeMap;

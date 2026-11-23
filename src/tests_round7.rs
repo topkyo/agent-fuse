@@ -3,11 +3,11 @@ mod tests_round7 {
     use crate::apfs::force_remove_all;
     use crate::diff::diff_snapshot_opts_with_vault;
     use crate::error::ERR_EINVAL;
-    use crate::meta::encode_summary;
+    use crate::meta::{encode_summary, SnapshotOrigin, PIN_CONTAINS_DELETED};
     use crate::restore::{
         restore_snapshot_opts_with_vault, restore_snapshot_paths_with_vault,
     };
-    use crate::rolling::{create_snapshot_rolling_with_vault, PRE_DELETE_LABEL};
+    use crate::rolling::create_snapshot_rolling_with_vault;
     use crate::snapshot::{
         create_snapshot_fast_dedup_with_vault, create_snapshot_opts_with_vault,
         list_snapshots_with_vault,
@@ -124,7 +124,7 @@ mod tests_round7 {
             "manual label must stay intact"
         );
 
-        let mut promoted_ids = Vec::new();
+        let mut pinned_records = Vec::new();
         for i in 0..15u32 {
             let victim = ws.join(format!("victim_{:02}.txt", i));
             fs::write(&victim, format!("payload-{}", i)).unwrap();
@@ -135,16 +135,22 @@ mod tests_round7 {
             fs::write(ws.join("live.txt"), format!("live-after-{}", i)).unwrap();
             let mixed = create_snapshot_rolling_with_vault(&ws, Some(&vault), "auto:pro:fsevents").unwrap();
             assert!(!mixed.skipped);
-            let pid = mixed.promoted_pre_delete_id.expect("mixed delete+modify must promote prior auto latest");
+            let pid = mixed.promoted_pre_delete_id.expect("mixed delete+modify must pin prior auto latest");
             assert_eq!(pid, base.meta.id);
-            promoted_ids.push(pid);
+            pinned_records.push((pid, base.meta.label.clone(), base.meta.summary.clone(), base.meta.origin));
         }
 
         let snaps = list_snapshots_with_vault(&ws, Some(&vault)).unwrap();
-        let pre_deletes: Vec<_> = snaps.iter().filter(|m| m.label == PRE_DELETE_LABEL).collect();
-        assert_eq!(pre_deletes.len(), 10, "pre-delete pool must keep latest 10 regardless of auto cap 5: {}", pre_deletes.len());
-        let latest_pre_id = &promoted_ids[14];
-        assert!(pre_deletes.iter().any(|m| &m.id == latest_pre_id));
+        let pinned_snaps: Vec<_> = snaps
+            .iter()
+            .filter(|m| m.retention_pin.as_deref() == Some(PIN_CONTAINS_DELETED))
+            .collect();
+        assert_eq!(pinned_snaps.len(), 10, "contains_deleted pin pool must keep latest 10 regardless of auto cap 5: {}", pinned_snaps.len());
+        let (latest_pre_id, orig_label, orig_summary, orig_origin) = &pinned_records[14];
+        let latest_pin = pinned_snaps.iter().find(|m| &m.id == latest_pre_id).unwrap();
+        assert_eq!(&latest_pin.label, orig_label, "pinned snapshot label must stay immutable");
+        assert_eq!(&latest_pin.summary, orig_summary, "pinned snapshot summary must stay immutable");
+        assert_eq!(&latest_pin.origin, orig_origin, "pinned snapshot origin must stay immutable");
 
         let restored = restore_snapshot_paths_with_vault(&ws, Some(&vault), latest_pre_id, false, &["victim_14.txt".into()]).unwrap();
         assert_eq!(restored.restored_paths, 1);
@@ -283,13 +289,17 @@ mod tests_round7 {
         let mixed = create_snapshot_rolling_with_vault(&ws, Some(&vault), "auto:pro:fsevents").unwrap();
         let pid = mixed.promoted_pre_delete_id.unwrap();
         let snaps = list_snapshots_with_vault(&ws, Some(&vault)).unwrap();
-        let promoted = snaps.iter().find(|m| m.id == pid).unwrap();
-        assert_eq!(promoted.summary.as_deref(), Some("H:foo|bar.txt|1"));
+        let pinned = snaps.iter().find(|m| m.id == pid).unwrap();
+        assert_eq!(pinned.label, "auto:pro:init");
+        assert_eq!(pinned.origin, SnapshotOrigin::Initial);
+        assert_eq!(pinned.summary, s0.summary);
+        assert_eq!(pinned.retention_pin.as_deref(), Some(PIN_CONTAINS_DELETED));
+        assert_eq!(mixed.meta.summary.as_deref(), Some("D:foo|bar.txt|1;M:main.rs|1"));
 
         let (_, dedup_same_as_latest) = create_snapshot_fast_dedup_with_vault(&ws, Some(&vault), "auto:pre-restore").unwrap();
         assert!(dedup_same_as_latest, "pre-restore identical to latest primary must dedup");
 
-        for k in 0..5u32 {
+        for k in 0..12u32 {
             fs::write(ws.join("main.rs"), format!("pre-val-{}", k)).unwrap();
             let (m1, d1) = create_snapshot_fast_dedup_with_vault(&ws, Some(&vault), "auto:pre-restore").unwrap();
             assert!(!d1);
@@ -301,6 +311,6 @@ mod tests_round7 {
             .into_iter()
             .filter(|m| m.label == "auto:pre-restore")
             .count();
-        assert_eq!(pre_count, 3, "MAX_PRE_RESTORE_SNAPS must cap at 3");
+        assert_eq!(pre_count, 10, "MAX_PRE_RESTORE_SNAPS must cap at 10");
     }
 }
