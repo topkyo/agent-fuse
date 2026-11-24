@@ -214,6 +214,16 @@ unsigned int afuse_current_euid(void) {
     return (unsigned int)geteuid();
 }
 
+int afuse_pgid_alive(int pgid) {
+    if (pgid <= 1) {
+        return 0;
+    }
+    if (kill(-(pid_t)pgid, 0) == 0) {
+        return 1;
+    }
+    return errno == EPERM ? 1 : 0;
+}
+
 void afuse_freeze_kill_reap_pgid(int pgid) {
     if (pgid <= 1) {
         return;

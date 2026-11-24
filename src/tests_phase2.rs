@@ -334,4 +334,66 @@ mod tests_phase2 {
         assert_eq!(http_err.code, ERR_EINVAL);
         assert!(!staged.exists());
     }
+
+    #[test]
+    fn fb2_2b_git_critical_zero_truncation_trips_guard_and_restores() {
+        let sb = ScopedDir::new("guard-git-trunc");
+        let ws = sb.0.join("ws");
+        let vault = sb.0.join("vault");
+        fs::create_dir_all(ws.join(".git/refs/heads")).unwrap();
+        fs::create_dir_all(ws.join("src")).unwrap();
+        let head_orig = b"ref: refs/heads/main\n";
+        let cfg_orig = b"[core]\n\tbare = false\n";
+        let idx_orig = b"DIRC\x00\x00\x00\x02fake-index-payload";
+        fs::write(ws.join(".git/HEAD"), head_orig).unwrap();
+        fs::write(ws.join(".git/config"), cfg_orig).unwrap();
+        fs::write(ws.join(".git/index"), idx_orig).unwrap();
+        fs::write(ws.join("src/main.rs"), b"fn main() {}\n").unwrap();
+
+        let cfg = GuardConfig { max_delete: 2, max_write_mb: 512, poll_ms: 10, auto_rollback: true };
+        let cmd = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            ": > .git/HEAD && : > .git/config && : > .git/index".to_string(),
+        ];
+        let rep = run_guarded_command_with_vault(&ws, Some(&vault), &cfg, &cmd).unwrap();
+        assert!(rep.tripped, "0-byte truncation of .git critical files must trip guard");
+        assert_eq!(rep.exit_code, EXIT_FUSE_TRIPPED);
+        assert!(rep.auto_restored);
+        assert_eq!(fs::read(ws.join(".git/HEAD")).unwrap(), head_orig);
+        assert_eq!(fs::read(ws.join(".git/config")).unwrap(), cfg_orig);
+        assert_eq!(fs::read(ws.join(".git/index")).unwrap(), idx_orig);
+    }
+
+    #[test]
+    fn fb2_3_grandchild_surviving_after_lead_exit_is_guarded_and_killed() {
+        let sb = ScopedDir::new("guard-grandchild");
+        let ws = sb.0.join("ws");
+        let vault = sb.0.join("vault");
+        let pid_file = sb.0.join("grandchild.pid");
+        fs::create_dir_all(&ws).unwrap();
+        for i in 1..=8 {
+            fs::write(ws.join(format!("f_{}.txt", i)), format!("keep-{}\n", i)).unwrap();
+        }
+
+        let cfg = GuardConfig { max_delete: 3, max_write_mb: 512, poll_ms: 10, auto_rollback: true };
+        let script = format!(
+            "(echo $$ > '{}'; sleep 0.15; rm -f f_1.txt f_2.txt f_3.txt f_4.txt f_5.txt f_6.txt; sleep 5) </dev/null >/dev/null 2>&1 & exit 0",
+            pid_file.display()
+        );
+        let cmd = vec!["/bin/sh".to_string(), "-c".to_string(), script];
+        let rep = run_guarded_command_with_vault(&ws, Some(&vault), &cfg, &cmd).unwrap();
+        assert!(rep.tripped, "delayed grandchild deletion after lead exit must trip guard");
+        assert_eq!(rep.exit_code, EXIT_FUSE_TRIPPED);
+        assert!(rep.auto_restored);
+        for i in 1..=8 {
+            assert_eq!(fs::read_to_string(ws.join(format!("f_{}.txt", i))).unwrap(), format!("keep-{}\n", i));
+        }
+        if let Ok(raw_pid) = fs::read_to_string(&pid_file) {
+            if let Ok(gpid) = raw_pid.trim().parse::<i32>() {
+                let alive = Command::new("/bin/kill").args(["-0", &gpid.to_string()]).status().map(|s| s.success()).unwrap_or(false);
+                assert!(!alive, "grandchild pid {} must be reaped after fuse trip", gpid);
+            }
+        }
+    }
 }

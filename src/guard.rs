@@ -1,6 +1,6 @@
 use crate::apfs::{
-    freeze_kill_reap_pgid, fsgetpath, lstat_inode_mode, spawn_in_new_pgroup, statfs_info,
-    try_wait_pid,
+    freeze_kill_reap_pgid, fsgetpath, lstat_inode_mode, pgid_alive, spawn_in_new_pgroup,
+    statfs_info, try_wait_pid,
 };
 use crate::error::{AfuseError, ERR_EINVAL, EXIT_FUSE_TRIPPED};
 use crate::snapshot::{create_snapshot_opts_with_vault, restore_snapshot_with_vault};
@@ -139,8 +139,12 @@ fn collect_baseline_track(ws: &Path, fsid: (i32, i32)) -> BaselineTrack {
                 let mut git_paths = Vec::new();
                 collect_git_critical_paths(&p, &mut git_paths);
                 for gp in git_paths {
-                    let gino = fs::symlink_metadata(&gp).map(|m| m.ino()).unwrap_or(0);
-                    out.paths.push((gp, gino));
+                    if let Ok(gm) = fs::symlink_metadata(&gp) {
+                        out.paths.push((gp.clone(), gm.ino()));
+                        if gm.file_type().is_file() && gm.len() > 0 {
+                            out.nonempty_files.push(gp);
+                        }
+                    }
                 }
                 continue;
             }
@@ -254,6 +258,8 @@ pub fn run_guarded_command_with_vault(
     let poll_dur = Duration::from_millis(cfg.poll_ms.max(5));
     let mut tripped = false;
     let mut trip_reason: Option<String> = None;
+    let mut lead_exited = false;
+    let mut lead_code: i32 = 0;
     let exit_code: i32;
 
     loop {
@@ -283,8 +289,15 @@ pub fn run_guarded_command_with_vault(
             }
         }
 
-        let (wrc, exited, code) = try_wait_pid(child_pid);
-        if wrc != 0 || exited != 0 {
+        if !lead_exited {
+            let (wrc, exited, code) = try_wait_pid(child_pid);
+            if wrc != 0 || exited != 0 {
+                lead_exited = true;
+                lead_code = code;
+            }
+        }
+
+        if lead_exited && !pgid_alive(child_pid) {
             if let Some((missing, truncated)) = check_destruction_threshold(&track, threshold) {
                 freeze_kill_reap_pgid(child_pid);
                 tripped = true;
@@ -293,8 +306,19 @@ pub fn run_guarded_command_with_vault(
                     missing, truncated, threshold
                 ));
                 exit_code = EXIT_FUSE_TRIPPED;
+            } else if max_write_bytes > 0
+                && collect_workspace_logical_bytes(&ws, is_single).saturating_sub(track.baseline_bytes) >= max_write_bytes
+            {
+                let consumed = collect_workspace_logical_bytes(&ws, is_single).saturating_sub(track.baseline_bytes);
+                freeze_kill_reap_pgid(child_pid);
+                tripped = true;
+                trip_reason = Some(format!(
+                    "disk_write_spike_bytes={} exceeded max_write_mb={} before exit",
+                    consumed, cfg.max_write_mb
+                ));
+                exit_code = EXIT_FUSE_TRIPPED;
             } else {
-                exit_code = code;
+                exit_code = lead_code;
             }
             break;
         }

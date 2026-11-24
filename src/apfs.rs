@@ -31,6 +31,7 @@ extern "C" {
     fn afuse_can_write(path: *const i8) -> i32;
     fn afuse_can_read_write(path: *const i8) -> i32;
     fn afuse_current_euid() -> u32;
+    fn afuse_pgid_alive(pgid: i32) -> i32;
     fn afuse_freeze_kill_reap_pgid(pgid: i32);
 }
 
@@ -262,6 +263,10 @@ pub(crate) fn try_wait_pid(pid: i32) -> (i32, i32, i32) {
     let mut code: i32 = 0;
     let wrc = unsafe { afuse_try_wait_pid(pid, &mut exited, &mut code) };
     (wrc, exited, code)
+}
+
+pub(crate) fn pgid_alive(pgid: i32) -> bool {
+    unsafe { afuse_pgid_alive(pgid) != 0 }
 }
 
 pub(crate) fn freeze_kill_reap_pgid(pgid: i32) {
