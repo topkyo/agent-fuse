@@ -9,6 +9,7 @@ pub const ERR_EINVAL: i32 = 22;
 pub const ERR_EWOULDBLOCK: i32 = 35;
 pub const ERR_ENOTSUP: i32 = 45;
 pub const ERR_USAGE: i32 = 64;
+pub const ERR_ESTALE: i32 = 70;
 pub const EXIT_FUSE_TRIPPED: i32 = 99;
 
 #[derive(Debug, Clone)]

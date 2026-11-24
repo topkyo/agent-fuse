@@ -2,7 +2,7 @@ use crate::apfs::{
     can_write_path, current_euid, force_remove_all, fsgetpath, lstat_inode_mode, real_home_dir,
     statfs_info,
 };
-use crate::error::{AfuseError, ERR_EACCES, ERR_EPERM};
+use crate::error::{AfuseError, ERR_EACCES, ERR_ENOENT, ERR_EPERM, ERR_ESTALE};
 use crate::manifest::SnapshotMeta;
 use crate::snapshot::list_snapshots_unlocked;
 use crate::trash_ledger::{
@@ -140,6 +140,7 @@ fn purge_candidate_inodes(
     let mut purged_any = false;
     let mut saw_tcc_denied = false;
     let mut purged_inos = BTreeSet::new();
+    let mut gone_inos = BTreeSet::new();
 
     for &cand_ino in cands {
         if live_inodes.contains(&cand_ino) { continue; }
@@ -147,6 +148,10 @@ fn purge_candidate_inodes(
             Ok(p) => p,
             Err(e) if e.code == ERR_EPERM || e.code == ERR_EACCES => {
                 saw_tcc_denied = true;
+                continue;
+            }
+            Err(e) if e.code == ERR_ENOENT || e.code == ERR_ESTALE => {
+                gone_inos.insert(cand_ino);
                 continue;
             }
             Err(_) => continue,
@@ -188,14 +193,16 @@ fn purge_candidate_inodes(
         let stale_probe: BTreeSet<u64> = probe_inos
             .iter()
             .copied()
-            .filter(|ino| !live_inodes.contains(ino) && !purged_inos.contains(ino))
+            .filter(|ino| !live_inodes.contains(ino) && !purged_inos.contains(ino) && !gone_inos.contains(ino))
             .collect();
         if probe_trash_roots_tcc(&canon_ws, home.as_deref(), &trash_roots, &stale_probe) {
             saw_tcc_denied = true;
         }
     }
 
-    retire_and_gc_ledger(ws_vault, &live_entries, &purged_inos, fsid);
+    let mut retired_inos = purged_inos;
+    retired_inos.extend(gone_inos);
+    retire_and_gc_ledger(ws_vault, &live_entries, &retired_inos, fsid);
     if saw_tcc_denied {
         TrashCleanupStatus::TccDenied
     } else if purged_any {

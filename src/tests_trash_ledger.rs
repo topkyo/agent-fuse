@@ -201,4 +201,39 @@ mod tests_trash_ledger {
         let ledger_after_purge = load_ledger(&wv);
         assert!(!ledger_after_purge.contains_key(&doc_ino), "purged inode must be retired from ledger");
     }
+
+    #[test]
+    fn ledger_7_manually_emptied_trash_under_tcc_eperm_returns_not_in_trash_and_retires_inode() {
+        let _lock = crate::tests::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_env, vault, trash, ws) = ScopedEnv::new("tcc-emptied");
+        fs::write(ws.join("note.md"), b"user-note-v1\n").unwrap();
+
+        let snap = create_snapshot_opts_with_vault(&ws, Some(&vault), "auto:pro:init", true).unwrap();
+        let note_ino = fs::symlink_metadata(ws.join("note.md")).unwrap().ino();
+        let trashed = trash.join("note.md");
+        fs::rename(ws.join("note.md"), &trashed).unwrap();
+
+        // Positive: file still sits inside unreadable Trash -> must report TccDenied
+        fs::set_permissions(&trash, fs::Permissions::from_mode(0o000)).unwrap();
+        let rep = restore_snapshot_paths_with_vault(&ws, Some(&vault), &snap.id, true, &["note.md".into()]).unwrap();
+        assert_eq!(rep.trash_cleanup, TrashCleanupStatus::TccDenied);
+        let still_denied = purge_workspace_trash_with_vault(&ws, Some(&vault)).unwrap();
+        assert_eq!(still_denied, TrashCleanupStatus::TccDenied);
+
+        // Negative: user manually empties Trash while FDA remains revoked (Trash stays 0000) -> must converge to NotInTrash
+        fs::set_permissions(&trash, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_file(&trashed).unwrap();
+        fs::set_permissions(&trash, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let after_empty = purge_workspace_trash_with_vault(&ws, Some(&vault)).unwrap();
+        assert_eq!(
+            after_empty,
+            TrashCleanupStatus::NotInTrash,
+            "emptied Trash must not stick on TccDenied when candidate inode is gone (ENOENT)"
+        );
+        let wv = ws_vault_path(&ws, &vault);
+        let ledger = load_ledger(&wv);
+        assert!(!ledger.contains_key(&note_ino), "physically destroyed inode must be retired from ledger");
+        fs::set_permissions(&trash, fs::Permissions::from_mode(0o700)).unwrap();
+    }
 }
