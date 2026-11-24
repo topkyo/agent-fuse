@@ -21,6 +21,15 @@ pub struct DiffReport {
     pub modified: Vec<String>,
     pub deleted: Vec<String>,
     pub renamed: Vec<RenamePair>,
+    pub snapshot_project_files: Option<u64>,
+    pub live_project_files: Option<u64>,
+}
+
+fn count_map_project_files(entries: &BTreeMap<String, String>) -> u64 {
+    entries
+        .iter()
+        .filter(|(k, v)| !v.starts_with("D:") && k.as_str() != ".git" && !k.starts_with(".git/"))
+        .count() as u64
 }
 
 pub(crate) struct FastDiffDetail {
@@ -150,6 +159,11 @@ pub(crate) fn diff_fast_unlocked(
         Vec::new()
     };
 
+    let snap_pf = if meta.project_files > 0 {
+        meta.project_files
+    } else {
+        count_map_project_files(&snap_entries)
+    };
     Ok(FastDiffDetail {
         report: DiffReport {
             snapshot_id: meta.id.clone(),
@@ -157,6 +171,8 @@ pub(crate) fn diff_fast_unlocked(
             modified,
             deleted,
             renamed,
+            snapshot_project_files: Some(snap_pf),
+            live_project_files: Some(live_project_files),
         },
         live_file_count,
         live_project_files,
@@ -253,11 +269,19 @@ pub fn diff_snapshot_opts_with_vault(
         Vec::new()
     };
 
+    let snap_pf = if meta.project_files > 0 {
+        meta.project_files
+    } else {
+        count_map_project_files(&snap_map)
+    };
+    let live_pf = count_map_project_files(&live_map);
     Ok(DiffReport {
         snapshot_id: meta.id,
         added,
         modified,
         deleted,
         renamed,
+        snapshot_project_files: Some(snap_pf),
+        live_project_files: Some(live_pf),
     })
 }

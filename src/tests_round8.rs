@@ -260,4 +260,57 @@ mod tests_round8 {
         let after_zero = list_snapshots_with_vault(&ws, Some(&vault)).unwrap();
         assert!(after_zero.is_empty(), "prune --keep 0 must still wipe entire vault cleanly");
     }
+
+    #[test]
+    fn high_risk_delete_hold_and_diff_project_file_counts() {
+        let sb = R8ScopedDir::new("highrisk-hold");
+        let vault = sb.0.join("vault");
+        let ws_big = sb.0.join("ws-big");
+        let ws_small = sb.0.join("ws-small");
+        let ws_refact = sb.0.join("ws-refact");
+        for d in [&vault, &ws_big, &ws_small, &ws_refact] {
+            fs::create_dir_all(d).unwrap();
+        }
+
+        for i in 0..30 {
+            fs::write(ws_big.join(format!("f{:02}.txt", i)), format!("body-{}", i)).unwrap();
+        }
+        let b0 = create_snapshot_opts_with_vault(&ws_big, Some(&vault), "auto:pro:init", true).unwrap();
+        for i in 0..25 {
+            fs::remove_file(ws_big.join(format!("f{:02}.txt", i))).unwrap();
+        }
+        fs::write(ws_big.join("agent.log"), b"oops log\n").unwrap();
+        let d_big = diff_snapshot_opts_with_vault(&ws_big, Some(&vault), "latest", true).unwrap();
+        assert_eq!(d_big.snapshot_project_files, Some(30));
+        assert_eq!(d_big.live_project_files, Some(6));
+        assert_eq!(d_big.deleted.len(), 25);
+        let r_big = create_snapshot_rolling_with_vault(&ws_big, Some(&vault), "auto:pro:fsevents").unwrap();
+        assert!(r_big.skipped && r_big.reason == Some("high_risk_delete_hold"));
+        assert_eq!(r_big.meta.id, b0.id);
+        let b0_after = list_snapshots_with_vault(&ws_big, Some(&vault)).unwrap();
+        assert_eq!(b0_after.len(), 1);
+        assert_eq!(b0_after[0].retention_pin.as_deref(), Some(PIN_CONTAINS_DELETED));
+
+        for i in 0..12 {
+            fs::write(ws_small.join(format!("s{:02}.txt", i)), format!("sm-{}", i)).unwrap();
+        }
+        let _ = create_snapshot_opts_with_vault(&ws_small, Some(&vault), "auto:pro:init", true).unwrap();
+        for i in 0..10 {
+            fs::remove_file(ws_small.join(format!("s{:02}.txt", i))).unwrap();
+        }
+        fs::write(ws_small.join("s11.txt"), b"edited").unwrap();
+        let r_small = create_snapshot_rolling_with_vault(&ws_small, Some(&vault), "auto:pro:fsevents").unwrap();
+        assert!(r_small.skipped && r_small.reason == Some("high_risk_delete_hold"));
+
+        for i in 0..25 {
+            fs::write(ws_refact.join(format!("old_{:02}.rs", i)), format!("old-body-{}", i)).unwrap();
+        }
+        let _ = create_snapshot_opts_with_vault(&ws_refact, Some(&vault), "auto:pro:init", true).unwrap();
+        for i in 0..25 {
+            fs::remove_file(ws_refact.join(format!("old_{:02}.rs", i))).unwrap();
+            fs::write(ws_refact.join(format!("new_{:02}.rs", i)), format!("rewritten-body-longer-{}", i)).unwrap();
+        }
+        let r_ref = create_snapshot_rolling_with_vault(&ws_refact, Some(&vault), "auto:pro:fsevents").unwrap();
+        assert!(!r_ref.skipped, "refactor replacement (25 del + 25 add) must not trigger high_risk_delete_hold");
+    }
 }

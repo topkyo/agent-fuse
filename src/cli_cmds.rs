@@ -294,8 +294,9 @@ pub(crate) fn cmd_diff(workspace: &Path, rest: &[String], mut json: bool) {
                     .collect::<Vec<_>>()
                     .join(",");
                 println!(
-                    "{{\"ok\":true,\"snapshot_id\":\"{}\",\"added\":[{}],\"modified\":[{}],\"deleted\":[{}],\"renamed\":[{}]}}",
-                    json_escape(&d.snapshot_id), fmt_vec(&d.added), fmt_vec(&d.modified), fmt_vec(&d.deleted), fmt_ren
+                    "{{\"ok\":true,\"snapshot_id\":\"{}\",\"added\":[{}],\"modified\":[{}],\"deleted\":[{}],\"renamed\":[{}],\"snapshot_project_files\":{},\"live_project_files\":{}}}",
+                    json_escape(&d.snapshot_id), fmt_vec(&d.added), fmt_vec(&d.modified), fmt_vec(&d.deleted), fmt_ren,
+                    d.snapshot_project_files.unwrap_or(0), d.live_project_files.unwrap_or(0)
                 );
             } else {
                 println!(

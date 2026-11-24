@@ -31,6 +31,22 @@ fn is_git_ref_change(rel: &str) -> bool {
     rel == ".git/HEAD" || (rel.starts_with(".git/refs/") && !rel.ends_with(".lock"))
 }
 
+pub(crate) fn is_high_risk_delete(del_n: usize, add_n: usize, base_n: u64, live_n: u64) -> bool {
+    if del_n == 0 {
+        return false;
+    }
+    if live_n > 0 && add_n >= 10 && del_n.saturating_sub(add_n) < 5.max(del_n / 3) {
+        return false;
+    }
+    if del_n >= 20 {
+        return true;
+    }
+    if base_n >= 5 && del_n >= 5 && (del_n as u64).saturating_mul(2) >= base_n {
+        return true;
+    }
+    base_n >= 2 && live_n == 0 && del_n >= 2
+}
+
 pub(crate) fn is_delete_pinned(m: &SnapshotMeta) -> bool {
     m.retention_pin.as_deref() == Some(PIN_CONTAINS_DELETED) || m.label == PRE_DELETE_LABEL
 }
@@ -209,6 +225,22 @@ pub fn create_snapshot_rolling_with_vault(
             skipped: true,
             reason: Some("pure_delete_hold"),
             promoted_pre_delete_id: None,
+        });
+    }
+
+    let base_n = detail.report.snapshot_project_files.unwrap_or(latest.project_files);
+    if label.starts_with("auto:")
+        && label != "auto:pre-restore"
+        && is_high_risk_delete(proj_deleted.len(), proj_added.len(), base_n, detail.live_project_files)
+    {
+        let promoted_id = pin_latest_contains_deleted_unlocked(&ws_vault, latest)?;
+        record_live_target_inode_if_new(&ws, TargetKind::Directory, &ws_vault);
+        return Ok(RollingSnapReport {
+            meta: latest.clone(),
+            deduplicated: true,
+            skipped: true,
+            reason: Some("high_risk_delete_hold"),
+            promoted_pre_delete_id: promoted_id,
         });
     }
 
