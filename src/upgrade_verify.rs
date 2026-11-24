@@ -347,7 +347,9 @@ pub fn validate_release_asset_url(url: &str) -> Result<(), AfuseError> {
                 ));
             }
         }
-        "objects.githubusercontent.com" | "release-assets.githubusercontent.com" => {}
+        "objects.githubusercontent.com"
+        | "release-assets.githubusercontent.com"
+        | "github-releases.githubusercontent.com" => {}
         _ => {
             return Err(AfuseError::new(ERR_EINVAL, format!("untrusted release asset host: {}", host)));
         }

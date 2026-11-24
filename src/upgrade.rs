@@ -95,9 +95,25 @@ pub fn check_for_updates() -> Result<UpgradeCheckReport, AfuseError> {
     }
 }
 
-fn fetch_asset_to_file(source: &str, dest: &Path) -> Result<(), AfuseError> {
-    let local = source.strip_prefix("file://").unwrap_or(source);
-    if !source.starts_with("http://") && !source.starts_with("https://") {
+pub(crate) fn validate_effective_download_url(effective_url: &str, dest: &Path) -> Result<(), AfuseError> {
+    let trimmed = effective_url.trim();
+    if trimmed.is_empty() {
+        let _ = fs::remove_file(dest);
+        return Err(AfuseError::new(ERR_EINVAL, "missing effective download URL"));
+    }
+    if let Err(e) = validate_release_asset_url(trimmed) {
+        let _ = fs::remove_file(dest);
+        return Err(AfuseError::new(
+            ERR_EINVAL,
+            format!("untrusted post-redirect download URL '{}': {}", trimmed, e.message),
+        ));
+    }
+    Ok(())
+}
+
+fn fetch_asset_to_file(source: &str, dest: &Path, allow_local: bool) -> Result<(), AfuseError> {
+    if allow_local {
+        let local = source.strip_prefix("file://").unwrap_or(source);
         fs::copy(local, dest).map_err(|e| {
             AfuseError::new(e.raw_os_error().unwrap_or(1), format!("failed to copy archive asset: {}", e))
         })?;
@@ -105,16 +121,21 @@ fn fetch_asset_to_file(source: &str, dest: &Path) -> Result<(), AfuseError> {
     }
     validate_release_asset_url(source)?;
     let out = Command::new("/usr/bin/curl")
-        .args(["-fsSL", "--proto", "=https", "--proto-redir", "=https", "--max-time", "30", "-o"])
+        .args([
+            "-fsSL", "--proto", "=https", "--proto-redir", "=https",
+            "--max-time", "30", "--max-filesize", "26214400",
+            "-w", "%{url_effective}", "-o",
+        ])
         .arg(dest)
         .arg(source)
         .output()
         .map_err(|e| AfuseError::new(1, format!("failed to invoke curl: {}", e)))?;
     if !out.status.success() {
+        let _ = fs::remove_file(dest);
         let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
         return Err(AfuseError::new(1, format!("asset download failed: {}", msg)));
     }
-    Ok(())
+    validate_effective_download_url(&String::from_utf8_lossy(&out.stdout), dest)
 }
 
 fn sha256_file_hex(path: &Path) -> Result<String, AfuseError> {
@@ -237,6 +258,7 @@ pub fn perform_upgrade_on_exe(exe_path: &Path) -> Result<UpgradeApplyReport, Afu
         .filter(|s| !s.is_empty())
         .map(PathBuf::from);
 
+    let allow_local = override_dir.is_some();
     let (tarball_name, tarball_src, sums_src) = if let Some(dir) = override_dir {
         let tb = [DEFAULT_TARBALL_NAME, arch_name.as_str()]
             .into_iter()
@@ -288,8 +310,8 @@ pub fn perform_upgrade_on_exe(exe_path: &Path) -> Result<UpgradeApplyReport, Afu
 
     let tarball_path = stage_dir.join(&tarball_name);
     let sums_path = stage_dir.join("SHA256SUMS.txt");
-    fetch_asset_to_file(&tarball_src, &tarball_path)?;
-    fetch_asset_to_file(&sums_src, &sums_path)?;
+    fetch_asset_to_file(&tarball_src, &tarball_path, allow_local)?;
+    fetch_asset_to_file(&sums_src, &sums_path, allow_local)?;
 
     let sums_text = fs::read_to_string(&sums_path)
         .map_err(|e| AfuseError::new(1, format!("failed to read SHA256SUMS: {}", e)))?;

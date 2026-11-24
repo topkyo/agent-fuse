@@ -268,4 +268,70 @@ mod tests_phase2 {
         assert!(out.status.success());
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "afuse 0.9.0");
     }
+
+    #[test]
+    fn f1_and_o1_block_remote_file_url_bypass_and_untrusted_redirect_host() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _eg = TestEnvGuard::clean(&["AFUSE_RELEASE_JSON_URL", "AFUSE_UPGRADE_ARCHIVE_DIR"]);
+
+        let sb = ScopedDir::new("f1-o1-sec");
+        let bin_dir = sb.0.join("bin");
+        let evil_dir = sb.0.join("evil");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::create_dir_all(&evil_dir).unwrap();
+        let target_exe = bin_dir.join("afuse");
+        fs::write(&target_exe, b"ORIG_BIN").unwrap();
+        let marker = sb.0.join("pwned.marker");
+        let evil_bin = evil_dir.join("afuse");
+        fs::write(&evil_bin, format!("#!/bin/sh\necho PWN > \"{}\"\necho afuse 0.9.9\n", marker.display())).unwrap();
+        let tb = evil_dir.join("afuse-macos-universal.tar.gz");
+        assert!(Command::new("/usr/bin/tar").args(["-czf"]).arg(&tb).args(["-C"]).arg(&evil_dir).arg("afuse").status().unwrap().success());
+        let sha = sha256_hex(&fs::read(&tb).unwrap());
+        let sums = evil_dir.join("SHA256SUMS.txt");
+        fs::write(&sums, format!("{}  afuse-macos-universal.tar.gz\n", sha)).unwrap();
+
+        for (tb_url, sum_url) in [
+            (format!("file://{}", tb.display()), format!("file://{}", sums.display())),
+            (tb.to_string_lossy().into_owned(), sums.to_string_lossy().into_owned()),
+        ] {
+            let rel = sb.0.join("rel-evil.json");
+            let json = format!(
+                "{{\"tag_name\":\"v0.9.9\",\"html_url\":\"https://github.com/topkyo/agent-fuse/releases/tag/v0.9.9\",\"assets\":[{{\"name\":\"afuse-macos-universal.tar.gz\",\"browser_download_url\":\"{}\"}},{{\"name\":\"SHA256SUMS.txt\",\"browser_download_url\":\"{}\"}}]}}",
+                tb_url, sum_url
+            );
+            fs::write(&rel, json).unwrap();
+            env::set_var("AFUSE_RELEASE_JSON_URL", format!("file://{}", rel.display()));
+            let err = perform_upgrade_on_exe(&target_exe).unwrap_err();
+            assert_eq!(err.code, ERR_EINVAL);
+            assert!(!marker.exists(), "malicious payload must never execute");
+            assert_eq!(fs::read(&target_exe).unwrap(), b"ORIG_BIN");
+        }
+
+        let staged = sb.0.join("staged.tar.gz");
+        fs::write(&staged, b"valid").unwrap();
+        assert!(crate::upgrade::validate_effective_download_url(
+            "https://objects.githubusercontent.com/github-production-release-asset/1/a.tar.gz",
+            &staged
+        ).is_ok());
+        assert!(crate::upgrade::validate_effective_download_url(
+            "https://github-releases.githubusercontent.com/1/a.tar.gz",
+            &staged
+        ).is_ok());
+        assert!(staged.exists());
+
+        let redir_err = crate::upgrade::validate_effective_download_url(
+            "https://evil.example.com/a.tar.gz",
+            &staged
+        ).unwrap_err();
+        assert_eq!(redir_err.code, ERR_EINVAL);
+        assert!(!staged.exists(), "untrusted post-redirect download must delete staged file");
+
+        fs::write(&staged, b"downgraded").unwrap();
+        let http_err = crate::upgrade::validate_effective_download_url(
+            "http://objects.githubusercontent.com/a.tar.gz",
+            &staged
+        ).unwrap_err();
+        assert_eq!(http_err.code, ERR_EINVAL);
+        assert!(!staged.exists());
+    }
 }
