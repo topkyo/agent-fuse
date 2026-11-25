@@ -1,8 +1,9 @@
 //! Tree restoration helpers: recursive readonly permission guards, deep ignored
 //! subtree preservation (node_modules/target/.venv), and Unicode NFD path lookup.
 
-use crate::apfs::{force_remove_all, force_unlock, TMP_SEQ};
+use crate::apfs::{force_remove_all, force_unlock, MAX_WALK_DEPTH, TMP_SEQ};
 use crate::error::{AfuseError, ERR_EINVAL};
+pub(crate) use crate::fs_guard::HeteroStashGuard;
 pub use crate::fs_guard::{
     force_unlock_tree_recursive, lock_guard_single_dir, prepare_ancestors_writable,
     UnlockedDirsGuard,
@@ -117,6 +118,12 @@ fn collect_and_move_nested(
     guard: &mut UnlockedDirsGuard,
     moved: &mut Vec<PreservedSubtree>,
 ) -> Result<(), AfuseError> {
+    if depth >= MAX_WALK_DEPTH {
+        return Err(AfuseError::new(
+            ERR_EINVAL,
+            "directory nesting exceeded maximum depth limit",
+        ));
+    }
     let Ok(rd) = fs::read_dir(dir) else {
         return Ok(());
     };
@@ -250,12 +257,24 @@ pub fn top_level_nfd_key(name: &std::ffi::OsStr) -> String {
     to_nfd(&name.to_string_lossy())
 }
 
+fn is_regular_non_symlink_file(p: &Path) -> bool {
+    fs::symlink_metadata(p)
+        .map(|m| !m.file_type().is_symlink() && m.file_type().is_file())
+        .unwrap_or(false)
+}
+
 pub(crate) fn find_single_snap_file(ws: &Path, snap_tree: &Path) -> Option<PathBuf> {
     ws.file_name()
         .and_then(|n| resolve_disk_rel_path(snap_tree, Path::new(n)).ok().flatten())
         .map(|rel| snap_tree.join(rel))
-        .filter(|p| p.is_file())
-        .or_else(|| fs::read_dir(snap_tree).ok()?.flatten().map(|e| e.path()).find(|p| p.is_file()))
+        .filter(|p| is_regular_non_symlink_file(p))
+        .or_else(|| {
+            fs::read_dir(snap_tree)
+                .ok()?
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| is_regular_non_symlink_file(p))
+        })
 }
 
 pub(crate) fn workspace_differs_full(
@@ -314,41 +333,25 @@ pub(crate) fn selective_differs(
 }
 
 pub fn workspace_has_visible_files(ws: &Path) -> bool {
-    let mut stack = vec![ws.to_path_buf()];
-    while let Some(dir) = stack.pop() {
+    let mut stack = vec![(ws.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if depth >= MAX_WALK_DEPTH {
+            continue;
+        }
         let Ok(rd) = fs::read_dir(&dir) else { continue };
         for entry in rd.flatten() {
             if is_ignored_name(&entry.file_name().to_string_lossy()) { continue; }
             let p = entry.path();
             match fs::symlink_metadata(&p) {
-                Ok(m) if m.file_type().is_dir() => stack.push(p),
+                Ok(m) if !m.file_type().is_symlink() && m.file_type().is_dir() => {
+                    stack.push((p, depth + 1))
+                }
                 Ok(_) => return true,
                 Err(_) => {}
             }
         }
     }
     false
-}
-
-pub(crate) fn clear_heterogeneous_path_if_needed(p: &Path, expect_dir: bool) -> Result<bool, AfuseError> {
-    let Ok(m) = fs::symlink_metadata(p) else {
-        return Ok(false);
-    };
-    let ft = m.file_type();
-    let matches_kind = !ft.is_symlink() && if expect_dir { ft.is_dir() } else { ft.is_file() };
-    if matches_kind {
-        return Ok(false);
-    }
-    let mut guard = UnlockedDirsGuard::new();
-    if let Some(parent) = p.parent() {
-        if fs::symlink_metadata(parent).is_ok() {
-            let _ = guard.unlock_if_needed(parent);
-        }
-    }
-    let res = force_remove_all(p);
-    guard.restore_all();
-    res?;
-    Ok(true)
 }
 
 pub fn validate_rel_restore_path(raw: &str) -> Result<PathBuf, AfuseError> {

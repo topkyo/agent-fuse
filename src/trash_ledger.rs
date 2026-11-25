@@ -1,4 +1,4 @@
-use crate::apfs::{fsgetpath, lstat_inode_mode};
+use crate::apfs::{chmod_nofollow, fsgetpath, lstat_inode_mode};
 use crate::error::ERR_ENOENT;
 use crate::manifest::SnapshotMeta;
 use crate::snapshot::list_snapshots_unlocked;
@@ -163,11 +163,18 @@ fn write_ledger_atomic(ws_vault: &Path, ledger: &BTreeMap<u64, String>) {
     let dst = ws_vault.join(KNOWN_INODES_FILE);
     let tmp = ws_vault.join(format!("{}.tmp.{}", KNOWN_INODES_FILE, std::process::id()));
     let body = serialize_tsv_entries(ledger.iter().map(|(&ino, rel)| (ino, rel.as_str())));
-    let wrote = if fs::write(&tmp, &body).is_ok() && fs::rename(&tmp, &dst).is_ok() {
+    let wrote = if fs::write(&tmp, &body).is_ok()
+        && chmod_nofollow(&tmp, 0o600).is_ok()
+        && fs::rename(&tmp, &dst).is_ok()
+    {
         true
     } else {
         let _ = fs::remove_file(&tmp);
-        fs::write(&dst, body).is_ok()
+        let ok = fs::write(&dst, body).is_ok();
+        if ok {
+            let _ = chmod_nofollow(&dst, 0o600);
+        }
+        ok
     };
     if wrote {
         cleanup_legacy_inode_files(ws_vault);
@@ -187,7 +194,10 @@ pub(crate) fn merge_live_entries_into_ledger(ws_vault: &Path, live_entries: &[(u
 pub(crate) fn record_snapshot_inodes(ws: &Path, kind: TargetKind, snap_dir: &Path, ws_vault: &Path) {
     let live = collect_live_path_inodes(ws, kind);
     let snap_body = serialize_tsv_entries(live.iter().map(|(ino, rel)| (*ino, rel.as_str())));
-    let _ = fs::write(snap_dir.join("inode_map.tsv"), snap_body);
+    let map_path = snap_dir.join("inode_map.tsv");
+    if fs::write(&map_path, snap_body).is_ok() {
+        let _ = chmod_nofollow(&map_path, 0o600);
+    }
     merge_live_entries_into_ledger(ws_vault, &live);
 }
 

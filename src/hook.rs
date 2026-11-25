@@ -1,4 +1,4 @@
-use crate::apfs::{is_tty_stdin, real_home_dir, statfs_info};
+use crate::apfs::{chmod_nofollow, is_tty_stdin, real_home_dir, statfs_info};
 use crate::error::{AfuseError, ERR_EWOULDBLOCK};
 use crate::hook_json::{extract_bash_candidate_paths, is_supported_claude_tool};
 pub use crate::hook_json::{parse_claude_hook_json, ClaudeHookPayload};
@@ -19,14 +19,67 @@ const HOOK_MIN_AVAIL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const HOOK_DEFAULT_THROTTLE_MS: u128 = 5_000;
 const HOOK_MAX_AUTO_SNAPS: usize = 20;
 
+fn is_readonly_git_branch(args: &[&str]) -> bool {
+    let mut expect_pattern_val = false;
+    for &arg in args {
+        if expect_pattern_val {
+            expect_pattern_val = false;
+            continue;
+        }
+        if matches!(
+            arg,
+            "-a" | "--all"
+                | "-r"
+                | "--remotes"
+                | "-v"
+                | "-vv"
+                | "--verbose"
+                | "--list"
+                | "--show-current"
+                | "--no-color"
+                | "--color"
+                | "--merged"
+                | "--no-merged"
+                | "--contains"
+                | "--no-contains"
+                | "--points-at"
+                | "--abbrev"
+                | "--no-abbrev"
+        ) || arg.starts_with("--sort=")
+            || arg.starts_with("--format=")
+            || arg.starts_with("--color=")
+            || arg.starts_with("--contains=")
+            || arg.starts_with("--no-contains=")
+            || arg.starts_with("--merged=")
+            || arg.starts_with("--no-merged=")
+            || arg.starts_with("--points-at=")
+            || arg.starts_with("--abbrev=")
+        {
+            if matches!(arg, "--contains" | "--no-contains" | "--merged" | "--no-merged" | "--points-at") {
+                expect_pattern_val = true;
+            }
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+fn has_bundled_short_flags(arg: &str) -> bool {
+    arg.starts_with('-')
+        && !arg.starts_with("--")
+        && arg.len() > 2
+        && arg[1..].bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
 pub fn is_readonly_bash_command(cmd: &str) -> bool {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
         return true;
     }
     if trimmed.contains('|') || trimmed.contains(';') || trimmed.contains('&')
-        || trimmed.contains('\n') || trimmed.contains('`') || trimmed.contains("$(")
-        || trimmed.contains('>') || trimmed.contains('<')
+        || trimmed.contains('\n') || trimmed.contains('\r') || trimmed.contains('`')
+        || trimmed.contains("$(") || trimmed.contains('>') || trimmed.contains('<')
     {
         return false;
     }
@@ -37,21 +90,30 @@ pub fn is_readonly_bash_command(cmd: &str) -> bool {
         "ls" | "pwd" | "whoami" | "uname" | "cat" | "head" | "tail" | "wc" | "grep" | "which"
         | "type" | "stat" | "file" => true,
         "rg" => !rest.iter().any(|arg| {
-            *arg == "--pre" || arg.starts_with("--pre=")
-                || *arg == "--pre-glob" || arg.starts_with("--pre-glob=")
+            *arg == "--pre"
+                || arg.starts_with("--pre=")
+                || *arg == "--pre-glob"
+                || arg.starts_with("--pre-glob=")
         }),
         "git" => {
             let Some(&second) = rest.first() else { return true };
-            if !matches!(second, "status" | "diff" | "log" | "show" | "branch" | "rev-parse" | "remote") {
+            if second == "branch" {
+                return is_readonly_git_branch(&rest[1..]);
+            }
+            if !matches!(second, "status" | "diff" | "log" | "show" | "rev-parse" | "remote") {
                 return false;
             }
             !rest[1..].iter().any(|arg| {
-                matches!(
-                    *arg,
-                    "-d" | "-D" | "-m" | "-M" | "-c" | "-C" | "-f" | "-u" | "--force"
-                        | "--delete" | "--copy" | "--move" | "--set-upstream-to"
-                        | "--unset-upstream" | "--edit-description" | "--create-reflog" | "-o"
-                ) || arg.starts_with("--output")
+                has_bundled_short_flags(arg)
+                    || matches!(
+                        *arg,
+                        "-d" | "-D" | "-m" | "-M" | "-c" | "-C" | "-f" | "-u" | "--force"
+                            | "--delete" | "--copy" | "--move" | "--set-upstream-to"
+                            | "--unset-upstream" | "--edit-description" | "--create-reflog"
+                            | "-o" | "--ext-diff"
+                    )
+                    || arg.starts_with("-o")
+                    || arg.starts_with("--output")
                     || arg.starts_with("--set-upstream-to=")
                     || (second == "remote" && !matches!(*arg, "-v" | "--verbose"))
             })
@@ -159,8 +221,11 @@ pub fn execute_hook_auto_snap(
     let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
     let stamp_path = ws_vault.join("hook_last_snap.stamp");
     if throttle_ms > 0 {
-        if let Ok(last_ms) = fs::read_to_string(&stamp_path).ok().and_then(|s| s.trim().parse::<u128>().ok()).ok_or(()) {
-            if now_ms.saturating_sub(last_ms) < throttle_ms {
+        if let Some(last_ms) = fs::read_to_string(&stamp_path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u128>().ok())
+        {
+            if last_ms <= now_ms && now_ms.saturating_sub(last_ms) < throttle_ms {
                 return Ok(None);
             }
         }
@@ -174,7 +239,9 @@ pub fn execute_hook_auto_snap(
         format!("auto:hook:{}", label)
     };
     let (meta, _) = create_snapshot_fast_dedup_unlocked(&ws, &ws_vault, &clean_label)?;
-    let _ = fs::write(&stamp_path, format!("{}\n", now_ms));
+    if fs::write(&stamp_path, format!("{}\n", now_ms)).is_ok() {
+        let _ = chmod_nofollow(&stamp_path, 0o600);
+    }
     let _ = prune_unlocked(&ws_vault, HOOK_MAX_AUTO_SNAPS, Some("auto:hook:"), ORPHAN_MAX_AGE_SECS);
     Ok(Some(meta))
 }

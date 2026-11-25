@@ -1,4 +1,4 @@
-use crate::apfs::lstat_inode_mode;
+use crate::apfs::{chmod_nofollow, lstat_inode_mode, MAX_WALK_DEPTH};
 use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
 use crate::fs_guard::{clonefile_readable, TempPermGuard};
 pub(crate) use crate::meta::{read_meta, write_meta};
@@ -49,7 +49,10 @@ pub(crate) fn compute_fast_entries(target: &Path, kind: TargetKind) -> Result<(B
     }
     let mut entries: BTreeMap<String, String> = BTreeMap::new();
     let (mut files, mut bytes, mut proj_files) = (0u64, 0u64, 0u64);
-    fn walk(base: &Path, cur: &Path, in_git: bool, map: &mut BTreeMap<String, String>, files: &mut u64, bytes: &mut u64, proj_files: &mut u64) -> Result<(), AfuseError> {
+    fn walk(base: &Path, cur: &Path, depth: usize, in_git: bool, map: &mut BTreeMap<String, String>, files: &mut u64, bytes: &mut u64, proj_files: &mut u64) -> Result<(), AfuseError> {
+        if depth >= MAX_WALK_DEPTH {
+            return Err(AfuseError::new(ERR_EINVAL, "directory nesting exceeded maximum depth limit"));
+        }
         let _dir_guard = TempPermGuard::ensure(cur, 0o500);
         let rd = fs::read_dir(cur).map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), format!("read_dir failed on {}: {}", cur.display(), e)))?;
         for item in rd {
@@ -64,19 +67,19 @@ pub(crate) fn compute_fast_entries(target: &Path, kind: TargetKind) -> Result<(B
             if let Some(sig) = fast_entry_sig(&p, &meta)? { map.insert(rel, sig); }
             let child_in_git = in_git || name == ".git";
             if ft.is_dir() {
-                walk(base, &p, child_in_git, map, files, bytes, proj_files)?;
+                walk(base, &p, depth + 1, child_in_git, map, files, bytes, proj_files)?;
             } else if ft.is_symlink() {
-                *files += 1;
-                if !child_in_git { *proj_files += 1; }
+                *files = files.saturating_add(1);
+                if !child_in_git { *proj_files = proj_files.saturating_add(1); }
             } else if ft.is_file() {
-                *files += 1;
-                *bytes += meta.len();
-                if !child_in_git { *proj_files += 1; }
+                *files = files.saturating_add(1);
+                *bytes = bytes.saturating_add(meta.len());
+                if !child_in_git { *proj_files = proj_files.saturating_add(1); }
             }
         }
         Ok(())
     }
-    walk(target, target, false, &mut entries, &mut files, &mut bytes, &mut proj_files)?;
+    walk(target, target, 0, false, &mut entries, &mut files, &mut bytes, &mut proj_files)?;
     Ok((entries, files, bytes, proj_files))
 }
 
@@ -99,7 +102,10 @@ pub fn count_project_files(target: &Path, kind: TargetKind) -> u64 {
     if kind == TargetKind::SingleFile {
         return if target.is_file() { 1 } else { 0 };
     }
-    fn walk_proj(cur: &Path, count: &mut u64) {
+    fn walk_proj(cur: &Path, depth: usize, count: &mut u64) {
+        if depth >= MAX_WALK_DEPTH {
+            return;
+        }
         let _dir_guard = TempPermGuard::ensure(cur, 0o500);
         let Ok(rd) = fs::read_dir(cur) else { return };
         for item in rd.flatten() {
@@ -110,14 +116,14 @@ pub fn count_project_files(target: &Path, kind: TargetKind) -> u64 {
             let Ok(meta) = fs::symlink_metadata(item.path()) else { continue };
             let ft = meta.file_type();
             if ft.is_dir() {
-                walk_proj(&item.path(), count);
+                walk_proj(&item.path(), depth + 1, count);
             } else if ft.is_file() || ft.is_symlink() {
-                *count += 1;
+                *count = count.saturating_add(1);
             }
         }
     }
     let mut count = 0u64;
-    walk_proj(target, &mut count);
+    walk_proj(target, 0, &mut count);
     count
 }
 pub fn compute_tree_stats_fast(root: &Path) -> Result<(u64, u64), AfuseError> {
@@ -209,10 +215,17 @@ pub fn compute_tree_manifest(
     fn walk(
         base: &Path,
         cur: &Path,
+        depth: usize,
         map: &mut BTreeMap<String, String>,
         files: &mut u64,
         bytes: &mut u64,
     ) -> Result<(), AfuseError> {
+        if depth >= MAX_WALK_DEPTH {
+            return Err(AfuseError::new(
+                ERR_EINVAL,
+                "directory nesting exceeded maximum depth limit",
+            ));
+        }
         let _dir_guard = TempPermGuard::ensure(cur, 0o500);
         let mut children: Vec<(String, PathBuf)> = Vec::new();
         let rd = fs::read_dir(cur).map_err(|e| {
@@ -248,17 +261,17 @@ pub fn compute_tree_manifest(
 
             if ft.is_dir() {
                 map.insert(rel.clone(), format!("D:{:04o}", mode));
-                walk(base, &path, map, files, bytes)?;
+                walk(base, &path, depth + 1, map, files, bytes)?;
             } else if ft.is_symlink() {
-                *files += 1;
+                *files = files.saturating_add(1);
                 let target = fs::read_link(&path).map_err(|e| {
                     AfuseError::new(1, format!("read_link failed on {}: {}", path.display(), e))
                 })?;
                 let thash = sha256_hex(target.as_os_str().as_bytes());
                 map.insert(rel, format!("L:{}", thash));
             } else if ft.is_file() {
-                *files += 1;
-                *bytes += meta.len();
+                *files = files.saturating_add(1);
+                *bytes = bytes.saturating_add(meta.len());
                 let fhash = hash_file_streaming(&path)?;
                 map.insert(rel, format!("F:{:04o}:{}:{}", mode, meta.len(), fhash));
             }
@@ -270,6 +283,7 @@ pub fn compute_tree_manifest(
     walk(
         root,
         root,
+        0,
         &mut entries_map,
         &mut file_count,
         &mut logical_bytes,
@@ -284,7 +298,14 @@ pub fn compute_tree_manifest(
     Ok((overall.finalize_hex(), file_count, logical_bytes, entries_map))
 }
 
-fn collect_filtered_dirs(dir: &Path, filtered: &mut std::collections::HashSet<PathBuf>) -> bool {
+fn collect_filtered_dirs(
+    dir: &Path,
+    depth: usize,
+    filtered: &mut std::collections::HashSet<PathBuf>,
+) -> bool {
+    if depth >= MAX_WALK_DEPTH {
+        return false;
+    }
     let mut need = fs::symlink_metadata(dir)
         .map(|m| !m.file_type().is_symlink() && (m.permissions().mode() & 0o500) != 0o500)
         .unwrap_or(false);
@@ -302,7 +323,7 @@ fn collect_filtered_dirs(dir: &Path, filtered: &mut std::collections::HashSet<Pa
         let child = entry.path();
         if let Ok(m) = fs::symlink_metadata(&child) {
             let ft = m.file_type();
-            let mode = m.permissions().mode() & 0o7777;
+            let mode = m.permissions().mode() & 0o777;
             if !ft.is_file() && !ft.is_dir() && !ft.is_symlink() {
                 need = true;
                 continue;
@@ -312,7 +333,7 @@ fn collect_filtered_dirs(dir: &Path, filtered: &mut std::collections::HashSet<Pa
             {
                 need = true;
             }
-            if ft.is_dir() && name != ".git" && collect_filtered_dirs(&child, filtered) {
+            if ft.is_dir() && name != ".git" && collect_filtered_dirs(&child, depth + 1, filtered) {
                 need = true;
             }
         }
@@ -323,12 +344,22 @@ fn collect_filtered_dirs(dir: &Path, filtered: &mut std::collections::HashSet<Pa
     need
 }
 
-fn clone_filtered_inner(src_dir: &Path, dst_dir: &Path, filtered: &std::collections::HashSet<PathBuf>) -> Result<(), AfuseError> {
+fn clone_filtered_inner(
+    src_dir: &Path,
+    dst_dir: &Path,
+    depth: usize,
+    filtered: &std::collections::HashSet<PathBuf>,
+) -> Result<(), AfuseError> {
+    if depth >= MAX_WALK_DEPTH {
+        return Err(AfuseError::new(
+            ERR_EINVAL,
+            "directory nesting exceeded maximum depth limit",
+        ));
+    }
     fs::create_dir_all(dst_dir).map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), format!("create_dir_all failed on {}: {}", dst_dir.display(), e)))?;
     let (_, src_mode) = lstat_inode_mode(src_dir)?;
     let _src_guard = TempPermGuard::ensure(src_dir, 0o500);
-    // Keep u+rwx writable while cloning children into dst_dir; apply final mode afterward.
-    let _ = fs::set_permissions(dst_dir, fs::Permissions::from_mode((src_mode & 0o7777) | 0o700));
+    let _ = chmod_nofollow(dst_dir, (src_mode & 0o777) | 0o700);
     let rd = fs::read_dir(src_dir).map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), format!("read_dir failed on {}: {}", src_dir.display(), e)))?;
     for entry in rd {
         let entry = entry.map_err(|e| AfuseError::new(1, e.to_string()))?;
@@ -340,17 +371,17 @@ fn clone_filtered_inner(src_dir: &Path, dst_dir: &Path, filtered: &std::collecti
         let ft = meta.file_type();
         if !ft.is_file() && !ft.is_dir() && !ft.is_symlink() { continue; }
         if ft.is_dir() && name != ".git" && filtered.contains(&s_child) {
-            clone_filtered_inner(&s_child, &d_child, filtered)?;
+            clone_filtered_inner(&s_child, &d_child, depth + 1, filtered)?;
         } else {
             clonefile_readable(&s_child, &d_child)?;
         }
     }
-    let _ = fs::set_permissions(dst_dir, fs::Permissions::from_mode(src_mode & 0o7777));
+    let _ = chmod_nofollow(dst_dir, src_mode & 0o777);
     Ok(())
 }
 
 pub(crate) fn clone_filtered_tree(src_dir: &Path, dst_dir: &Path) -> Result<(), AfuseError> {
     let mut filtered = std::collections::HashSet::new();
-    let _ = collect_filtered_dirs(src_dir, &mut filtered);
-    clone_filtered_inner(src_dir, dst_dir, &filtered)
+    let _ = collect_filtered_dirs(src_dir, 0, &mut filtered);
+    clone_filtered_inner(src_dir, dst_dir, 0, &filtered)
 }

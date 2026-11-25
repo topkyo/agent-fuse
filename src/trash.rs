@@ -9,7 +9,7 @@ use crate::trash_ledger::{
     collect_all_candidates, collect_live_path_inodes, collect_selective_candidates,
     merge_live_entries_into_ledger, retire_and_gc_ledger,
 };
-use crate::unicode_norm::canonical_rel_key;
+use crate::unicode_norm::{canonical_rel_key, path_eq_casefold_nfd, path_starts_with_casefold_nfd};
 use crate::vault::{lock_vault, resolve_workspace_vault_recovery, TargetKind};
 use crate::vault_policy::VerifiedLiveTarget;
 use std::collections::BTreeSet;
@@ -37,21 +37,109 @@ impl TrashCleanupStatus {
     }
 }
 
+pub(crate) fn validate_custom_trash_dir(
+    raw: &str,
+    home: Option<&Path>,
+    ws: Option<&Path>,
+    euid: u32,
+) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let p = PathBuf::from(trimmed);
+    if !p.is_absolute() {
+        return None;
+    }
+    let sym = fs::symlink_metadata(&p).ok()?;
+    if sym.file_type().is_symlink() || !sym.file_type().is_dir() {
+        return None;
+    }
+    let canon = fs::canonicalize(&p).ok()?;
+    let mut forbidden_exact = vec![
+        PathBuf::from("/"),
+        PathBuf::from("/Users"),
+        PathBuf::from("/tmp"),
+        PathBuf::from("/private/tmp"),
+        PathBuf::from("/var/folders"),
+        PathBuf::from("/private/var/folders"),
+    ];
+    if let Some(h) = home {
+        forbidden_exact.push(h.to_path_buf());
+        if let Ok(ch) = fs::canonicalize(h) {
+            forbidden_exact.push(ch);
+        }
+    }
+    if forbidden_exact
+        .iter()
+        .any(|f| path_eq_casefold_nfd(&canon, f))
+    {
+        return None;
+    }
+    let forbidden_trees = [
+        Path::new("/System"),
+        Path::new("/Applications"),
+        Path::new("/Library"),
+        Path::new("/usr"),
+        Path::new("/bin"),
+        Path::new("/sbin"),
+        Path::new("/etc"),
+        Path::new("/private/etc"),
+    ];
+    if forbidden_trees
+        .iter()
+        .any(|f| path_starts_with_casefold_nfd(&canon, f))
+    {
+        return None;
+    }
+    if let Some(w) = ws {
+        let w_canon = fs::canonicalize(w).unwrap_or_else(|_| w.to_path_buf());
+        if path_eq_casefold_nfd(&canon, &w_canon)
+            || path_starts_with_casefold_nfd(&w_canon, &canon)
+            || path_starts_with_casefold_nfd(&canon, &w_canon)
+        {
+            return None;
+        }
+    }
+    let in_tmp_sandbox = [
+        Path::new("/tmp"),
+        Path::new("/private/tmp"),
+        Path::new("/var/folders"),
+        Path::new("/private/var/folders"),
+    ]
+    .iter()
+    .any(|root| path_starts_with_casefold_nfd(&canon, root) && !path_eq_casefold_nfd(&canon, root));
+    let leaf_has_trash = canon
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.to_ascii_lowercase().contains("trash"))
+        .unwrap_or(false);
+    let owned_trash_leaf = leaf_has_trash && sym.uid() == euid;
+    if !in_tmp_sandbox && !owned_trash_leaf {
+        return None;
+    }
+    Some(canon)
+}
+
 pub(crate) fn allowed_trash_roots_for(
     home: Option<&Path>,
     custom_env: Option<&str>,
     ws: Option<&Path>,
     euid: u32,
 ) -> Vec<PathBuf> {
-    let mut out = Vec::new();
+    let mut out: Vec<PathBuf> = Vec::new();
     let mut push_if_ok = |p: PathBuf| {
         let resolved = fs::canonicalize(&p).ok().or_else(|| fs::symlink_metadata(&p).ok().map(|_| p));
         if let Some(r) = resolved {
-            if !out.contains(&r) { out.push(r); }
+            if !out.iter().any(|x| path_eq_casefold_nfd(x, &r)) {
+                out.push(r);
+            }
         }
     };
-    if let Some(custom) = custom_env.map(str::trim).filter(|s| !s.is_empty()) {
-        push_if_ok(PathBuf::from(custom));
+    if let Some(custom) = custom_env {
+        if let Some(safe) = validate_custom_trash_dir(custom, home, ws, euid) {
+            push_if_ok(safe);
+        }
     }
     if let Some(h) = home {
         push_if_ok(h.join(".Trash"));
@@ -157,10 +245,16 @@ fn purge_candidate_inodes(
             Err(_) => continue,
         };
         let cand_path = normalize_parent_keep_leaf(&raw_path);
-        if cand_path == canon_ws || cand_path.starts_with(&canon_ws) || canon_ws.starts_with(&cand_path) {
+        if path_eq_casefold_nfd(&cand_path, &canon_ws)
+            || path_starts_with_casefold_nfd(&cand_path, &canon_ws)
+            || path_starts_with_casefold_nfd(&canon_ws, &cand_path)
+        {
             continue;
         }
-        let Some(matched_trash) = trash_roots.iter().find(|t| cand_path.starts_with(t) && &cand_path != *t) else {
+        let Some(matched_trash) = trash_roots
+            .iter()
+            .find(|t| path_starts_with_casefold_nfd(&cand_path, t) && !path_eq_casefold_nfd(&cand_path, t))
+        else {
             continue;
         };
         let actual_ino = match lstat_inode_mode(&cand_path) {

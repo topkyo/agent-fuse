@@ -1,15 +1,17 @@
-use crate::apfs::{can_write_path, real_home_dir, TMP_SEQ};
+use crate::apfs::{can_write_path, chmod_nofollow, random_hex_suffix, real_home_dir, TMP_SEQ};
 use crate::error::{AfuseError, ERR_EINVAL};
 use std::collections::BTreeSet;
 use std::env;
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) const HOOK_MARKER_BEGIN: &str = "# >>> afuse hook v1 >>>";
 pub(crate) const HOOK_MARKER_END: &str = "# <<< afuse hook <<<";
+
 #[derive(Debug, Clone)]
 pub struct UninstallAction {
     pub path: String,
@@ -19,6 +21,7 @@ pub struct UninstallAction {
     pub applied: bool,
     pub backup_path: Option<String>,
 }
+
 pub fn render_hook_snippet(target: &str) -> Result<String, AfuseError> {
     match target {
         "zsh" => Ok(format!(
@@ -27,6 +30,7 @@ pub fn render_hook_snippet(target: &str) -> Result<String, AfuseError> {
              \x20 if (( ! ${{+functions[_afuse_preexec]}} )); then\n\
              \x20   autoload -Uz add-zsh-hook\n\
              \x20   _afuse_preexec() {{\n\
+             \x20     emulate -L zsh\n\
              \x20     [[ \"${{AFUSE_HOOK_DISABLE:-0}}\" == \"1\" || \"${{AFUSE_GUARDED:-0}}\" == \"1\" ]] && return 0\n\
              \x20     [[ -n \"${{1:-}}\" && \"$1\" == *(claude|cursor-agent|codex|aider|gemini|opencode|goose)* ]] || return 0\n\
              \x20     local -a _af_w=(${{=1}})\n\
@@ -63,12 +67,16 @@ pub fn render_hook_snippet(target: &str) -> Result<String, AfuseError> {
              \x20     case \"$_af_cmd\" in\n\
              \x20       claude|cursor-agent|codex|aider|gemini|opencode|goose|claude-code)\n\
              \x20         local _af_bin=\"\"\n\
-             \x20         if command -v afuse >/dev/null 2>&1; then\n\
-             \x20           _af_bin=\"afuse\"\n\
+             \x20         if [[ -x \"/Applications/AgentFuse.app/Contents/MacOS/afuse\" ]]; then\n\
+             \x20           _af_bin=\"/Applications/AgentFuse.app/Contents/MacOS/afuse\"\n\
+             \x20         elif [[ -x \"/opt/homebrew/bin/afuse\" ]]; then\n\
+             \x20           _af_bin=\"/opt/homebrew/bin/afuse\"\n\
+             \x20         elif [[ -x \"/usr/local/bin/afuse\" ]]; then\n\
+             \x20           _af_bin=\"/usr/local/bin/afuse\"\n\
              \x20         elif [[ -x \"$HOME/.local/bin/afuse\" ]]; then\n\
              \x20           _af_bin=\"$HOME/.local/bin/afuse\"\n\
-             \x20         elif [[ -x \"/Applications/AgentFuse.app/Contents/MacOS/afuse\" ]]; then\n\
-             \x20           _af_bin=\"/Applications/AgentFuse.app/Contents/MacOS/afuse\"\n\
+             \x20         elif command -v afuse >/dev/null 2>&1; then\n\
+             \x20           _af_bin=\"afuse\"\n\
              \x20         fi\n\
              \x20         [[ -n \"$_af_bin\" ]] && command \"$_af_bin\" hook zsh --exec --cwd \"$PWD\" --tool \"$_af_cmd\" >/dev/null 2>&1 || true\n\
              \x20         ;;\n\
@@ -90,7 +98,7 @@ pub fn render_hook_snippet(target: &str) -> Result<String, AfuseError> {
              \x20       \"hooks\": [\n\
              \x20         {\n\
              \x20           \"type\": \"command\",\n\
-             \x20           \"command\": \"if command -v afuse >/dev/null 2>&1; then afuse hook claude --exec; elif [ -x \\\"$HOME/.local/bin/afuse\\\" ]; then \\\"$HOME/.local/bin/afuse\\\" hook claude --exec; elif [ -x \\\"/Applications/AgentFuse.app/Contents/MacOS/afuse\\\" ]; then \\\"/Applications/AgentFuse.app/Contents/MacOS/afuse\\\" hook claude --exec; fi || true\",\n\
+             \x20           \"command\": \"if [ -x \\\"/Applications/AgentFuse.app/Contents/MacOS/afuse\\\" ]; then \\\"/Applications/AgentFuse.app/Contents/MacOS/afuse\\\" hook claude --exec; elif [ -x \\\"/opt/homebrew/bin/afuse\\\" ]; then \\\"/opt/homebrew/bin/afuse\\\" hook claude --exec; elif [ -x \\\"/usr/local/bin/afuse\\\" ]; then \\\"/usr/local/bin/afuse\\\" hook claude --exec; elif [ -x \\\"$HOME/.local/bin/afuse\\\" ]; then \\\"$HOME/.local/bin/afuse\\\" hook claude --exec; elif command -v afuse >/dev/null 2>&1; then afuse hook claude --exec; fi || true\",\n\
              \x20           \"timeout\": 10\n\
              \x20         }\n\
              \x20       ]\n\
@@ -108,30 +116,87 @@ pub fn render_hook_snippet(target: &str) -> Result<String, AfuseError> {
         )),
     }
 }
+
+#[cfg(any(test, feature = "test-hooks"))]
+fn resolve_uninstall_home(home_override: Option<&Path>) -> Result<PathBuf, AfuseError> {
+    match home_override {
+        Some(h) => Ok(h.to_path_buf()),
+        None => {
+            if let Ok(custom) = env::var("AFUSE_UNINSTALL_HOME") {
+                if !custom.trim().is_empty() {
+                    return Ok(PathBuf::from(custom));
+                }
+            }
+            real_home_dir()
+        }
+    }
+}
+
+#[cfg(not(any(test, feature = "test-hooks")))]
+fn resolve_uninstall_home(home_override: Option<&Path>) -> Result<PathBuf, AfuseError> {
+    match home_override {
+        Some(h) => Ok(h.to_path_buf()),
+        None => real_home_dir(),
+    }
+}
+
+fn write_file_atomic_0600(target: &Path, content: &str) -> Result<(), AfuseError> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| AfuseError::new(ERR_EINVAL, "missing shell config parent directory"))?;
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = parent.join(format!(
+        ".afuse.rc.tmp.{}.{}.{}",
+        std::process::id(),
+        seq,
+        random_hex_suffix()
+    ));
+    let mut f = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))?;
+    if let Err(e) = f.write_all(content.as_bytes()).and_then(|_| f.sync_all()) {
+        drop(f);
+        let _ = fs::remove_file(&tmp);
+        return Err(AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()));
+    }
+    drop(f);
+    let _ = chmod_nofollow(&tmp, 0o600);
+    if let Err(e) = fs::rename(&tmp, target) {
+        let _ = fs::remove_file(&tmp);
+        return Err(AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()));
+    }
+    Ok(())
+}
+
 pub fn uninstall_hooks(
     apply: bool,
     home_override: Option<&Path>,
     workspace: &Path,
 ) -> Result<Vec<UninstallAction>, AfuseError> {
-    let home = match home_override {
-        Some(h) => h.to_path_buf(),
-        None => {
-            if let Ok(custom) = env::var("AFUSE_UNINSTALL_HOME") {
-                if !custom.trim().is_empty() {
-                    PathBuf::from(custom)
-                } else {
-                    real_home_dir()?
-                }
-            } else {
-                real_home_dir()?
-            }
-        }
-    };
+    let home = resolve_uninstall_home(home_override)?;
 
     let mut actions = Vec::new();
     let shell_files = [home.join(".zshrc"), home.join(".zprofile")];
 
     for sf in &shell_files {
+        let Ok(sf_meta) = fs::symlink_metadata(sf) else {
+            continue;
+        };
+        if sf_meta.file_type().is_symlink() {
+            if apply {
+                return Err(AfuseError::new(
+                    ERR_EINVAL,
+                    "refusing to rewrite symlinked shell config file",
+                ));
+            }
+            continue;
+        }
+        if !sf_meta.file_type().is_file() {
+            continue;
+        }
         let Ok(raw) = fs::read_to_string(sf) else {
             continue;
         };
@@ -176,6 +241,7 @@ pub fn uninstall_hooks(
                         format!("backup failed {}: {}", bak.display(), err),
                     )
                 })?;
+                let _ = chmod_nofollow(&bak, 0o600);
                 let mut kept: Vec<&str> = Vec::with_capacity(lines.len());
                 for (idx, line) in lines.iter().enumerate() {
                     if !blocks.iter().any(|(b, e)| idx >= *b && idx <= *e) {
@@ -186,12 +252,12 @@ pub fn uninstall_hooks(
                 if !updated.is_empty() && raw.ends_with('\n') {
                     updated.push('\n');
                 }
-                if let Err(err) = fs::write(sf, updated) {
-                    let _ = fs::set_permissions(&bak, fs::Permissions::from_mode(0o600));
+                if let Err(err) = write_file_atomic_0600(sf, &updated) {
+                    let _ = chmod_nofollow(&bak, 0o600);
                     let _ = fs::remove_file(&bak);
                     return Err(AfuseError::new(
-                        err.raw_os_error().unwrap_or(1),
-                        format!("write failed {}: {}", sf.display(), err),
+                        err.code,
+                        format!("write failed {}: {}", sf.display(), err.message),
                     ));
                 }
                 backup_path = Some(bak.to_string_lossy().into_owned());

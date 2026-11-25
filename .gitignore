@@ -3,5 +3,15 @@ build/
 *.app/
 *.dmg
 *.priv.hex
+*.pem
+*.p12
+*.p8
+*.key
+.env
+.env.*
+.dev.vars
+*.upload.txt
+*orders*.csv
+*token[-_]map*.csv
 license.key
 .DS_Store

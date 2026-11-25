@@ -1,4 +1,4 @@
-use crate::apfs::{clonefile_nofollow, real_home_dir, statfs_info, TMP_SEQ};
+use crate::apfs::{clonefile_nofollow, create_exclusive_dir_0700, force_remove_all, real_home_dir, statfs_info};
 use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
 use crate::manifest::json_escape;
 use crate::relocate::inspect_vault_orphans;
@@ -10,7 +10,6 @@ use crate::vault::{
 use std::env;
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -134,12 +133,7 @@ pub fn run_doctor_with_opts(
 
     if let Ok(probe_root) = resolved_vault {
         if fs::create_dir_all(&probe_root).is_ok() {
-            let probe_dir = probe_root.join(format!(
-                ".doctor-probe-{}-{}",
-                std::process::id(),
-                TMP_SEQ.fetch_add(1, Ordering::Relaxed)
-            ));
-            if fs::create_dir_all(&probe_dir).is_ok() {
+            if let Ok(probe_dir) = create_exclusive_dir_0700(&probe_root, ".doctor-probe") {
                 let src = probe_dir.join("probe.src");
                 let dst = probe_dir.join("probe.dst");
                 if fs::write(&src, b"afuse-doctor-probe").is_ok() {
@@ -149,7 +143,7 @@ pub fn run_doctor_with_opts(
                         clonefile_probe_us = (t0.elapsed().as_micros() as u64).max(1);
                     }
                 }
-                let _ = fs::remove_dir_all(&probe_dir);
+                let _ = force_remove_all(&probe_dir);
             }
         }
 

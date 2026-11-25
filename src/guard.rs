@@ -1,9 +1,10 @@
 use crate::apfs::{
     freeze_kill_reap_pgid, fsgetpath, lstat_inode_mode, pgid_alive, spawn_in_new_pgroup,
-    statfs_info, try_wait_pid,
+    statfs_info, try_wait_pid, MAX_WALK_DEPTH,
 };
 use crate::error::{AfuseError, ERR_EINVAL, EXIT_FUSE_TRIPPED};
 use crate::snapshot::{create_snapshot_opts_with_vault, restore_snapshot_with_vault};
+use crate::unicode_norm::path_starts_with_casefold_nfd;
 use crate::vault::{is_ignored_name, prepare_workspace_vault_with};
 use std::ffi::CString;
 use std::fs;
@@ -32,21 +33,33 @@ pub struct GuardReport {
     pub verified_sha256: Option<String>,
 }
 
+fn is_real_dir_non_symlink(p: &Path) -> bool {
+    fs::symlink_metadata(p)
+        .map(|m| !m.file_type().is_symlink() && m.file_type().is_dir())
+        .unwrap_or(false)
+}
+
 fn collect_git_critical_paths(git_dir: &Path, out: &mut Vec<PathBuf>) {
     out.push(git_dir.to_path_buf());
+    if !is_real_dir_non_symlink(git_dir) {
+        return;
+    }
     for sub in ["HEAD", "config", "index", "packed-refs"] {
         let p = git_dir.join(sub);
         if fs::symlink_metadata(&p).is_ok() {
             out.push(p);
         }
     }
-    fn walk_sub(cur: &Path, out: &mut Vec<PathBuf>) {
+    fn walk_sub(cur: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        if depth >= MAX_WALK_DEPTH || !is_real_dir_non_symlink(cur) {
+            return;
+        }
         let Ok(rd) = fs::read_dir(cur) else { return };
         for entry in rd.flatten() {
             let p = entry.path();
             out.push(p.clone());
-            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                walk_sub(&p, out);
+            if is_real_dir_non_symlink(&p) {
+                walk_sub(&p, depth + 1, out);
             }
         }
     }
@@ -54,18 +67,22 @@ fn collect_git_critical_paths(git_dir: &Path, out: &mut Vec<PathBuf>) {
         let d = git_dir.join(sub_dir);
         if fs::symlink_metadata(&d).is_ok() {
             out.push(d.clone());
-            walk_sub(&d, out);
+            if is_real_dir_non_symlink(&d) {
+                walk_sub(&d, 1, out);
+            }
         }
     }
     let objects_dir = git_dir.join("objects");
     if fs::symlink_metadata(&objects_dir).is_ok() {
         out.push(objects_dir.clone());
-        if let Ok(rd) = fs::read_dir(&objects_dir) {
-            for entry in rd.flatten() {
-                let p = entry.path();
-                out.push(p.clone());
-                if entry.file_name() == "pack" && entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                    walk_sub(&p, out);
+        if is_real_dir_non_symlink(&objects_dir) {
+            if let Ok(rd) = fs::read_dir(&objects_dir) {
+                for entry in rd.flatten() {
+                    let p = entry.path();
+                    out.push(p.clone());
+                    if entry.file_name() == "pack" && is_real_dir_non_symlink(&p) {
+                        walk_sub(&p, 2, out);
+                    }
                 }
             }
         }
@@ -79,22 +96,22 @@ struct BaselineTrack {
     is_single_file: bool,
     paths: Vec<(PathBuf, u64)>,
     nonempty_files: Vec<PathBuf>,
-    baseline_bytes: u64,
 }
 
 fn collect_workspace_logical_bytes(ws: &Path, is_single: bool) -> u64 {
     if is_single {
         return fs::symlink_metadata(ws).map(|m| if m.file_type().is_file() { m.len() } else { 0 }).unwrap_or(0);
     }
-    fn walk_bytes(cur: &Path, total: &mut u64) {
+    fn walk_bytes(cur: &Path, depth: usize, total: &mut u64) {
+        if depth >= MAX_WALK_DEPTH {
+            return;
+        }
         let Ok(rd) = fs::read_dir(cur) else { return };
         for entry in rd.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name == ".git" || is_ignored_name(&name) { continue; }
             let p = entry.path();
             if let Ok(m) = fs::symlink_metadata(&p) {
                 if m.file_type().is_dir() && !m.file_type().is_symlink() {
-                    walk_bytes(&p, total);
+                    walk_bytes(&p, depth + 1, total);
                 } else if m.file_type().is_file() {
                     *total = total.saturating_add(m.len());
                 }
@@ -102,8 +119,18 @@ fn collect_workspace_logical_bytes(ws: &Path, is_single: bool) -> u64 {
         }
     }
     let mut total = 0u64;
-    walk_bytes(ws, &mut total);
+    walk_bytes(ws, 0, &mut total);
     total
+}
+
+fn moved_into_ignored_or_git(ws_canon: &Path, canon_cur: &Path) -> bool {
+    let Ok(rel) = canon_cur.strip_prefix(ws_canon) else {
+        return true;
+    };
+    rel.components().any(|c| {
+        let s = c.as_os_str().to_string_lossy();
+        s == ".git" || is_ignored_name(&s)
+    })
 }
 
 fn collect_baseline_track(ws: &Path, fsid: (i32, i32)) -> BaselineTrack {
@@ -111,25 +138,26 @@ fn collect_baseline_track(ws: &Path, fsid: (i32, i32)) -> BaselineTrack {
     if ws.is_file() {
         let mut nonempty_files = Vec::new();
         let mut ino = 0u64;
-        let mut bytes = 0u64;
         if let Ok(m) = fs::symlink_metadata(ws) {
             ino = m.ino();
-            if m.file_type().is_file() {
-                bytes = m.len();
-                if bytes > 0 { nonempty_files.push(ws.to_path_buf()); }
+            if m.file_type().is_file() && m.len() > 0 {
+                nonempty_files.push(ws.to_path_buf());
             }
         }
         return BaselineTrack {
             ws_canon, fsid, is_single_file: true,
             paths: vec![(ws.to_path_buf(), ino)],
-            nonempty_files, baseline_bytes: bytes,
+            nonempty_files,
         };
     }
     let mut track = BaselineTrack {
         ws_canon, fsid, is_single_file: false,
-        paths: Vec::new(), nonempty_files: Vec::new(), baseline_bytes: 0,
+        paths: Vec::new(), nonempty_files: Vec::new(),
     };
-    fn walk(cur: &Path, out: &mut BaselineTrack) {
+    fn walk(cur: &Path, depth: usize, out: &mut BaselineTrack) {
+        if depth >= MAX_WALK_DEPTH {
+            return;
+        }
         let Ok(rd) = fs::read_dir(cur) else { return };
         for entry in rd.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -150,16 +178,15 @@ fn collect_baseline_track(ws: &Path, fsid: (i32, i32)) -> BaselineTrack {
             }
             if let Ok(m) = fs::symlink_metadata(&p) {
                 out.paths.push((p.clone(), m.ino()));
-                if m.file_type().is_dir() {
-                    walk(&p, out);
-                } else if m.file_type().is_file() {
-                    out.baseline_bytes = out.baseline_bytes.saturating_add(m.len());
-                    if m.len() > 0 { out.nonempty_files.push(p); }
+                if m.file_type().is_dir() && !m.file_type().is_symlink() {
+                    walk(&p, depth + 1, out);
+                } else if m.file_type().is_file() && m.len() > 0 {
+                    out.nonempty_files.push(p);
                 }
             }
         }
     }
-    walk(ws, &mut track);
+    walk(ws, 0, &mut track);
     track
 }
 
@@ -176,12 +203,18 @@ fn check_destruction_threshold(track: &BaselineTrack, threshold: usize) -> Optio
     let mut truncated = 0usize;
     for (p, ino) in &track.paths {
         if fs::symlink_metadata(p).is_err() {
+            let was_in_git = p
+                .strip_prefix(&track.ws_canon)
+                .map(|rel| rel.components().any(|c| c.as_os_str() == ".git"))
+                .unwrap_or(false);
             if !track.is_single_file && *ino > 0 {
                 if let Ok(cur_p) = fsgetpath(track.fsid, *ino) {
                     let canon_cur = cur_p.parent().and_then(|d| fs::canonicalize(d).ok())
                         .and_then(|cd| cur_p.file_name().map(|n| cd.join(n)))
                         .unwrap_or(cur_p);
-                    if canon_cur.starts_with(&track.ws_canon) {
+                    if path_starts_with_casefold_nfd(&canon_cur, &track.ws_canon)
+                        && (was_in_git || !moved_into_ignored_or_git(&track.ws_canon, &canon_cur))
+                    {
                         continue;
                     }
                 }
@@ -233,10 +266,23 @@ pub fn run_guarded_command_with_vault(
 
     let baseline =
         create_snapshot_opts_with_vault(&ws, vault_override, "auto:guard-baseline", true)?;
-    let ws_fsid = statfs_info(&stat_dir)?.fsid;
+    let start_sfs = statfs_info(&stat_dir)?;
+    let ws_fsid = start_sfs.fsid;
+    let start_avail_bytes = start_sfs.avail_bytes;
+    let baseline_total_bytes = collect_workspace_logical_bytes(&ws, is_single);
     let track = collect_baseline_track(&ws, ws_fsid);
     let threshold = if is_single { 1 } else { cfg.max_delete.max(1) };
     let max_write_bytes = cfg.max_write_mb.saturating_mul(1024 * 1024);
+    let measure_write_consumed = || -> u64 {
+        let logical = collect_workspace_logical_bytes(&ws, is_single).saturating_sub(baseline_total_bytes);
+        if logical == 0 {
+            return 0;
+        }
+        let vol_drop = statfs_info(&stat_dir)
+            .map(|s| start_avail_bytes.saturating_sub(s.avail_bytes))
+            .unwrap_or(0);
+        logical.max(vol_drop)
+    };
 
     let mut c_strs: Vec<CString> = Vec::with_capacity(cmd_args.len());
     for a in cmd_args {
@@ -275,8 +321,7 @@ pub fn run_guarded_command_with_vault(
         }
 
         if max_write_bytes > 0 {
-            let cur_bytes = collect_workspace_logical_bytes(&ws, is_single);
-            let consumed = cur_bytes.saturating_sub(track.baseline_bytes);
+            let consumed = measure_write_consumed();
             if consumed >= max_write_bytes {
                 freeze_kill_reap_pgid(child_pid);
                 tripped = true;
@@ -306,10 +351,8 @@ pub fn run_guarded_command_with_vault(
                     missing, truncated, threshold
                 ));
                 exit_code = EXIT_FUSE_TRIPPED;
-            } else if max_write_bytes > 0
-                && collect_workspace_logical_bytes(&ws, is_single).saturating_sub(track.baseline_bytes) >= max_write_bytes
-            {
-                let consumed = collect_workspace_logical_bytes(&ws, is_single).saturating_sub(track.baseline_bytes);
+            } else if max_write_bytes > 0 && measure_write_consumed() >= max_write_bytes {
+                let consumed = measure_write_consumed();
                 freeze_kill_reap_pgid(child_pid);
                 tripped = true;
                 trip_reason = Some(format!(

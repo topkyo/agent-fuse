@@ -206,3 +206,37 @@ pub fn components_equal_canonical(a: &Path, b: &Path) -> bool {
 pub fn components_equal_casefold_nfd(a: &Path, b: &Path) -> bool {
     to_nfd(&a.to_string_lossy()).to_lowercase() == to_nfd(&b.to_string_lossy()).to_lowercase()
 }
+
+/// Checks case-insensitive Unicode NFD equality between two full paths component-by-component.
+pub fn path_eq_casefold_nfd(a: &Path, b: &Path) -> bool {
+    let mut ai = a.components();
+    let mut bi = b.components();
+    loop {
+        match (ai.next(), bi.next()) {
+            (None, None) => return true,
+            (Some(ac), Some(bc)) => {
+                if !components_equal_casefold_nfd(Path::new(ac.as_os_str()), Path::new(bc.as_os_str())) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// Checks whether `path` starts with `prefix` under case-insensitive Unicode NFD comparison.
+pub fn path_starts_with_casefold_nfd(path: &Path, prefix: &Path) -> bool {
+    let mut pi = path.components();
+    let mut prei = prefix.components();
+    loop {
+        match (prei.next(), pi.next()) {
+            (None, _) => return true,
+            (Some(_), None) => return false,
+            (Some(pc), Some(xc)) => {
+                if !components_equal_casefold_nfd(Path::new(pc.as_os_str()), Path::new(xc.as_os_str())) {
+                    return false;
+                }
+            }
+        }
+    }
+}

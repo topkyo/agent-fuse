@@ -1,3 +1,4 @@
+use crate::apfs::chmod_nofollow;
 use crate::diff_rename::RenamePair;
 use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
 use crate::vault::TargetKind;
@@ -6,6 +7,14 @@ use std::fs;
 use std::path::Path;
 
 pub const PIN_CONTAINS_DELETED: &str = "contains_deleted";
+
+pub(crate) fn is_valid_snapshot_id(id: &str) -> bool {
+    if !id.starts_with("snap-") || id.len() <= 5 || id.len() > 128 {
+        return false;
+    }
+    id.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotOrigin {
@@ -205,7 +214,9 @@ pub(crate) fn write_meta(meta_path: &Path, m: &SnapshotMeta) -> Result<(), Afuse
             e.raw_os_error().unwrap_or(1),
             format!("failed to write meta {}: {}", meta_path.display(), e),
         )
-    })
+    })?;
+    let _ = chmod_nofollow(meta_path, 0o600);
+    Ok(())
 }
 
 impl SnapshotMeta {
@@ -250,7 +261,7 @@ impl SnapshotMeta {
             retention_pin: kv.get("retention_pin").filter(|s| !s.is_empty()).cloned(),
             restored_from_id: kv.get("restored_from_id").filter(|s| !s.is_empty()).cloned(),
         };
-        if !meta.id.starts_with("snap-") || meta.tree_sha256.is_empty() || meta.created_ms == 0 {
+        if !is_valid_snapshot_id(&meta.id) || meta.tree_sha256.is_empty() || meta.created_ms == 0 {
             return Err(AfuseError::new(ERR_EINVAL, "corrupted snapshot meta.kv"));
         }
         Ok(meta)

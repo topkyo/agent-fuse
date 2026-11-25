@@ -1,5 +1,7 @@
 use crate::emit_error;
-use agent_fuse::{check_for_updates, json_escape, run_upgrade_apply, AfuseError};
+use agent_fuse::{
+    check_for_updates, json_escape, run_upgrade_apply, sanitize_terminal_text, AfuseError,
+};
 
 pub(crate) fn cmd_upgrade(rest: &[String], mut json: bool) {
     let (mut check_only, mut want_help, mut end_opts) = (false, false, false);
@@ -44,17 +46,21 @@ pub(crate) fn cmd_upgrade(rest: &[String], mut json: bool) {
                 } else if rep.release_state == "unpublished" {
                     println!(
                         "afuse v{} is installed; no GitHub Release has been published yet.",
-                        rep.current_version
+                        sanitize_terminal_text(&rep.current_version)
                     );
                 } else if rep.update_available {
                     println!(
                         "Update available: v{} -> v{}\nRelease: {}\nHomebrew: {}",
-                        rep.current_version, rep.latest_version, rep.release_url, rep.brew_cmd
+                        sanitize_terminal_text(&rep.current_version),
+                        sanitize_terminal_text(&rep.latest_version),
+                        sanitize_terminal_text(&rep.release_url),
+                        sanitize_terminal_text(&rep.brew_cmd)
                     );
                 } else {
                     println!(
                         "afuse v{} is up to date (latest: v{}).",
-                        rep.current_version, rep.latest_version
+                        sanitize_terminal_text(&rep.current_version),
+                        sanitize_terminal_text(&rep.latest_version)
                     );
                 }
             }
@@ -68,19 +74,20 @@ pub(crate) fn cmd_upgrade(rest: &[String], mut json: bool) {
                 } else if rep.release_state == "unpublished" {
                     println!(
                         "afuse v{} is installed; no GitHub Release has been published yet.",
-                        rep.current_version
+                        sanitize_terminal_text(&rep.current_version)
                     );
                 } else if rep.updated {
                     println!(
                         "Upgraded afuse: v{} -> v{} (sha256={})",
-                        rep.current_version,
-                        rep.latest_version,
-                        rep.verified_sha256.as_deref().unwrap_or("verified")
+                        sanitize_terminal_text(&rep.current_version),
+                        sanitize_terminal_text(&rep.latest_version),
+                        sanitize_terminal_text(rep.verified_sha256.as_deref().unwrap_or("verified"))
                     );
                 } else {
                     println!(
                         "afuse v{} is already up to date (latest: v{}).",
-                        rep.current_version, rep.latest_version
+                        sanitize_terminal_text(&rep.current_version),
+                        sanitize_terminal_text(&rep.latest_version)
                     );
                 }
             }

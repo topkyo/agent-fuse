@@ -147,7 +147,12 @@ fn cmd_relocate(rest: &[String], mut json: bool) {
                     rep.kind.as_str(), rep.dev, rep.ino, rep.snapshots_updated
                 );
             } else {
-                println!("RELOCATED {} -> {} (snapshots_updated={})", rep.from.display(), rep.to.display(), rep.snapshots_updated);
+                println!(
+                    "RELOCATED {} -> {} (snapshots_updated={})",
+                    sanitize_terminal_text(&rep.from.to_string_lossy()),
+                    sanitize_terminal_text(&rep.to.to_string_lossy()),
+                    rep.snapshots_updated
+                );
             }
         }
         Err(e) => emit_error(json, &e),
@@ -203,7 +208,11 @@ pub(crate) fn emit_error(json: bool, err: &AfuseError) -> ! {
             json_escape(&err.message)
         );
     } else {
-        eprintln!("afuse error (code {}): {}", err.code, err.message);
+        eprintln!(
+            "afuse error (code {}): {}",
+            err.code,
+            sanitize_terminal_text(&err.message)
+        );
     }
     process::exit(if (1..=125).contains(&err.code) { err.code } else { 1 });
 }

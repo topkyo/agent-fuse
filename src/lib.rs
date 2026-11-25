@@ -19,7 +19,7 @@
 //! - `hook_json` / `hook_config` / `hook`: Opt-in zsh preexec & Claude Code PreToolUse auto-snap.
 //! - `guard`: Isolated process-group fuse tripping on runaway deletes, renames or truncation spikes.
 //! - `doctor`: Privacy-safe offline APFS & vault health diagnostics.
-//! - `upgrade_json` / `upgrade_verify` / `upgrade`: Opt-in release check & SHA-256 verified self-upgrade.
+//! - `upgrade_json` / `upgrade_verify` / `upgrade_tar` / `upgrade`: Opt-in release check, tar preflight & SHA-256 verified self-upgrade.
 //! - `cli_cmds` / `cli_ops` / `cli_upgrade`: CLI subcommand dispatch & structured `--json` formatting.
 
 pub mod apfs;
@@ -47,6 +47,7 @@ pub(crate) mod trash_ledger;
 pub mod unicode_norm;
 pub mod upgrade;
 pub mod upgrade_json;
+pub(crate) mod upgrade_tar;
 pub(crate) mod upgrade_verify;
 pub mod vault;
 mod vault_policy;
@@ -130,6 +131,8 @@ mod tests_round6;
 mod tests_round7;
 #[cfg(test)]
 mod tests_round8;
+#[cfg(test)]
+mod tests_security;
 #[cfg(test)]
 mod tests_trash_ledger;
 #[cfg(test)]

@@ -5,6 +5,9 @@ edition = "2021"
 description = "Millisecond-scale APFS CoW workspace time machine & runaway circuit breaker for AI coding agents"
 license = "MIT"
 
+[features]
+test-hooks = []
+
 [lib]
 name = "agent_fuse"
 path = "src/lib.rs"

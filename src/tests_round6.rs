@@ -67,7 +67,11 @@ mod tests_round6 {
 
         let rel = relocate_workspace_vault_with(&p1, &p2, Some(&vault), Some(ino)).unwrap();
         assert_eq!(rel.snapshots_updated, 2);
-        let vault_dirs: Vec<_> = fs::read_dir(&vault).unwrap().flatten().collect();
+        let vault_dirs: Vec<_> = fs::read_dir(&vault)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .collect();
         assert_eq!(vault_dirs.len(), 1, "relocate must leave zero orphan vault_P1");
 
         let diff = diff_snapshot_opts_with_vault(&p2, Some(&vault), &full.id, false).unwrap();

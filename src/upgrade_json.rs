@@ -1,7 +1,5 @@
 use crate::error::{AfuseError, ERR_EINVAL};
 use crate::manifest::json_escape;
-use crate::upgrade_verify::extract_trusted_dmg_urls;
-pub use crate::upgrade_verify::{is_trusted_github_url, validate_release_asset_url};
 
 #[derive(Debug, Clone)]
 pub struct ReleaseAsset {
@@ -228,6 +226,28 @@ fn extract_json_bool_field(obj_bytes: &[u8], key: &str) -> Option<bool> {
     }
 }
 
+pub(crate) fn sanitize_release_html_url(raw: Option<String>) -> String {
+    const FALLBACK: &str = "https://github.com/topkyo/agent-fuse/releases";
+    let Some(candidate) = raw else {
+        return FALLBACK.to_string();
+    };
+    let trimmed = candidate.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let bad = trimmed.is_empty()
+        || !trimmed.starts_with("https://github.com/topkyo/agent-fuse/releases/")
+        || trimmed.chars().any(|c| c.is_whitespace() || (c as u32) < 0x20 || c as u32 == 0x7f)
+        || lower.contains("..")
+        || lower.contains("%2e")
+        || lower.contains('\\')
+        || lower.contains("%5c")
+        || trimmed.contains('@');
+    if bad {
+        FALLBACK.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 pub fn parse_release_json(raw: &str) -> Result<ReleaseInfo, AfuseError> {
     let bytes = raw.as_bytes();
     if extract_json_bool_field(bytes, "draft") == Some(true) {
@@ -242,8 +262,7 @@ pub fn parse_release_json(raw: &str) -> Result<ReleaseInfo, AfuseError> {
     if parse_semver(&latest_version).is_none() {
         return Err(AfuseError::new(ERR_EINVAL, format!("invalid release tag_name '{}'", tag_name)));
     }
-    let html_url = extract_json_string_field(bytes, "html_url")
-        .unwrap_or_else(|| format!("https://github.com/topkyo/agent-fuse/releases/tag/{}", tag_name));
+    let html_url = sanitize_release_html_url(extract_json_string_field(bytes, "html_url"));
     let mut assets = Vec::new();
     if let Some((as_start, as_end)) = find_json_field_in_object(bytes, "assets") {
         let (arr, mut i) = (&bytes[as_start..as_end], 0usize);
@@ -262,4 +281,97 @@ pub fn parse_release_json(raw: &str) -> Result<ReleaseInfo, AfuseError> {
     }
     let (dmg_url, dmg_sha256_url) = extract_trusted_dmg_urls(&assets);
     Ok(ReleaseInfo { tag_name, latest_version, html_url, assets, dmg_url, dmg_sha256_url })
+}
+
+fn validate_asset_url_inner(url: &str, allow_cdn: bool) -> Result<(), AfuseError> {
+    if url
+        .chars()
+        .any(|c| c.is_whitespace() || (c as u32) < 0x20 || c as u32 == 0x7f)
+    {
+        return Err(AfuseError::new(
+            ERR_EINVAL,
+            "release asset URL contains control or whitespace characters",
+        ));
+    }
+    let rest = url
+        .strip_prefix("https://")
+        .ok_or_else(|| AfuseError::new(ERR_EINVAL, "release asset URL must use https://"))?;
+    let (authority, path_and_query) = rest.split_once('/').unwrap_or((rest, ""));
+    let authority = authority.split(['?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') || authority.contains('\\') {
+        return Err(AfuseError::new(ERR_EINVAL, "invalid release asset authority"));
+    }
+    let (host_raw, port_opt) = match authority.split_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (authority, None),
+    };
+    if let Some(port) = port_opt {
+        if port != "443" {
+            return Err(AfuseError::new(
+                ERR_EINVAL,
+                "non-443 port rejected for release asset URL",
+            ));
+        }
+    }
+    let host = host_raw.to_ascii_lowercase();
+    let path_only = path_and_query.split(['?', '#']).next().unwrap_or("");
+    match host.as_str() {
+        "github.com" => {
+            let lower_path = path_only.to_ascii_lowercase();
+            let has_traversal = lower_path.contains("..")
+                || lower_path.contains("%2e")
+                || lower_path.contains('\\')
+                || lower_path.contains("%5c");
+            if has_traversal || !path_only.starts_with("topkyo/agent-fuse/releases/download/") {
+                return Err(AfuseError::new(
+                    ERR_EINVAL,
+                    format!("untrusted github.com release asset path: /{}", path_only),
+                ));
+            }
+        }
+        "objects.githubusercontent.com"
+        | "release-assets.githubusercontent.com"
+        | "github-releases.githubusercontent.com"
+            if allow_cdn => {}
+        _ => {
+            return Err(AfuseError::new(
+                ERR_EINVAL,
+                format!("untrusted release asset host: {}", host),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_release_asset_url(url: &str) -> Result<(), AfuseError> {
+    validate_asset_url_inner(url, false)
+}
+
+pub(crate) fn validate_effective_asset_url(url: &str) -> Result<(), AfuseError> {
+    validate_asset_url_inner(url, true)
+}
+
+pub fn is_trusted_github_url(url: &str) -> bool {
+    validate_release_asset_url(url).is_ok()
+}
+
+pub(crate) fn extract_trusted_dmg_urls(assets: &[ReleaseAsset]) -> (Option<String>, Option<String>) {
+    let dmg_asset = assets
+        .iter()
+        .find(|a| a.name.ends_with("-macos.dmg") && is_trusted_github_url(&a.download_url));
+    let preferred_sha = dmg_asset.and_then(|d| {
+        let exact = format!("{}.sha256", d.name);
+        assets
+            .iter()
+            .find(|a| a.name == exact && is_trusted_github_url(&a.download_url))
+    });
+    let sha_asset = preferred_sha.or_else(|| {
+        assets
+            .iter()
+            .find(|a| a.name.ends_with("-macos.dmg.sha256") && is_trusted_github_url(&a.download_url))
+    });
+    (
+        dmg_asset.map(|a| a.download_url.clone()),
+        sha_asset.map(|a| a.download_url.clone()),
+    )
 }

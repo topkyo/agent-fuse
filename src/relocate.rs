@@ -1,12 +1,16 @@
-use crate::apfs::{force_remove_all, fsgetpath, lstat_inode_mode, real_home_dir, statfs_info, current_euid};
-use crate::error::{AfuseError, ERR_EEXIST, ERR_EINVAL, ERR_ENOENT, ERR_EPERM, ERR_EACCES};
+use crate::apfs::{
+    current_euid, force_remove_all, fsgetpath, lstat_inode_mode, random_hex_suffix, real_home_dir,
+    statfs_info,
+};
+use crate::error::{AfuseError, ERR_EACCES, ERR_EEXIST, ERR_EINVAL, ERR_ENOENT, ERR_EPERM};
 use crate::manifest::{compute_fast_fingerprint, compute_single_file_manifest, json_escape, read_meta, write_meta};
 use crate::snapshot::list_snapshots_unlocked;
 use crate::trash::{allowed_trash_roots_for, record_live_target_inode_if_new};
 use crate::trash_ledger::load_root_inodes;
+use crate::unicode_norm::{path_eq_casefold_nfd, path_starts_with_casefold_nfd};
 use crate::vault::{
     lock_vault, resolve_vault_base, resolve_workspace_vault_recovery, try_lock_vault,
-    validate_workspace_binding_with_vault, TargetKind,
+    validate_workspace_binding_with_vault, TargetKind, VAULT_ROOT_MARKER,
 };
 use crate::vault_policy::enforce_vault_target_kind;
 use std::collections::BTreeSet;
@@ -122,10 +126,13 @@ pub fn locate_workspace_target_with_vault(
             .and_then(|p| fs::canonicalize(p).ok())
             .and_then(|cp| raw_path.file_name().map(|n| cp.join(n)))
             .unwrap_or(raw_path);
-        if trash_roots.iter().any(|t| norm_path.starts_with(t) && &norm_path != t) {
+        if trash_roots
+            .iter()
+            .any(|t| path_starts_with_casefold_nfd(&norm_path, t) && !path_eq_casefold_nfd(&norm_path, t))
+        {
             return Ok(LocateOutcome::Trashed { path: norm_path });
         }
-        if norm_path == ws {
+        if path_eq_casefold_nfd(&norm_path, &ws) {
             continue;
         }
         let Ok(meta) = fs::symlink_metadata(&norm_path) else { continue };
@@ -176,7 +183,7 @@ pub fn relocate_workspace_vault_with(
         }
     }
     let (new_ws, vault_p2) = resolve_workspace_vault_recovery(&validated.canonical_path, vault_override)?;
-    if old_ws == new_ws || vault_p1 == vault_p2 {
+    if path_eq_casefold_nfd(&old_ws, &new_ws) || path_eq_casefold_nfd(&vault_p1, &vault_p2) {
         return Ok(RelocateReport {
             from: old_ws, to: new_ws, kind: validated.kind,
             dev: validated.dev, ino: validated.ino, snapshots_updated: 0,
@@ -253,6 +260,49 @@ pub fn relocate_workspace_vault_with(
     })
 }
 
+fn is_vault_subdir_candidate(name: &str, dir: &Path) -> bool {
+    let Some((prefix, hex)) = name.rsplit_once('-') else {
+        return false;
+    };
+    if prefix.is_empty()
+        || hex.len() != 16
+        || !hex.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return false;
+    }
+    let has_snaps = fs::symlink_metadata(dir.join("snapshots"))
+        .map(|m| !m.file_type().is_symlink() && m.file_type().is_dir())
+        .unwrap_or(false);
+    let has_lock = fs::symlink_metadata(dir.join("vault.lock"))
+        .map(|m| !m.file_type().is_symlink() && m.file_type().is_file())
+        .unwrap_or(false);
+    has_snaps || has_lock
+}
+
+fn is_dir_orphan_now(dir: &Path) -> bool {
+    let snaps = list_snapshots_unlocked(dir).unwrap_or_default();
+    match snaps.first() {
+        None => true,
+        Some(m) => !m.workspace.is_empty() && fs::symlink_metadata(&m.workspace).is_err(),
+    }
+}
+
+pub(crate) fn atomic_retire_and_remove_vault(dir: &Path) -> Result<(), AfuseError> {
+    let Some(parent) = dir.parent() else {
+        return force_remove_all(dir);
+    };
+    let hidden = parent.join(format!(
+        ".afuse.retire.{}.{}",
+        std::process::id(),
+        random_hex_suffix()
+    ));
+    if fs::rename(dir, &hidden).is_ok() {
+        force_remove_all(&hidden)
+    } else {
+        force_remove_all(dir)
+    }
+}
+
 pub fn inspect_vault_orphans(vault_override: Option<&Path>, min_age_secs: u64) -> (usize, Vec<PathBuf>) {
     let base = match vault_override {
         Some(v) => v.to_path_buf(),
@@ -261,6 +311,9 @@ pub fn inspect_vault_orphans(vault_override: Option<&Path>, min_age_secs: u64) -
             Err(_) => return (0, Vec::new()),
         },
     };
+    let has_root_marker = fs::symlink_metadata(base.join(VAULT_ROOT_MARKER))
+        .map(|m| !m.file_type().is_symlink() && m.file_type().is_file())
+        .unwrap_or(false);
     let Ok(rd) = fs::read_dir(&base) else { return (0, Vec::new()) };
     let now = SystemTime::now();
     let mut total = 0usize;
@@ -268,13 +321,22 @@ pub fn inspect_vault_orphans(vault_override: Option<&Path>, min_age_secs: u64) -
     for ent in rd.flatten() {
         let p = ent.path();
         let name = ent.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') || !p.is_dir() {
+        if name.starts_with('.') {
+            continue;
+        }
+        let Ok(meta) = fs::symlink_metadata(&p) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+            continue;
+        }
+        if !has_root_marker && !is_vault_subdir_candidate(&name, &p) {
             continue;
         }
         total += 1;
         let age_ok = min_age_secs == 0
-            || fs::symlink_metadata(&p)
-                .and_then(|m| m.modified())
+            || meta
+                .modified()
                 .ok()
                 .and_then(|mt| now.duration_since(mt).ok())
                 .map(|d| d >= Duration::from_secs(min_age_secs))
@@ -282,12 +344,7 @@ pub fn inspect_vault_orphans(vault_override: Option<&Path>, min_age_secs: u64) -
         if !age_ok {
             continue;
         }
-        let snaps = list_snapshots_unlocked(&p).unwrap_or_default();
-        let missing_ws = match snaps.first() {
-            None => true,
-            Some(m) => !m.workspace.is_empty() && fs::symlink_metadata(&m.workspace).is_err(),
-        };
-        if missing_ws {
+        if is_dir_orphan_now(&p) {
             orphans.push(p);
         }
     }
@@ -311,9 +368,14 @@ pub fn prune_orphan_vaults_with(
             continue;
         }
         let Ok(guard) = try_lock_vault(&dir) else { continue };
+        if !is_dir_orphan_now(&dir) {
+            drop(guard);
+            continue;
+        }
         candidates.push(name);
+        let res = atomic_retire_and_remove_vault(&dir);
         drop(guard);
-        if force_remove_all(&dir).is_ok() {
+        if res.is_ok() {
             removed += 1;
         }
     }

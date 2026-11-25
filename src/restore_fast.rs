@@ -37,7 +37,10 @@ pub(crate) fn verify_snapshot_tree(
         return Err(AfuseError::new(ERR_ENOENT, format!("snapshot tree missing on disk: {}", snap_tree.display())));
     }
     let vault_hash = if meta.tree_sha256 == "fast" {
-        None
+        return Err(AfuseError::new(
+            ERR_EINVAL,
+            "snapshot metadata missing integrity digest (legacy unhashed 'fast' rejected)",
+        ));
     } else if meta.tree_sha256.starts_with("fast:") {
         let fp_target = if meta.target_kind == TargetKind::SingleFile {
             find_single_snap_file(ws, &snap_tree)

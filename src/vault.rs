@@ -1,8 +1,10 @@
 use crate::apfs::{
-    acquire_flock_blocking, acquire_flock_nonblocking, real_home_dir, release_flock, statfs_info,
+    acquire_flock_blocking, acquire_flock_nonblocking, chmod_nofollow, real_home_dir,
+    release_flock, statfs_info,
 };
 use crate::error::{AfuseError, ERR_EACCES, ERR_EINVAL, ERR_ENOENT, ERR_ENOTSUP, ERR_EXDEV};
 use crate::sha256::sha256_hex;
+use crate::unicode_norm::{path_eq_casefold_nfd, path_starts_with_casefold_nfd};
 pub use crate::vault_policy::reject_forbidden_workspace_paths;
 use crate::vault_policy::{
     enforce_target_leaf_and_access, enforce_vault_target_kind, lexical_normalize_path,
@@ -10,8 +12,10 @@ use crate::vault_policy::{
 use std::env;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+
+pub(crate) const VAULT_ROOT_MARKER: &str = ".afuse-vault-root";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetKind {
@@ -73,7 +77,7 @@ pub fn resolve_vault_base() -> Result<PathBuf, AfuseError> {
     fs::create_dir_all(&base_root).map_err(|e| {
         AfuseError::new(e.raw_os_error().unwrap_or(ERR_EACCES), format!("cannot create vault base dir: errno={}", e.raw_os_error().unwrap_or(ERR_EACCES)))
     })?;
-    let _ = fs::set_permissions(&base_root, fs::Permissions::from_mode(0o700));
+    let _ = chmod_nofollow(&base_root, 0o700);
     Ok(base_root.join("vault.noindex"))
 }
 
@@ -199,9 +203,14 @@ fn resolve_vault_paths(vault_override: Option<&Path>, create: bool) -> Result<(P
     }
     fs::create_dir_all(&base)
         .map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(ERR_EACCES), "cannot create vault directory"))?;
-    let _ = fs::set_permissions(&base, fs::Permissions::from_mode(0o700));
+    let _ = chmod_nofollow(&base, 0o700);
     let canon = fs::canonicalize(&base)
         .map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), "cannot resolve vault directory"))?;
+    let marker = canon.join(VAULT_ROOT_MARKER);
+    if fs::symlink_metadata(&marker).is_err() {
+        let _ = fs::write(&marker, b"agent-fuse-vault-v1\n");
+        let _ = chmod_nofollow(&marker, 0o600);
+    }
     Ok((canon.clone(), canon))
 }
 
@@ -213,7 +222,10 @@ fn workspace_vault_common(
 ) -> Result<(PathBuf, PathBuf), AfuseError> {
     reject_forbidden_workspace_paths(ws)?;
     let (vault_canon, vault_stat_dir) = resolve_vault_paths(vault_override, create_if_missing)?;
-    if vault_canon == ws || vault_canon.starts_with(ws) || ws.starts_with(&vault_canon) {
+    if path_eq_casefold_nfd(&vault_canon, ws)
+        || path_starts_with_casefold_nfd(&vault_canon, ws)
+        || path_starts_with_casefold_nfd(ws, &vault_canon)
+    {
         return Err(AfuseError::new(ERR_EINVAL, "self-ingestion forbidden: vault and workspace must not overlap"));
     }
 
@@ -239,9 +251,12 @@ fn workspace_vault_common(
         .collect();
     let ws_vault = vault_canon.join(format!("{}-{}", ws_name, ws_hash));
     if create_if_missing {
-        fs::create_dir_all(ws_vault.join("snapshots")).map_err(|e| {
+        let snaps_dir = ws_vault.join("snapshots");
+        fs::create_dir_all(&snaps_dir).map_err(|e| {
             AfuseError::new(e.raw_os_error().unwrap_or(ERR_EACCES), format!("cannot create snapshots dir: {}", e))
         })?;
+        let _ = chmod_nofollow(&ws_vault, 0o700);
+        let _ = chmod_nofollow(&snaps_dir, 0o700);
     }
     Ok((ws.to_path_buf(), ws_vault))
 }

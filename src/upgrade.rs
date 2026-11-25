@@ -1,15 +1,19 @@
-use crate::apfs::{force_remove_all, TMP_SEQ};
+use crate::apfs::{
+    chmod_nofollow, create_exclusive_dir_0700, force_remove_all, random_hex_suffix, TMP_SEQ,
+};
 use crate::error::{AfuseError, ERR_EACCES, ERR_EINVAL, ERR_ENOENT, ERR_USAGE};
-use crate::sha256::Sha256;
 pub use crate::upgrade_json::{
     is_newer_version, is_trusted_github_url, parse_release_json, validate_release_asset_url,
     ReleaseAsset, ReleaseInfo, UpgradeApplyReport, UpgradeCheckReport,
 };
-use crate::upgrade_verify::{find_extracted_afuse, prepare_and_verify_staged_binary};
+#[cfg(test)]
+pub(crate) use crate::upgrade_tar::validate_effective_download_url;
+use crate::upgrade_tar::{
+    expected_sha256_from_sums, fetch_asset_to_file, preflight_and_extract_afuse, sha256_file_hex,
+};
+use crate::upgrade_verify::prepare_and_verify_staged_binary;
 use std::env;
-use std::fs::{self, File};
-use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::Ordering;
@@ -25,32 +29,72 @@ enum ReleaseFetch {
     Unpublished,
 }
 
-fn fetch_release_outcome() -> Result<ReleaseFetch, AfuseError> {
-    let source = env::var("AFUSE_RELEASE_JSON_URL")
+#[cfg(any(test, feature = "test-hooks"))]
+fn resolve_release_source_url() -> String {
+    env::var("AFUSE_RELEASE_JSON_URL")
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_RELEASE_API_URL.to_string());
+        .unwrap_or_else(|| DEFAULT_RELEASE_API_URL.to_string())
+}
+
+#[cfg(not(any(test, feature = "test-hooks")))]
+fn resolve_release_source_url() -> String {
+    DEFAULT_RELEASE_API_URL.to_string()
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+fn resolve_upgrade_archive_override() -> Option<PathBuf> {
+    env::var("AFUSE_UPGRADE_ARCHIVE_DIR")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+}
+
+#[cfg(not(any(test, feature = "test-hooks")))]
+fn resolve_upgrade_archive_override() -> Option<PathBuf> {
+    None
+}
+
+fn fetch_release_outcome() -> Result<ReleaseFetch, AfuseError> {
+    let source = resolve_release_source_url();
+    #[cfg(any(test, feature = "test-hooks"))]
     if !source.starts_with("http://") && !source.starts_with("https://") {
         let local = source.strip_prefix("file://").unwrap_or(&source);
         let raw = fs::read_to_string(local).map_err(|e| {
-            AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), format!("failed to read release metadata: {}", e))
+            AfuseError::new(
+                e.raw_os_error().unwrap_or(ERR_ENOENT),
+                format!("failed to read release metadata: {}", e),
+            )
         })?;
         return Ok(ReleaseFetch::Published(parse_release_json(&raw)?));
     }
     let ua = format!("afuse/{}", env!("CARGO_PKG_VERSION"));
     let mut cmd = Command::new("/usr/bin/curl");
-    cmd.args(["-sSL", "--max-time", "10"]);
+    cmd.args([
+        "-q", "-sSL", "--max-time", "10", "--max-redirs", "5", "--max-filesize", "1048576",
+    ]);
+    #[cfg(not(any(test, feature = "test-hooks")))]
+    cmd.args(["--proto", "=https", "--proto-redir", "=https"]);
+    #[cfg(any(test, feature = "test-hooks"))]
     if source.starts_with("https://") {
         cmd.args(["--proto", "=https", "--proto-redir", "=https"]);
     }
     let out = cmd
-        .args(["-w", "\n%{http_code}", "-H", "Accept: application/vnd.github+json", "-H", &format!("User-Agent: {}", ua), &source])
+        .args([
+            "-w", "\n%{http_code}", "-H", "Accept: application/vnd.github+json",
+            "-H", &format!("User-Agent: {}", ua), &source,
+        ])
         .output()
         .map_err(|e| AfuseError::new(1, format!("failed to invoke curl: {}", e)))?;
     if !out.status.success() {
         let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let detail = if msg.is_empty() { "curl failed to fetch latest release metadata".to_string() } else { format!("release check failed: {}", msg) };
+        let detail = if msg.is_empty() {
+            "curl failed to fetch latest release metadata".to_string()
+        } else {
+            format!("release check failed: {}", msg)
+        };
         return Err(AfuseError::new(1, detail));
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -93,94 +137,6 @@ pub fn check_for_updates() -> Result<UpgradeCheckReport, AfuseError> {
             })
         }
     }
-}
-
-pub(crate) fn validate_effective_download_url(effective_url: &str, dest: &Path) -> Result<(), AfuseError> {
-    let trimmed = effective_url.trim();
-    if trimmed.is_empty() {
-        let _ = fs::remove_file(dest);
-        return Err(AfuseError::new(ERR_EINVAL, "missing effective download URL"));
-    }
-    if let Err(e) = validate_release_asset_url(trimmed) {
-        let _ = fs::remove_file(dest);
-        return Err(AfuseError::new(
-            ERR_EINVAL,
-            format!("untrusted post-redirect download URL '{}': {}", trimmed, e.message),
-        ));
-    }
-    Ok(())
-}
-
-fn fetch_asset_to_file(source: &str, dest: &Path, allow_local: bool) -> Result<(), AfuseError> {
-    if allow_local {
-        let local = source.strip_prefix("file://").unwrap_or(source);
-        fs::copy(local, dest).map_err(|e| {
-            AfuseError::new(e.raw_os_error().unwrap_or(1), format!("failed to copy archive asset: {}", e))
-        })?;
-        return Ok(());
-    }
-    validate_release_asset_url(source)?;
-    let out = Command::new("/usr/bin/curl")
-        .args([
-            "-fsSL", "--proto", "=https", "--proto-redir", "=https",
-            "--max-time", "30", "--max-filesize", "26214400",
-            "-w", "%{url_effective}", "-o",
-        ])
-        .arg(dest)
-        .arg(source)
-        .output()
-        .map_err(|e| AfuseError::new(1, format!("failed to invoke curl: {}", e)))?;
-    if !out.status.success() {
-        let _ = fs::remove_file(dest);
-        let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(AfuseError::new(1, format!("asset download failed: {}", msg)));
-    }
-    validate_effective_download_url(&String::from_utf8_lossy(&out.stdout), dest)
-}
-
-fn sha256_file_hex(path: &Path) -> Result<String, AfuseError> {
-    let mut f = File::open(path).map_err(|e| {
-        AfuseError::new(
-            e.raw_os_error().unwrap_or(ERR_ENOENT),
-            format!("cannot open {}: {}", path.display(), e),
-        )
-    })?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 65536];
-    loop {
-        let n = f
-            .read(&mut buf)
-            .map_err(|e| AfuseError::new(1, format!("read failed: {}", e)))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hasher.finalize_hex())
-}
-
-fn expected_sha256_from_sums(sums_text: &str, tarball_name: &str) -> Result<String, AfuseError> {
-    for line in sums_text.lines() {
-        let mut parts = line.trim().split_whitespace();
-        let (Some(hash_tok), Some(file_tok)) = (parts.next(), parts.next()) else {
-            continue;
-        };
-        let clean_name = file_tok.trim_start_matches('*');
-        let base_name = Path::new(clean_name)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(clean_name);
-        if (clean_name == tarball_name || base_name == tarball_name)
-            && hash_tok.len() == 64
-            && hash_tok.bytes().all(|b| b.is_ascii_hexdigit())
-        {
-            return Ok(hash_tok.to_ascii_lowercase());
-        }
-    }
-    Err(AfuseError::new(
-        ERR_EINVAL,
-        format!("checksum entry for '{}' not found in SHA256SUMS", tarball_name),
-    ))
 }
 
 struct StageCleanup(PathBuf);
@@ -236,28 +192,27 @@ pub fn perform_upgrade_on_exe(exe_path: &Path) -> Result<UpgradeApplyReport, Afu
         });
     }
 
-    let is_symlink_exe = fs::symlink_metadata(exe_path).map(|m| m.file_type().is_symlink()).unwrap_or(false);
-    let install_target = if is_symlink_exe { canon_exe.unwrap_or_else(|| exe_path.to_path_buf()) } else { exe_path.to_path_buf() };
+    let is_symlink_exe = fs::symlink_metadata(exe_path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    let install_target = if is_symlink_exe {
+        canon_exe.unwrap_or_else(|| exe_path.to_path_buf())
+    } else {
+        exe_path.to_path_buf()
+    };
     let parent_dir = install_target.parent().ok_or_else(|| {
         AfuseError::new(ERR_EINVAL, "cannot determine binary parent directory")
     })?;
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let stage_dir = parent_dir.join(format!(".afuse.upgrade.{}.{}", std::process::id(), seq));
-    if fs::create_dir_all(&stage_dir).is_err() {
-        return Err(AfuseError::new(
+    let stage_dir = create_exclusive_dir_0700(parent_dir, ".afuse.upgrade").map_err(|_| {
+        AfuseError::new(
             ERR_EACCES,
             format!("binary directory is not writable; update via menu bar or run: {}", BREW_UPGRADE_CMD),
-        ));
-    }
+        )
+    })?;
     let _cleanup = StageCleanup(stage_dir.clone());
 
     let arch_name = format!("afuse-macos-{}.tar.gz", env::consts::ARCH);
-    let override_dir = env::var("AFUSE_UPGRADE_ARCHIVE_DIR")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from);
-
+    let override_dir = resolve_upgrade_archive_override();
     let allow_local = override_dir.is_some();
     let (tarball_name, tarball_src, sums_src) = if let Some(dir) = override_dir {
         let tb = [DEFAULT_TARBALL_NAME, arch_name.as_str()]
@@ -274,11 +229,7 @@ pub fn perform_upgrade_on_exe(exe_path: &Path) -> Result<UpgradeApplyReport, Afu
             .ok_or_else(|| {
                 AfuseError::new(ERR_ENOENT, format!("SHA256SUMS missing in {}", dir.display()))
             })?;
-        (
-            tb.0.to_string(),
-            tb.1.to_string_lossy().into_owned(),
-            sums.to_string_lossy().into_owned(),
-        )
+        (tb.0.to_string(), tb.1.to_string_lossy().into_owned(), sums.to_string_lossy().into_owned())
     } else {
         let tb_asset = rel
             .assets
@@ -286,26 +237,16 @@ pub fn perform_upgrade_on_exe(exe_path: &Path) -> Result<UpgradeApplyReport, Afu
             .find(|a| a.name == DEFAULT_TARBALL_NAME)
             .or_else(|| rel.assets.iter().find(|a| a.name == arch_name))
             .ok_or_else(|| {
-                AfuseError::new(
-                    ERR_ENOENT,
-                    format!("release {} missing macOS tarball asset", rel.tag_name),
-                )
+                AfuseError::new(ERR_ENOENT, format!("release {} missing macOS tarball asset", rel.tag_name))
             })?;
         let sums_asset = rel
             .assets
             .iter()
             .find(|a| a.name == "SHA256SUMS.txt" || a.name == "SHA256SUMS")
             .ok_or_else(|| {
-                AfuseError::new(
-                    ERR_ENOENT,
-                    format!("release {} missing SHA256SUMS asset", rel.tag_name),
-                )
+                AfuseError::new(ERR_ENOENT, format!("release {} missing SHA256SUMS asset", rel.tag_name))
             })?;
-        (
-            tb_asset.name.clone(),
-            tb_asset.download_url.clone(),
-            sums_asset.download_url.clone(),
-        )
+        (tb_asset.name.clone(), tb_asset.download_url.clone(), sums_asset.download_url.clone())
     };
 
     let tarball_path = stage_dir.join(&tarball_name);
@@ -320,34 +261,20 @@ pub fn perform_upgrade_on_exe(exe_path: &Path) -> Result<UpgradeApplyReport, Afu
     if actual_sha != expected_sha {
         return Err(AfuseError::new(
             ERR_EINVAL,
-            format!(
-                "SHA-256 verification failed for {}: expected {}, got {}",
-                tarball_name, expected_sha, actual_sha
-            ),
+            format!("SHA-256 verification failed for {}: expected {}, got {}", tarball_name, expected_sha, actual_sha),
         ));
     }
 
-    let extract_dir = stage_dir.join("extract");
-    fs::create_dir_all(&extract_dir)
-        .map_err(|e| AfuseError::new(1, format!("mkdir failed: {}", e)))?;
-    let tar_out = Command::new("/usr/bin/tar")
-        .arg("-xzf")
-        .arg(&tarball_path)
-        .arg("-C")
-        .arg(&extract_dir)
-        .output()
-        .map_err(|e| AfuseError::new(1, format!("tar invocation failed: {}", e)))?;
-    if !tar_out.status.success() {
-        return Err(AfuseError::new(
-            1,
-            format!("tar extraction failed: {}", String::from_utf8_lossy(&tar_out.stderr).trim()),
-        ));
-    }
+    let extract_dir = create_exclusive_dir_0700(&stage_dir, "extract")?;
+    let extracted_bin = preflight_and_extract_afuse(&tarball_path, &extract_dir)?;
 
-    let extracted_bin = find_extracted_afuse(&extract_dir).ok_or_else(|| {
-        AfuseError::new(ERR_ENOENT, "extracted release archive does not contain 'afuse'")
-    })?;
-    let staged_bin = parent_dir.join(format!(".afuse.upgrade.bin.{}.{}", std::process::id(), seq));
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let staged_bin = parent_dir.join(format!(
+        ".afuse.upgrade.bin.{}.{}.{}",
+        std::process::id(),
+        seq,
+        random_hex_suffix()
+    ));
     if fs::copy(&extracted_bin, &staged_bin).is_err() {
         let _ = force_remove_all(&staged_bin);
         return Err(AfuseError::new(
@@ -355,7 +282,7 @@ pub fn perform_upgrade_on_exe(exe_path: &Path) -> Result<UpgradeApplyReport, Afu
             format!("cannot write replacement binary; run: {}", BREW_UPGRADE_CMD),
         ));
     }
-    let _ = fs::set_permissions(&staged_bin, fs::Permissions::from_mode(0o755));
+    let _ = chmod_nofollow(&staged_bin, 0o755);
     if let Err(e) = prepare_and_verify_staged_binary(&staged_bin, Some(&rel.latest_version)) {
         let _ = force_remove_all(&staged_bin);
         return Err(e);

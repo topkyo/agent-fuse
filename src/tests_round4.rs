@@ -88,7 +88,7 @@ mod tests_round4 {
         make_tarball(&arch_sym, &pay_sym, "afuse");
         env::set_var("AFUSE_UPGRADE_ARCHIVE_DIR", &arch_sym);
         let sym_err = perform_upgrade_on_exe(&exe).unwrap_err();
-        assert_eq!(sym_err.code, ERR_ENOENT);
+        assert_eq!(sym_err.code, ERR_EINVAL);
         assert_eq!(fs::read(&exe).unwrap(), b"OLD_STABLE_EXE");
 
         // 2. Symlink directory loop must fail cleanly without recursion hang
@@ -100,7 +100,7 @@ mod tests_round4 {
         make_tarball(&arch_loop, &pay_loop, "loop");
         env::set_var("AFUSE_UPGRADE_ARCHIVE_DIR", &arch_loop);
         let loop_err = perform_upgrade_on_exe(&exe).unwrap_err();
-        assert_eq!(loop_err.code, ERR_ENOENT);
+        assert_eq!(loop_err.code, ERR_EINVAL);
         assert_eq!(fs::read(&exe).unwrap(), b"OLD_STABLE_EXE");
 
         // 3. Non-Mach-O plain text payload must be rejected by magic header check
@@ -253,14 +253,15 @@ mod tests_round4 {
         let _eg = TestEnvGuard::clean(&["AFUSE_RELEASE_JSON_URL"]);
 
         assert!(is_trusted_github_url("https://github.com/topkyo/agent-fuse/releases/download/v0.6.0/AgentFuse-0.6.0-macos.dmg"));
-        assert!(is_trusted_github_url("https://release-assets.githubusercontent.com/a/b"));
+        assert!(!is_trusted_github_url("https://release-assets.githubusercontent.com/a/b"));
         assert!(!is_trusted_github_url("http://github.com/topkyo/agent-fuse/releases/download/v0.6.0/AgentFuse-0.6.0-macos.dmg"));
         assert!(!is_trusted_github_url("https://github.com@evil.invalid/AgentFuse-0.6.0-macos.dmg"));
         assert!(!is_trusted_github_url("https://evil.invalid/AgentFuse-0.6.0-macos.dmg"));
         assert!(!is_trusted_github_url("https://github.com/attacker/agent-fuse/releases/download/v1.0/x.dmg"));
         assert!(!is_trusted_github_url("https://github.com/topkyo/other-repo/releases/download/v1.0/x.dmg"));
         assert!(is_trusted_github_url("https://github.com/topkyo/agent-fuse/releases/download/v0.6.1/AgentFuse.dmg"));
-        assert!(is_trusted_github_url("https://release-assets.githubusercontent.com/github-production-release-asset/x.dmg"));
+        assert!(!is_trusted_github_url("https://release-assets.githubusercontent.com/github-production-release-asset/x.dmg"));
+        assert!(crate::upgrade_json::validate_effective_asset_url("https://release-assets.githubusercontent.com/github-production-release-asset/x.dmg").is_ok());
 
         let untrusted_rel = r#"{
           "tag_name":"v0.9.5",
@@ -274,7 +275,7 @@ mod tests_round4 {
         assert_eq!(parsed_bad.dmg_url, None);
         assert_eq!(parsed_bad.dmg_sha256_url, None);
 
-        let trusted_body = r#"{"tag_name":"v0.9.6","html_url":"https://github.com/topkyo/agent-fuse/releases/tag/v0.9.6","assets":[{"name":"AgentFuse-0.9.6-macos.dmg","browser_download_url":"https://github.com/topkyo/agent-fuse/releases/download/v0.9.6/AgentFuse-0.9.6-macos.dmg"},{"name":"AgentFuse-0.9.6-macos.dmg.sha256","browser_download_url":"https://objects.githubusercontent.com/agent-fuse/AgentFuse-0.9.6-macos.dmg.sha256"}]}"#;
+        let trusted_body = r#"{"tag_name":"v0.9.6","html_url":"https://github.com/topkyo/agent-fuse/releases/tag/v0.9.6","assets":[{"name":"AgentFuse-0.9.6-macos.dmg","browser_download_url":"https://github.com/topkyo/agent-fuse/releases/download/v0.9.6/AgentFuse-0.9.6-macos.dmg"},{"name":"AgentFuse-0.9.6-macos.dmg.sha256","browser_download_url":"https://github.com/topkyo/agent-fuse/releases/download/v0.9.6/AgentFuse-0.9.6-macos.dmg.sha256"}]}"#;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let body_clone = trusted_body.to_string();
@@ -294,10 +295,10 @@ mod tests_round4 {
         let rep = check_for_updates().unwrap();
         h.join().unwrap();
         assert_eq!(rep.dmg_url.as_deref(), Some("https://github.com/topkyo/agent-fuse/releases/download/v0.9.6/AgentFuse-0.9.6-macos.dmg"));
-        assert_eq!(rep.dmg_sha256_url.as_deref(), Some("https://objects.githubusercontent.com/agent-fuse/AgentFuse-0.9.6-macos.dmg.sha256"));
+        assert_eq!(rep.dmg_sha256_url.as_deref(), Some("https://github.com/topkyo/agent-fuse/releases/download/v0.9.6/AgentFuse-0.9.6-macos.dmg.sha256"));
         let rep_json = rep.to_json();
         assert!(rep_json.contains("\"dmg_url\":\"https://github.com/topkyo/agent-fuse/releases/download/v0.9.6/AgentFuse-0.9.6-macos.dmg\""));
-        assert!(rep_json.contains("\"dmg_sha256_url\":\"https://objects.githubusercontent.com/agent-fuse/AgentFuse-0.9.6-macos.dmg.sha256\""));
+        assert!(rep_json.contains("\"dmg_sha256_url\":\"https://github.com/topkyo/agent-fuse/releases/download/v0.9.6/AgentFuse-0.9.6-macos.dmg.sha256\""));
     }
 
     #[test]

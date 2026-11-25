@@ -336,10 +336,26 @@ pub(crate) fn list_snapshots_unlocked(ws_vault: &Path) -> Result<Vec<SnapshotMet
     if let Ok(rd) = fs::read_dir(ws_vault.join("snapshots")) {
         for entry in rd.flatten() {
             let snap_dir = entry.path();
+            let dir_name = entry.file_name();
+            let Ok(dir_meta) = fs::symlink_metadata(&snap_dir) else {
+                continue;
+            };
+            if dir_meta.file_type().is_symlink() || !dir_meta.file_type().is_dir() {
+                continue;
+            }
             let meta_path = snap_dir.join("meta.kv");
-            if meta_path.is_file() && snap_dir.join("tree").is_dir() {
+            let tree_path = snap_dir.join("tree");
+            let meta_ok = fs::symlink_metadata(&meta_path)
+                .map(|m| !m.file_type().is_symlink() && m.file_type().is_file())
+                .unwrap_or(false);
+            let tree_ok = fs::symlink_metadata(&tree_path)
+                .map(|m| !m.file_type().is_symlink() && m.file_type().is_dir())
+                .unwrap_or(false);
+            if meta_ok && tree_ok {
                 if let Ok(m) = read_meta(&meta_path) {
-                    out.push(m);
+                    if dir_name.to_str() == Some(m.id.as_str()) {
+                        out.push(m);
+                    }
                 }
             }
         }
@@ -361,11 +377,15 @@ pub(crate) fn resolve_snapshot_id(ws_vault: &Path, target: &str) -> Result<Snaps
             return Ok(m.clone());
         }
     }
-    if !target.contains('/') && !target.contains('\\') && !target.contains("..") {
+    if crate::meta::is_valid_snapshot_id(target) {
         let snap_dir = ws_vault.join("snapshots").join(target);
         let direct_meta = snap_dir.join("meta.kv");
         if direct_meta.is_file() && snap_dir.join("tree").is_dir() {
-            return read_meta(&direct_meta);
+            let m = read_meta(&direct_meta)?;
+            if m.id == target {
+                return Ok(m);
+            }
+            return Err(AfuseError::new(ERR_EINVAL, "snapshot meta.kv id does not match directory name"));
         }
     }
     Err(AfuseError::new(ERR_ENOENT, format!("snapshot '{}' not found", target)))

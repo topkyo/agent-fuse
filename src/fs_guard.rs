@@ -1,9 +1,14 @@
-use crate::apfs::{clonefile_nofollow, force_unlock};
+use crate::apfs::{
+    chmod_nofollow, clonefile_nofollow, force_remove_all, force_unlock, random_hex_suffix,
+    MAX_WALK_DEPTH, TMP_SEQ,
+};
 use crate::error::{AfuseError, ERR_EACCES, ERR_EINVAL};
 use crate::vault::is_ignored_name;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) struct TempPermGuard {
     restore: Option<(PathBuf, u32)>,
@@ -17,11 +22,14 @@ impl TempPermGuard {
         if m.file_type().is_symlink() {
             return Self { restore: None };
         }
-        let orig = m.permissions().mode() & 0o7777;
-        if (orig & need_bits) == need_bits {
+        let orig = m.permissions().mode() & 0o777;
+        let need = need_bits & 0o777;
+        if (orig & need) == need {
             return Self { restore: None };
         }
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(orig | need_bits));
+        if chmod_nofollow(path, orig | need).is_err() {
+            return Self { restore: None };
+        }
         Self {
             restore: Some((path.to_path_buf(), orig)),
         }
@@ -31,28 +39,41 @@ impl TempPermGuard {
 impl Drop for TempPermGuard {
     fn drop(&mut self) {
         if let Some((p, orig)) = self.restore.take() {
-            let _ = fs::set_permissions(p, fs::Permissions::from_mode(orig));
+            let _ = chmod_nofollow(&p, orig);
         }
     }
 }
 
-fn clone_dir_fallback_readable(src: &Path, dst: &Path, orig: u32) -> Result<(), AfuseError> {
+fn clone_dir_fallback_readable(
+    src: &Path,
+    dst: &Path,
+    orig: u32,
+    depth: usize,
+) -> Result<(), AfuseError> {
+    if depth >= MAX_WALK_DEPTH {
+        return Err(AfuseError::new(
+            ERR_EINVAL,
+            "directory nesting exceeded maximum depth limit",
+        ));
+    }
     let _sg = TempPermGuard::ensure(src, 0o500);
-    fs::create_dir_all(dst).map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))?;
-    let _ = fs::set_permissions(dst, fs::Permissions::from_mode(orig | 0o700));
-    let rd = fs::read_dir(src).map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))?;
+    fs::create_dir_all(dst)
+        .map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))?;
+    let _ = chmod_nofollow(dst, (orig & 0o777) | 0o700);
+    let rd = fs::read_dir(src)
+        .map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))?;
     for entry in rd {
         let entry = entry.map_err(|e| AfuseError::new(1, e.to_string()))?;
-        clonefile_readable(&entry.path(), &dst.join(entry.file_name()))?;
+        clonefile_readable_depth(&entry.path(), &dst.join(entry.file_name()), depth + 1)?;
     }
-    let _ = fs::set_permissions(dst, fs::Permissions::from_mode(orig));
+    let _ = chmod_nofollow(dst, orig & 0o777);
     Ok(())
 }
 
-pub(crate) fn clonefile_readable(src: &Path, dst: &Path) -> Result<(), AfuseError> {
+fn clonefile_readable_depth(src: &Path, dst: &Path, depth: usize) -> Result<(), AfuseError> {
     if let Ok(m) = fs::symlink_metadata(src) {
         if !m.file_type().is_symlink() {
-            let orig = m.permissions().mode() & 0o7777;
+            let orig = m.permissions().mode() & 0o777;
             let is_dir = m.file_type().is_dir();
             let need = if is_dir { 0o700 } else { 0o400 };
             if (orig & need) != need {
@@ -61,22 +82,30 @@ pub(crate) fn clonefile_readable(src: &Path, dst: &Path) -> Result<(), AfuseErro
                     Ok(()) => {
                         if fs::symlink_metadata(dst).is_ok() {
                             force_unlock(dst);
-                            let _ = fs::set_permissions(dst, fs::Permissions::from_mode(orig));
+                            let _ = chmod_nofollow(dst, orig);
                         }
                         return Ok(());
                     }
-                    Err(e) if is_dir && e.code == ERR_EACCES => return clone_dir_fallback_readable(src, dst, orig),
+                    Err(e) if is_dir && e.code == ERR_EACCES => {
+                        return clone_dir_fallback_readable(src, dst, orig, depth)
+                    }
                     Err(e) => return Err(e),
                 }
             }
             return match clonefile_nofollow(src, dst) {
                 Ok(()) => Ok(()),
-                Err(e) if is_dir && e.code == ERR_EACCES => clone_dir_fallback_readable(src, dst, orig),
+                Err(e) if is_dir && e.code == ERR_EACCES => {
+                    clone_dir_fallback_readable(src, dst, orig, depth)
+                }
                 Err(e) => Err(e),
             };
         }
     }
     clonefile_nofollow(src, dst)
+}
+
+pub(crate) fn clonefile_readable(src: &Path, dst: &Path) -> Result<(), AfuseError> {
+    clonefile_readable_depth(src, dst, 0)
 }
 
 pub struct UnlockedDirsGuard {
@@ -99,24 +128,23 @@ impl UnlockedDirsGuard {
                 "unsafe symlink or non-directory ancestor",
             ));
         }
-        let mode = meta.permissions().mode() & 0o7777;
+        let mode = meta.permissions().mode() & 0o777;
         force_unlock(dir);
         if (mode & 0o700) != 0o700 {
             if !self.saved_modes.iter().any(|(p, _)| p == dir) {
                 self.saved_modes.push((dir.to_path_buf(), mode));
             }
             let cur = fs::symlink_metadata(dir)
-                .map(|m| m.permissions().mode() & 0o7777)
+                .map(|m| m.permissions().mode() & 0o777)
                 .unwrap_or(mode);
-            fs::set_permissions(dir, fs::Permissions::from_mode(cur | 0o700))
-                .map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))?;
+            chmod_nofollow(dir, cur | 0o700)?;
         }
         Ok(())
     }
 
     pub fn restore_all(&mut self) {
         while let Some((dir, mode)) = self.saved_modes.pop() {
-            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(mode));
+            let _ = chmod_nofollow(&dir, mode);
         }
     }
 }
@@ -149,11 +177,17 @@ pub fn prepare_ancestors_writable(
                 guard.unlock_if_needed(&cur)?;
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && create_missing => {
-                fs::create_dir(&cur)
-                    .map_err(|ce| AfuseError::new(ce.raw_os_error().unwrap_or(1), ce.to_string()))?;
+                fs::create_dir(&cur).map_err(|ce| {
+                    AfuseError::new(ce.raw_os_error().unwrap_or(1), ce.to_string())
+                })?;
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string())),
+            Err(e) => {
+                return Err(AfuseError::new(
+                    e.raw_os_error().unwrap_or(1),
+                    e.to_string(),
+                ))
+            }
         }
     }
     Ok(())
@@ -166,15 +200,137 @@ pub fn lock_guard_single_dir(dir: &Path) -> Result<UnlockedDirsGuard, AfuseError
     Ok(g)
 }
 
-pub fn force_unlock_tree_recursive(p: &Path) {
+fn force_unlock_tree_depth(p: &Path, depth: usize) {
+    if depth >= MAX_WALK_DEPTH {
+        return;
+    }
     force_unlock(p);
     if let Ok(meta) = fs::symlink_metadata(p) {
-        if meta.file_type().is_dir() {
+        if !meta.file_type().is_symlink() && meta.file_type().is_dir() {
             if let Ok(rd) = fs::read_dir(p) {
                 for entry in rd.flatten() {
                     if !is_ignored_name(&entry.file_name().to_string_lossy()) {
-                        force_unlock_tree_recursive(&entry.path());
+                        force_unlock_tree_depth(&entry.path(), depth + 1);
                     }
+                }
+            }
+        }
+    }
+}
+
+pub fn force_unlock_tree_recursive(p: &Path) {
+    force_unlock_tree_depth(p, 0);
+}
+
+pub(crate) struct HeteroStashGuard {
+    orig: PathBuf,
+    stashed: Option<PathBuf>,
+    pub(crate) cleared: bool,
+    #[allow(dead_code)]
+    pub(crate) backup_path: Option<PathBuf>,
+    committed: bool,
+}
+
+impl HeteroStashGuard {
+    pub(crate) fn stash_if_needed(
+        p: &Path,
+        ws_vault: &Path,
+        expect_dir: bool,
+        safety_backup: bool,
+    ) -> Result<Self, AfuseError> {
+        let Ok(m) = fs::symlink_metadata(p) else {
+            return Ok(Self {
+                orig: p.to_path_buf(),
+                stashed: None,
+                cleared: false,
+                backup_path: None,
+                committed: true,
+            });
+        };
+        let ft = m.file_type();
+        let matches_kind = !ft.is_symlink() && if expect_dir { ft.is_dir() } else { ft.is_file() };
+        if matches_kind {
+            return Ok(Self {
+                orig: p.to_path_buf(),
+                stashed: None,
+                cleared: false,
+                backup_path: None,
+                committed: true,
+            });
+        }
+        let mut guard = UnlockedDirsGuard::new();
+        let parent = p.parent().unwrap_or(Path::new("/"));
+        if fs::symlink_metadata(parent).is_ok() {
+            let _ = guard.unlock_if_needed(parent);
+        }
+        if ft.is_symlink() {
+            let res = fs::remove_file(p)
+                .map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()));
+            guard.restore_all();
+            res?;
+            return Ok(Self {
+                orig: p.to_path_buf(),
+                stashed: None,
+                cleared: true,
+                backup_path: None,
+                committed: true,
+            });
+        }
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let stashed = parent.join(format!(
+            ".afuse.tmp.hetero.{}.{}.{}",
+            std::process::id(),
+            seq,
+            random_hex_suffix()
+        ));
+        let mv_res = fs::rename(p, &stashed).map_err(|e| {
+            AfuseError::new(
+                e.raw_os_error().unwrap_or(1),
+                format!("stash heterogeneous target failed: {}", e),
+            )
+        });
+        guard.restore_all();
+        mv_res?;
+        let mut backup_path = None;
+        if safety_backup {
+            let backup_root = ws_vault.join("hetero-backups");
+            if fs::create_dir_all(&backup_root).is_ok() {
+                let _ = chmod_nofollow(&backup_root, 0o700);
+                let ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                let dst = backup_root.join(format!("hetero-{}-{}", ms, random_hex_suffix()));
+                if clonefile_readable(&stashed, &dst).is_ok() {
+                    backup_path = Some(dst);
+                }
+            }
+        }
+        Ok(Self {
+            orig: p.to_path_buf(),
+            stashed: Some(stashed),
+            cleared: true,
+            backup_path,
+            committed: false,
+        })
+    }
+
+    pub(crate) fn commit(&mut self) {
+        self.committed = true;
+        if let Some(st) = self.stashed.take() {
+            let _ = force_remove_all(&st);
+        }
+    }
+}
+
+impl Drop for HeteroStashGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            if let Some(st) = self.stashed.take() {
+                if fs::symlink_metadata(&self.orig).is_err() {
+                    let _ = fs::rename(&st, &self.orig);
+                } else {
+                    let _ = force_remove_all(&st);
                 }
             }
         }

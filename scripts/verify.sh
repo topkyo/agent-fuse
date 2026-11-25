@@ -32,7 +32,7 @@ echo "All production .rs modules strictly < 400 LOC."
 echo "=== [Gate 2.1] Offline Unit & Kernel Integration Tests ==="
 cargo test --offline --manifest-path "$PROJECT_DIR/Cargo.toml"
 
-echo "=== [Gate 2.2] Release Build & Binary Size Gate (< 10 MB) ==="
+echo "=== [Gate 2.2] Release Build, Hardened Env Isolation & Binary Size Gate (< 10 MB) ==="
 cargo build --release --offline --manifest-path "$PROJECT_DIR/Cargo.toml"
 BIN_PATH="$CARGO_TARGET_DIR/release/afuse"
 BIN_BYTES=$(stat -f%z "$BIN_PATH")
@@ -41,6 +41,15 @@ if [ "$BIN_BYTES" -ge 10485760 ]; then
   echo "FAIL: binary size ${BIN_BYTES} >= 10 MB" >&2
   exit 1
 fi
+python3 - "$BIN_PATH" <<'PY'
+import sys
+raw = open(sys.argv[1], "rb").read()
+for forbidden in (b"AFUSE_RELEASE_JSON_URL", b"AFUSE_UPGRADE_ARCHIVE_DIR", b"AFUSE_UNINSTALL_HOME"):
+    assert forbidden not in raw, f"test-only env hook leaked into default release binary: {forbidden!r}"
+print("Default release binary verified: zero test-only upgrade/uninstall env hooks embedded.")
+PY
+cargo build --offline --features test-hooks --manifest-path "$PROJECT_DIR/Cargo.toml"
+MOCK_UPGRADE_BIN="$CARGO_TARGET_DIR/debug/afuse"
 
 echo "=== [Gate 2.3] End-to-End 1,000-File Chaos + Fast Clone + Process-Group Breaker + Peak RSS (< 30 MB) ==="
 TMP_SANDBOX="$(mktemp -d /tmp/afuse-verify-XXXXXX)"
@@ -297,7 +306,7 @@ PY
 REL_JSON="$TMP_SANDBOX/release.json"
 echo '{"tag_name":"v0.9.0","html_url":"https://github.com/topkyo/agent-fuse/releases/tag/v0.9.0","assets":[]}' > "$REL_JSON"
 CUR_VER=$("$BIN_PATH" --version | awk '{print $NF}')
-UP_JSON=$(AFUSE_RELEASE_JSON_URL="file://$REL_JSON" "$BIN_PATH" --json upgrade --check)
+UP_JSON=$(AFUSE_RELEASE_JSON_URL="file://$REL_JSON" "$MOCK_UPGRADE_BIN" --json upgrade --check)
 python3 - "$UP_JSON" "$CUR_VER" <<'PY'
 import json, sys
 d = json.loads(sys.argv[1])
@@ -404,14 +413,28 @@ printf '%s\n' "\$*" >> "$P2_HOOK_LOG"
 SH
 chmod +x "$P2_FAKE_BIN/afuse"
 : > "$P2_HOOK_LOG"
+P2_ZSH_SNIPPET="$("$BIN_PATH" hook zsh)"
+python3 - "$P2_ZSH_SNIPPET" <<'PY'
+import sys
+s = sys.argv[1]
+assert "emulate -L zsh" in s, "missing emulate -L zsh"
+app_idx = s.find("/Applications/AgentFuse.app/Contents/MacOS/afuse")
+path_idx = s.find("command -v afuse")
+assert 0 <= app_idx < path_idx, "fixed install paths must precede PATH fallback"
+PY
+P2_ZSH_TEST_SNIPPET="$(printf '%s\n' "$P2_ZSH_SNIPPET" | sed \
+  -e 's|/Applications/AgentFuse.app/Contents/MacOS/afuse|/nonexistent/afuse-app|g' \
+  -e 's|/opt/homebrew/bin/afuse|/nonexistent/afuse-brew|g' \
+  -e 's|/usr/local/bin/afuse|/nonexistent/afuse-usr|g')"
 zsh -fc "
+  HOME=\"$TMP_SANDBOX/empty-home\"
   PATH=\"$P2_FAKE_BIN:\$PATH\"
   AFUSE_HOOK_DISABLE=0; AFUSE_GUARDED=0
-  eval \"\$('$BIN_PATH' hook zsh)\"
+  eval \"\$1\"
   _afuse_preexec 'FOO=1 env BAR=2 npx -y @anthropic-ai/claude-code --help'
   _afuse_preexec 'command codex --full-auto'
   _afuse_preexec 'uvx --from aider-chat aider'
-"
+" _ "$P2_ZSH_TEST_SNIPPET"
 P2_ZSH_CHECK="$(cat "$P2_HOOK_LOG")"
 echo "$P2_ZSH_CHECK" | grep -q -- "--tool claude-code" || { echo "FAIL: zsh wrapper parse claude-code ($P2_ZSH_CHECK)" >&2; exit 1; }
 echo "$P2_ZSH_CHECK" | grep -q -- "--tool codex" || { echo "FAIL: zsh wrapper parse codex ($P2_ZSH_CHECK)" >&2; exit 1; }
@@ -438,8 +461,8 @@ set -e
   echo "FAIL: expected exit code 2 for bad upgrade/hook flags, got up=$UP_BAD_RC up_dash=$UP_DASH_RC hk=$HK_BAD_RC hk_dash=$HK_DASH_RC" >&2
   exit 1
 }
-# Verify 404 apply text and JSON using fresh local server
-python3 - "$BIN_PATH" <<'PY'
+# Verify 404 apply text and JSON using fresh local server (via test-hooks binary)
+python3 - "$MOCK_UPGRADE_BIN" <<'PY'
 import http.server, json, os, subprocess, threading, sys
 bin_p = sys.argv[1]
 class H(http.server.BaseHTTPRequestHandler):

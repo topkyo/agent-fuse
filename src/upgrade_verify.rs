@@ -1,5 +1,4 @@
 use crate::error::{AfuseError, ERR_EINVAL};
-use crate::upgrade_json::ReleaseAsset;
 use std::env;
 use std::fs::{self, File};
 use std::io::Read;
@@ -10,13 +9,13 @@ use std::time::{Duration, Instant};
 
 const MAX_EXTRACT_DEPTH: usize = 4;
 
-fn is_regular_non_symlink_file(path: &Path) -> bool {
+pub(crate) fn is_regular_non_symlink_file(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .map(|m| !m.file_type().is_symlink() && m.file_type().is_file())
         .unwrap_or(false)
 }
 
-fn is_real_non_symlink_dir(path: &Path) -> bool {
+pub(crate) fn is_real_non_symlink_dir(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .map(|m| !m.file_type().is_symlink() && m.file_type().is_dir())
         .unwrap_or(false)
@@ -26,10 +25,15 @@ fn find_extracted_afuse_at(dir: &Path, depth: usize) -> Option<PathBuf> {
     if !is_real_non_symlink_dir(dir) {
         return None;
     }
-    for rel in ["afuse", "bin/afuse"] {
-        let cand = dir.join(rel);
-        if is_regular_non_symlink_file(&cand) {
-            return Some(cand);
+    let direct = dir.join("afuse");
+    if is_regular_non_symlink_file(&direct) {
+        return Some(direct);
+    }
+    let bin_dir = dir.join("bin");
+    if is_real_non_symlink_dir(&bin_dir) {
+        let nested = bin_dir.join("afuse");
+        if is_regular_non_symlink_file(&nested) {
+            return Some(nested);
         }
     }
     if depth >= MAX_EXTRACT_DEPTH {
@@ -104,16 +108,23 @@ pub(crate) fn verify_executable_magic(path: &Path) -> Result<(), AfuseError> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodesignIdentity {
+    pub(crate) identifier: Option<String>,
     pub(crate) team_id: Option<String>,
     pub(crate) authorities: Vec<String>,
 }
 
 pub(crate) fn parse_codesign_identity(text: &str) -> CodesignIdentity {
+    let mut identifier = None;
     let mut team_id = None;
     let mut authorities = Vec::new();
     for raw in text.lines() {
         let line = raw.trim();
-        if let Some(val) = line.strip_prefix("TeamIdentifier=") {
+        if let Some(val) = line.strip_prefix("Identifier=") {
+            let v = val.trim();
+            if !v.is_empty() {
+                identifier = Some(v.to_string());
+            }
+        } else if let Some(val) = line.strip_prefix("TeamIdentifier=") {
             let v = val.trim();
             if !v.is_empty() && v != "not set" {
                 team_id = Some(v.to_string());
@@ -125,7 +136,11 @@ pub(crate) fn parse_codesign_identity(text: &str) -> CodesignIdentity {
             }
         }
     }
-    CodesignIdentity { team_id, authorities }
+    CodesignIdentity {
+        identifier,
+        team_id,
+        authorities,
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -136,7 +151,11 @@ fn probe_codesign_identity(path: &Path) -> CodesignIdentity {
         .stdin(Stdio::null())
         .output()
     else {
-        return CodesignIdentity { team_id: None, authorities: Vec::new() };
+        return CodesignIdentity {
+            identifier: None,
+            team_id: None,
+            authorities: Vec::new(),
+        };
     };
     let merged = format!(
         "{}\n{}",
@@ -170,6 +189,18 @@ pub(crate) fn validate_candidate_codesign_identity(
             ),
         ));
     }
+    if let Some(host_ident) = host.identifier.as_deref() {
+        if cand.identifier.as_deref() != Some(host_ident) {
+            return Err(AfuseError::new(
+                ERR_EINVAL,
+                format!(
+                    "staged binary Identifier mismatch ({} != {})",
+                    cand.identifier.as_deref().unwrap_or("none"),
+                    host_ident
+                ),
+            ));
+        }
+    }
     if !cand
         .authorities
         .iter()
@@ -195,13 +226,20 @@ fn ensure_macos_codesign(staged_bin: &Path, host_exe: Option<&Path>) -> Result<(
             .map(|s| s.success())
             .unwrap_or(false)
     };
-    let host_id = host_exe
-        .filter(|p| verify_ok(p))
-        .map(probe_codesign_identity)
-        .unwrap_or(CodesignIdentity {
+    let host_signed = host_exe.map(verify_ok).unwrap_or(false);
+    let host_id = if host_signed {
+        host_exe.map(probe_codesign_identity).unwrap_or(CodesignIdentity {
+            identifier: None,
             team_id: None,
             authorities: Vec::new(),
-        });
+        })
+    } else {
+        CodesignIdentity {
+            identifier: None,
+            team_id: None,
+            authorities: Vec::new(),
+        }
+    };
     if host_id.team_id.is_some() {
         let strict_ok = verify_ok(staged_bin);
         let cand_id = probe_codesign_identity(staged_bin);
@@ -210,25 +248,41 @@ fn ensure_macos_codesign(staged_bin: &Path, host_exe: Option<&Path>) -> Result<(
     if verify_ok(staged_bin) {
         return Ok(());
     }
-    let sign_out = Command::new("/usr/bin/codesign")
-        .args(["--force", "--sign", "-"])
-        .arg(staged_bin)
-        .output()
-        .map_err(|e| AfuseError::new(ERR_EINVAL, format!("codesign invocation failed: {}", e)))?;
-    if !sign_out.status.success() {
-        let detail = String::from_utf8_lossy(&sign_out.stderr).trim().to_string();
+    #[cfg(not(any(test, feature = "test-hooks")))]
+    {
+        if host_signed {
+            return Err(AfuseError::new(
+                ERR_EINVAL,
+                "staged binary rejected: unsigned payload cannot replace signed executable",
+            ));
+        }
         return Err(AfuseError::new(
             ERR_EINVAL,
-            format!("ad-hoc codesign failed: {}", detail),
+            "staged binary failed strict codesign verification",
         ));
     }
-    if !verify_ok(staged_bin) {
-        return Err(AfuseError::new(
-            ERR_EINVAL,
-            "staged binary failed strict codesign verification after signing",
-        ));
+    #[cfg(any(test, feature = "test-hooks"))]
+    {
+        let sign_out = Command::new("/usr/bin/codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(staged_bin)
+            .output()
+            .map_err(|e| AfuseError::new(ERR_EINVAL, format!("codesign invocation failed: {}", e)))?;
+        if !sign_out.status.success() {
+            let detail = String::from_utf8_lossy(&sign_out.stderr).trim().to_string();
+            return Err(AfuseError::new(
+                ERR_EINVAL,
+                format!("ad-hoc codesign failed: {}", detail),
+            ));
+        }
+        if !verify_ok(staged_bin) {
+            return Err(AfuseError::new(
+                ERR_EINVAL,
+                "staged binary failed strict codesign verification after signing",
+            ));
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 pub(crate) fn probe_staged_version(
@@ -320,64 +374,4 @@ pub(crate) fn prepare_and_verify_staged_binary(
         ensure_macos_codesign(staged_bin, host_exe.as_deref())?;
     }
     probe_staged_version(staged_bin, expected_version)
-}
-
-pub fn validate_release_asset_url(url: &str) -> Result<(), AfuseError> {
-    let rest = url.strip_prefix("https://").ok_or_else(|| {
-        AfuseError::new(ERR_EINVAL, "release asset URL must use https://")
-    })?;
-    let (authority, path_and_query) = rest.split_once('/').unwrap_or((rest, ""));
-    let authority = authority.split(['?', '#']).next().unwrap_or("");
-    if authority.is_empty() || authority.contains('@') {
-        return Err(AfuseError::new(ERR_EINVAL, "invalid release asset authority"));
-    }
-    let host = authority.split(':').next().unwrap_or("").to_ascii_lowercase();
-    let path_only = path_and_query.split(['?', '#']).next().unwrap_or("");
-    match host.as_str() {
-        "github.com" => {
-            let lower_path = path_only.to_ascii_lowercase();
-            let has_traversal = lower_path.contains("..")
-                || lower_path.contains("%2e")
-                || lower_path.contains('\\')
-                || lower_path.contains("%5c");
-            if has_traversal || !path_only.starts_with("topkyo/agent-fuse/releases/download/") {
-                return Err(AfuseError::new(
-                    ERR_EINVAL,
-                    format!("untrusted github.com release asset path: /{}", path_only),
-                ));
-            }
-        }
-        "objects.githubusercontent.com"
-        | "release-assets.githubusercontent.com"
-        | "github-releases.githubusercontent.com" => {}
-        _ => {
-            return Err(AfuseError::new(ERR_EINVAL, format!("untrusted release asset host: {}", host)));
-        }
-    }
-    Ok(())
-}
-
-pub fn is_trusted_github_url(url: &str) -> bool {
-    validate_release_asset_url(url).is_ok()
-}
-
-pub(crate) fn extract_trusted_dmg_urls(assets: &[ReleaseAsset]) -> (Option<String>, Option<String>) {
-    let dmg_asset = assets
-        .iter()
-        .find(|a| a.name.ends_with("-macos.dmg") && is_trusted_github_url(&a.download_url));
-    let preferred_sha = dmg_asset.and_then(|d| {
-        let exact = format!("{}.sha256", d.name);
-        assets
-            .iter()
-            .find(|a| a.name == exact && is_trusted_github_url(&a.download_url))
-    });
-    let sha_asset = preferred_sha.or_else(|| {
-        assets
-            .iter()
-            .find(|a| a.name.ends_with("-macos.dmg.sha256") && is_trusted_github_url(&a.download_url))
-    });
-    (
-        dmg_asset.map(|a| a.download_url.clone()),
-        sha_asset.map(|a| a.download_url.clone()),
-    )
 }

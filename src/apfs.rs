@@ -1,10 +1,14 @@
 use crate::error::{AfuseError, ERR_EEXIST, ERR_EINVAL, ERR_ENOTSUP, ERR_EXDEV};
 use std::env;
 use std::ffi::CString;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub(crate) const MAX_WALK_DEPTH: usize = 128;
 
 extern "C" {
     fn afuse_clonefile_nofollow(src: *const i8, dst: *const i8) -> i32;
@@ -18,7 +22,9 @@ extern "C" {
         fstype_len: usize,
     ) -> i32;
     fn afuse_lstat_inode_mode(path: *const i8, ino: *mut u64, mode: *mut u32) -> i32;
+    fn afuse_chmod_nofollow(path: *const i8, mode: u32) -> i32;
     fn afuse_force_unlock_path(path: *const i8) -> i32;
+    fn afuse_remove_all_nofollow(path: *const i8) -> i32;
     fn afuse_acquire_flock(lock_path: *const i8, out_fd: *mut i32) -> i32;
     fn afuse_try_acquire_flock(lock_path: *const i8, out_fd: *mut i32) -> i32;
     fn afuse_release_flock(fd: i32);
@@ -36,12 +42,14 @@ extern "C" {
 }
 
 pub(crate) static TMP_SEQ: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Debug, Clone)]
 pub struct StatFsInfo {
     pub fsid: (i32, i32),
     pub avail_bytes: u64,
     pub fstype: String,
 }
+
 pub fn short_hash(s: &str, max_chars: usize) -> &str {
     match s.char_indices().nth(max_chars) {
         Some((idx, _)) => &s[..idx],
@@ -56,6 +64,59 @@ pub(crate) fn c_path(p: &Path) -> Result<CString, AfuseError> {
             format!("path contains interior NUL: {}", p.display()),
         )
     })
+}
+
+pub(crate) fn random_hex_suffix() -> String {
+    let mut rnd = [0u8; 8];
+    let got_urandom = File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut rnd))
+        .is_ok();
+    if !got_urandom {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let mixed = nanos ^ seq.rotate_left(17) ^ ((std::process::id() as u64) << 32);
+        rnd = mixed.to_le_bytes();
+    }
+    let mut out = String::with_capacity(16);
+    for b in rnd {
+        use std::fmt::Write;
+        let _ = write!(&mut out, "{:02x}", b);
+    }
+    out
+}
+
+pub(crate) fn create_exclusive_dir_0700(parent: &Path, prefix: &str) -> Result<PathBuf, AfuseError> {
+    for _ in 0..8 {
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let name = format!(
+            "{}.{}.{}.{}",
+            prefix,
+            std::process::id(),
+            seq,
+            random_hex_suffix()
+        );
+        let cand = parent.join(name);
+        match fs::create_dir(&cand) {
+            Ok(()) => {
+                let _ = chmod_nofollow(&cand, 0o700);
+                return Ok(cand);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(AfuseError::new(
+                    e.raw_os_error().unwrap_or(1),
+                    format!("create_dir failed on {}: {}", cand.display(), e),
+                ))
+            }
+        }
+    }
+    Err(AfuseError::new(
+        ERR_EEXIST,
+        "failed to create unique temporary directory",
+    ))
 }
 
 pub fn real_home_dir() -> Result<PathBuf, AfuseError> {
@@ -126,6 +187,19 @@ pub fn lstat_inode_mode(p: &Path) -> Result<(u64, u32), AfuseError> {
     Ok((ino, mode))
 }
 
+pub(crate) fn chmod_nofollow(p: &Path, mode: u32) -> Result<(), AfuseError> {
+    let cp = c_path(p)?;
+    let rc = unsafe { afuse_chmod_nofollow(cp.as_ptr(), mode & 0o777) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(AfuseError::new(
+            rc,
+            format!("chmod_nofollow failed on {}: errno={}", p.display(), rc),
+        ))
+    }
+}
+
 pub fn clonefile_nofollow(src: &Path, dst: &Path) -> Result<(), AfuseError> {
     let c_src = c_path(src)?;
     let c_dst = c_path(dst)?;
@@ -174,46 +248,15 @@ pub(crate) fn force_unlock(p: &Path) {
 }
 
 pub fn force_remove_all(p: &Path) -> Result<(), AfuseError> {
-    let meta = match fs::symlink_metadata(p) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => {
-            return Err(AfuseError::new(
-                e.raw_os_error().unwrap_or(1),
-                format!("stat failed on {}: {}", p.display(), e),
-            ))
-        }
-    };
-    force_unlock(p);
-    if meta.file_type().is_dir() {
-        let entries = fs::read_dir(p).map_err(|e| {
-            AfuseError::new(
-                e.raw_os_error().unwrap_or(1),
-                format!("read_dir failed on {}: {}", p.display(), e),
-            )
-        })?;
-        for entry in entries {
-            let entry = entry.map_err(|e| {
-                AfuseError::new(
-                    e.raw_os_error().unwrap_or(1),
-                    format!("read_dir entry failed on {}: {}", p.display(), e),
-                )
-            })?;
-            force_remove_all(&entry.path())?;
-        }
-        fs::remove_dir(p).map_err(|e| {
-            AfuseError::new(
-                e.raw_os_error().unwrap_or(1),
-                format!("remove_dir failed on {}: {}", p.display(), e),
-            )
-        })
+    let cp = c_path(p)?;
+    let rc = unsafe { afuse_remove_all_nofollow(cp.as_ptr()) };
+    if rc == 0 {
+        Ok(())
     } else {
-        fs::remove_file(p).map_err(|e| {
-            AfuseError::new(
-                e.raw_os_error().unwrap_or(1),
-                format!("remove_file failed on {}: {}", p.display(), e),
-            )
-        })
+        Err(AfuseError::new(
+            rc,
+            format!("remove_all failed on {}: errno={}", p.display(), rc),
+        ))
     }
 }
 
@@ -300,7 +343,10 @@ pub(crate) fn can_write_path(p: &Path) -> Result<(), AfuseError> {
     if rc == 0 {
         Ok(())
     } else {
-        Err(AfuseError::new(rc, format!("path not writable {}: errno={}", p.display(), rc)))
+        Err(AfuseError::new(
+            rc,
+            format!("path not writable {}: errno={}", p.display(), rc),
+        ))
     }
 }
 

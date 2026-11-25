@@ -1,7 +1,9 @@
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pwd.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,7 +15,14 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+extern char **environ;
+
+#define AFUSE_MAX_REMOVE_DEPTH 128
+
 int afuse_clonefile_nofollow(const char *src, const char *dst) {
+    if (!src || !dst) {
+        return EINVAL;
+    }
     if (clonefile(src, dst, CLONE_NOFOLLOW) == 0) {
         return 0;
     }
@@ -21,6 +30,9 @@ int afuse_clonefile_nofollow(const char *src, const char *dst) {
 }
 
 int afuse_swap_paths(const char *path_a, const char *path_b) {
+    if (!path_a || !path_b) {
+        return EINVAL;
+    }
     if (renamex_np(path_a, path_b, RENAME_SWAP) == 0) {
         return 0;
     }
@@ -35,6 +47,9 @@ int afuse_statfs_info(
     char *fstype_buf,
     size_t fstype_len
 ) {
+    if (!path) {
+        return EINVAL;
+    }
     struct statfs sfs;
     if (statfs(path, &sfs) != 0) {
         return errno ? errno : -1;
@@ -52,6 +67,9 @@ int afuse_statfs_info(
 }
 
 int afuse_lstat_inode_mode(const char *path, uint64_t *ino, uint32_t *mode) {
+    if (!path) {
+        return EINVAL;
+    }
     struct stat st;
     if (lstat(path, &st) != 0) {
         return errno ? errno : -1;
@@ -61,50 +79,221 @@ int afuse_lstat_inode_mode(const char *path, uint64_t *ino, uint32_t *mode) {
     return 0;
 }
 
-int afuse_force_unlock_path(const char *path) {
+int afuse_chmod_nofollow(const char *path, uint32_t mode) {
+    if (!path) {
+        return EINVAL;
+    }
+    mode_t clean = (mode_t)(mode & 0777);
+    int fd = open(path, O_EVTONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (fd >= 0) {
+        struct stat st;
+        int rc = 0;
+        if (fstat(fd, &st) != 0) {
+            rc = errno ? errno : -1;
+        } else if (S_ISLNK(st.st_mode)) {
+            rc = EINVAL;
+        } else if (fchmod(fd, clean) != 0) {
+            rc = errno ? errno : -1;
+        }
+        close(fd);
+        return rc;
+    }
+    if (errno == ELOOP) {
+        return EINVAL;
+    }
     struct stat st;
     if (lstat(path, &st) != 0) {
         return errno ? errno : -1;
     }
-    if ((st.st_flags & UF_IMMUTABLE) != 0) {
-        (void)lchflags(path, st.st_flags & ~((uint32_t)UF_IMMUTABLE));
+    if (S_ISLNK(st.st_mode)) {
+        return EINVAL;
     }
-    if (!S_ISLNK(st.st_mode)) {
-        mode_t writable = (st.st_mode & 07777) | S_IWUSR | S_IRUSR;
-        if (S_ISDIR(st.st_mode)) {
-            writable |= S_IXUSR;
+    if (fchmodat(AT_FDCWD, path, clean, AT_SYMLINK_NOFOLLOW) != 0) {
+        return errno ? errno : -1;
+    }
+    return 0;
+}
+
+static void afuse_unlock_at(int dirfd, const char *name) {
+    int fd = openat(dirfd, name, O_EVTONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (fd >= 0) {
+        struct stat st;
+        if (fstat(fd, &st) == 0 && (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode))) {
+            if ((st.st_flags & UF_IMMUTABLE) != 0) {
+                (void)fchflags(fd, st.st_flags & ~((uint32_t)UF_IMMUTABLE));
+            }
+            mode_t writable = (st.st_mode & 0777) | S_IWUSR | S_IRUSR;
+            if (S_ISDIR(st.st_mode)) {
+                writable |= S_IXUSR;
+            }
+            (void)fchmod(fd, writable);
         }
-        (void)chmod(path, writable);
+        close(fd);
+        return;
     }
+    if (errno == ELOOP) {
+        return;
+    }
+    struct stat st;
+    if (fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW) != 0 || (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode))) {
+        return;
+    }
+    if (dirfd == AT_FDCWD && (st.st_flags & UF_IMMUTABLE) != 0) {
+        (void)lchflags(name, st.st_flags & ~((uint32_t)UF_IMMUTABLE));
+    }
+    mode_t writable = (st.st_mode & 0777) | S_IWUSR | S_IRUSR;
+    if (S_ISDIR(st.st_mode)) {
+        writable |= S_IXUSR;
+    }
+    (void)fchmodat(dirfd, name, writable, AT_SYMLINK_NOFOLLOW);
+}
+
+int afuse_force_unlock_path(const char *path) {
+    if (!path) {
+        return EINVAL;
+    }
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+        return errno ? errno : -1;
+    }
+    if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode)) {
+        return 0;
+    }
+    afuse_unlock_at(AT_FDCWD, path);
+    return 0;
+}
+
+static int afuse_remove_dir_fd(int dirfd, int depth) {
+    if (depth >= AFUSE_MAX_REMOVE_DEPTH) {
+        close(dirfd);
+        return ELOOP;
+    }
+    DIR *dir = fdopendir(dirfd);
+    if (!dir) {
+        int err = errno ? errno : -1;
+        close(dirfd);
+        return err;
+    }
+    int first_err = 0;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
+            continue;
+        }
+        struct stat cst;
+        if (fstatat(dirfd, ent->d_name, &cst, AT_SYMLINK_NOFOLLOW) != 0) {
+            if (errno == ENOENT) {
+                continue;
+            }
+            if (first_err == 0) first_err = errno ? errno : -1;
+            continue;
+        }
+        if (S_ISDIR(cst.st_mode)) {
+            afuse_unlock_at(dirfd, ent->d_name);
+            int cfd = openat(dirfd, ent->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (cfd < 0) {
+                if (errno == ENOENT) continue;
+                if (first_err == 0) first_err = errno ? errno : -1;
+                continue;
+            }
+            int rc = afuse_remove_dir_fd(cfd, depth + 1);
+            if (rc != 0 && first_err == 0) {
+                first_err = rc;
+            }
+            if (unlinkat(dirfd, ent->d_name, AT_REMOVEDIR) != 0 && errno != ENOENT) {
+                if (first_err == 0) first_err = errno ? errno : -1;
+            }
+        } else {
+            if (S_ISREG(cst.st_mode)) {
+                afuse_unlock_at(dirfd, ent->d_name);
+            }
+            if (unlinkat(dirfd, ent->d_name, 0) != 0 && errno != ENOENT) {
+                if (first_err == 0) first_err = errno ? errno : -1;
+            }
+        }
+    }
+    closedir(dir);
+    return first_err;
+}
+
+int afuse_remove_all_nofollow(const char *path) {
+    if (!path) {
+        return EINVAL;
+    }
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+        if (errno == ENOENT) {
+            return 0;
+        }
+        return errno ? errno : -1;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        if (S_ISREG(st.st_mode)) {
+            afuse_unlock_at(AT_FDCWD, path);
+        }
+        if (unlink(path) != 0 && errno != ENOENT) {
+            return errno ? errno : -1;
+        }
+        return 0;
+    }
+    afuse_unlock_at(AT_FDCWD, path);
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == ENOENT) {
+            return 0;
+        }
+        return errno ? errno : -1;
+    }
+    int rc = afuse_remove_dir_fd(fd, 0);
+    if (rc != 0) {
+        return rc;
+    }
+    if (rmdir(path) != 0 && errno != ENOENT) {
+        return errno ? errno : -1;
+    }
+    return 0;
+}
+
+static int afuse_open_and_flock(const char *lock_path, int flock_op, int *out_fd) {
+    if (!lock_path || !out_fd) {
+        return EINVAL;
+    }
+    int fd = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        return errno ? errno : -1;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        int err = errno ? errno : -1;
+        close(fd);
+        return err;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        close(fd);
+        return EINVAL;
+    }
+    if (st.st_uid != geteuid()) {
+        close(fd);
+        return EPERM;
+    }
+    while (flock(fd, flock_op) != 0) {
+        if (errno == EINTR) {
+            continue;
+        }
+        int err = errno ? errno : EWOULDBLOCK;
+        close(fd);
+        return err;
+    }
+    *out_fd = fd;
     return 0;
 }
 
 int afuse_acquire_flock(const char *lock_path, int *out_fd) {
-    int fd = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-    if (fd < 0) {
-        return errno ? errno : -1;
-    }
-    if (flock(fd, LOCK_EX) != 0) {
-        int err = errno ? errno : EWOULDBLOCK;
-        close(fd);
-        return err;
-    }
-    *out_fd = fd;
-    return 0;
+    return afuse_open_and_flock(lock_path, LOCK_EX, out_fd);
 }
 
 int afuse_try_acquire_flock(const char *lock_path, int *out_fd) {
-    int fd = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-    if (fd < 0) {
-        return errno ? errno : -1;
-    }
-    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
-        int err = errno ? errno : EWOULDBLOCK;
-        close(fd);
-        return err;
-    }
-    *out_fd = fd;
-    return 0;
+    return afuse_open_and_flock(lock_path, LOCK_EX | LOCK_NB, out_fd);
 }
 
 void afuse_release_flock(int fd) {
@@ -134,30 +323,88 @@ int afuse_real_home_dir(char *buf, size_t len) {
     return 0;
 }
 
-int afuse_spawn_in_new_pgroup(const char *const argv[], const char *cwd, int *out_pid) {
-    pid_t pid = fork();
-    if (pid < 0) {
-        return errno ? errno : -1;
-    }
-    if (pid == 0) {
-        (void)setpgid(0, 0);
-        if (cwd != NULL && cwd[0] != '\0') {
-            if (chdir(cwd) != 0) {
-                _exit(126);
-            }
+static char **afuse_build_guarded_env(void) {
+    size_t count = 0;
+    if (environ) {
+        while (environ[count] != NULL) {
+            count++;
         }
-        (void)setenv("AFUSE_GUARDED", "1", 1);
-        execvp(argv[0], (char *const *)argv);
-        _exit(127);
     }
-    (void)setpgid(pid, pid);
+    char **envp = (char **)calloc(count + 2, sizeof(char *));
+    if (!envp) {
+        return NULL;
+    }
+    size_t out_idx = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (strncmp(environ[i], "AFUSE_GUARDED=", 14) == 0) {
+            continue;
+        }
+        envp[out_idx++] = environ[i];
+    }
+    envp[out_idx++] = (char *)"AFUSE_GUARDED=1";
+    envp[out_idx] = NULL;
+    return envp;
+}
+
+int afuse_spawn_in_new_pgroup(const char *const argv[], const char *cwd, int *out_pid) {
+    if (!argv || !argv[0] || !out_pid) {
+        return EINVAL;
+    }
+    char **envp = afuse_build_guarded_env();
+    if (!envp) {
+        return ENOMEM;
+    }
+    posix_spawnattr_t attr;
+    int rc = posix_spawnattr_init(&attr);
+    if (rc != 0) {
+        free(envp);
+        return rc;
+    }
+    rc = posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+    if (rc == 0) {
+        rc = posix_spawnattr_setpgroup(&attr, 0);
+    }
+    posix_spawn_file_actions_t actions;
+    int has_actions = 0;
+    if (rc == 0 && cwd != NULL && cwd[0] != '\0') {
+        rc = posix_spawn_file_actions_init(&actions);
+        if (rc == 0) {
+            has_actions = 1;
+            rc = posix_spawn_file_actions_addchdir_np(&actions, cwd);
+        }
+    }
+    pid_t pid = 0;
+    if (rc == 0) {
+        rc = posix_spawnp(
+            &pid,
+            argv[0],
+            has_actions ? &actions : NULL,
+            &attr,
+            (char *const *)argv,
+            envp
+        );
+    }
+    if (has_actions) {
+        posix_spawn_file_actions_destroy(&actions);
+    }
+    posix_spawnattr_destroy(&attr);
+    free(envp);
+    if (rc != 0) {
+        return rc;
+    }
     *out_pid = (int)pid;
     return 0;
 }
 
 int afuse_try_wait_pid(int pid, int *out_exited, int *out_code) {
+    if (pid <= 0 || !out_exited || !out_code) {
+        return EINVAL;
+    }
     int status = 0;
-    pid_t rc = waitpid((pid_t)pid, &status, WNOHANG);
+    pid_t rc;
+    do {
+        rc = waitpid((pid_t)pid, &status, WNOHANG);
+    } while (rc < 0 && errno == EINTR);
     if (rc == 0) {
         *out_exited = 0;
         *out_code = 0;
@@ -231,7 +478,15 @@ void afuse_freeze_kill_reap_pgid(int pgid) {
     (void)kill(-(pid_t)pgid, SIGSTOP);
     (void)kill(-(pid_t)pgid, SIGKILL);
     int status = 0;
-    while (waitpid(-(pid_t)pgid, &status, 0) > 0) {
+    for (;;) {
+        pid_t w = waitpid(-(pid_t)pgid, &status, 0);
+        if (w > 0) {
+            continue;
+        }
+        if (w < 0 && errno == EINTR) {
+            continue;
+        }
+        break;
     }
     for (int i = 0; i < 40 && kill(-(pid_t)pgid, SIGKILL) == 0; i++) {
         usleep(1000);

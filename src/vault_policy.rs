@@ -1,42 +1,19 @@
 use crate::apfs::{can_read_write, current_euid, real_home_dir};
 use crate::error::{AfuseError, ERR_EACCES, ERR_EINVAL, ERR_ENOENT};
 use crate::meta::read_meta;
+use crate::unicode_norm::{path_eq_casefold_nfd, path_starts_with_casefold_nfd};
 use crate::vault::{is_ignored_name, TargetKind};
 use std::env;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 fn path_eq_icase(a: &Path, b: &Path) -> bool {
-    let (ab, bb) = (a.as_os_str().as_bytes(), b.as_os_str().as_bytes());
-    ab.len() == bb.len()
-        && ab
-            .iter()
-            .zip(bb)
-            .all(|(x, y)| x.to_ascii_lowercase() == y.to_ascii_lowercase())
+    path_eq_casefold_nfd(a, b)
 }
 
 fn path_starts_with_icase(ws: &Path, sub: &Path) -> bool {
-    let mut wi = ws.components();
-    let mut si = sub.components();
-    loop {
-        match (si.next(), wi.next()) {
-            (None, _) => return true,
-            (Some(_), None) => return false,
-            (Some(sc), Some(wc)) => {
-                let (sb, wb) = (sc.as_os_str().as_bytes(), wc.as_os_str().as_bytes());
-                if sb.len() != wb.len()
-                    || !sb
-                        .iter()
-                        .zip(wb)
-                        .all(|(x, y)| x.to_ascii_lowercase() == y.to_ascii_lowercase())
-                {
-                    return false;
-                }
-            }
-        }
-    }
+    path_starts_with_casefold_nfd(ws, sub)
 }
 
 pub(crate) fn lexical_normalize_path(path: &Path) -> Result<PathBuf, AfuseError> {

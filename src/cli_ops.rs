@@ -1,7 +1,8 @@
 use crate::emit_error;
 use agent_fuse::{
     json_escape, render_hook_snippet, run_claude_hook_exec_stdio, run_doctor_with_opts,
-    run_guarded_command, run_zsh_hook_exec, uninstall_hooks, AfuseError, GuardConfig,
+    run_guarded_command, run_zsh_hook_exec, sanitize_terminal_text, uninstall_hooks, AfuseError,
+    GuardConfig,
 };
 use std::path::{Path, PathBuf};
 use std::process;
@@ -150,22 +151,24 @@ pub(crate) fn cmd_hook(workspace: PathBuf, rest: &[String], mut json: bool) {
                     let mode = if apply { "apply" } else { "dry-run — no files modified" };
                     println!("afuse hook uninstall ({}):", mode);
                     for a in actions {
+                        let p = sanitize_terminal_text(&a.path);
                         match a.kind.as_str() {
                             "zsh_marker_block" if a.applied => println!(
                                 "  [REMOVED] {} lines {}..{} (backup: {})",
-                                a.path, a.start_line, a.end_line, a.backup_path.as_deref().unwrap_or("none")
+                                p, a.start_line, a.end_line,
+                                sanitize_terminal_text(a.backup_path.as_deref().unwrap_or("none"))
                             ),
                             "zsh_marker_block" => println!(
                                 "  [DRY-RUN] {} lines {}..{} (marker block; pass --apply to remove with backup)",
-                                a.path, a.start_line, a.end_line
+                                p, a.start_line, a.end_line
                             ),
                             "manual_claude_settings_json" => println!(
                                 "  [MANUAL]  {} line {}: remove the afuse PreToolUse hook object manually (afuse never rewrites JSON settings)",
-                                a.path, a.start_line
+                                p, a.start_line
                             ),
                             _ => println!(
                                 "  [MANUAL]  {} line {}: inspect and remove custom afuse hook line",
-                                a.path, a.start_line
+                                p, a.start_line
                             ),
                         }
                     }
@@ -282,7 +285,7 @@ pub(crate) fn cmd_guard(workspace: &Path, rest: &[String], mut json: bool) -> ! 
             } else if rep.tripped {
                 eprintln!(
                     "⚡️ FUSE TRIPPED ({}) | process-group killed | auto_restored={} ({:.3} ms) | root_inode_preserved={}",
-                    rep.trip_reason.as_deref().unwrap_or("threshold"),
+                    sanitize_terminal_text(rep.trip_reason.as_deref().unwrap_or("threshold")),
                     rep.auto_restored,
                     rep.restore_elapsed_us.unwrap_or(0) as f64 / 1000.0,
                     rep.root_inode_preserved

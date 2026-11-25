@@ -232,8 +232,8 @@ mod tests_phase2 {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _eg = TestEnvGuard::clean(&["AFUSE_RELEASE_JSON_URL", "AFUSE_UPGRADE_ARCHIVE_DIR"]);
         assert!(validate_release_asset_url("https://github.com/topkyo/agent-fuse/releases/download/v0.9.0/afuse.tar.gz").is_ok());
-        assert!(validate_release_asset_url("https://objects.githubusercontent.com/github-production-release-asset/foo").is_ok());
-        assert!(validate_release_asset_url("https://release-assets.githubusercontent.com/foo").is_ok());
+        assert_eq!(validate_release_asset_url("https://objects.githubusercontent.com/github-production-release-asset/foo").unwrap_err().code, ERR_EINVAL);
+        assert!(crate::upgrade_json::validate_effective_asset_url("https://objects.githubusercontent.com/github-production-release-asset/foo").is_ok() && crate::upgrade_json::validate_effective_asset_url("https://release-assets.githubusercontent.com/foo").is_ok());
         assert_eq!(validate_release_asset_url("http://github.com/foo").unwrap_err().code, ERR_EINVAL);
         assert_eq!(validate_release_asset_url("https://evil.example/foo").unwrap_err().code, ERR_EINVAL);
         assert_eq!(validate_release_asset_url("https://github.com@evil.com/foo").unwrap_err().code, ERR_EINVAL);
