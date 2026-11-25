@@ -1,4 +1,4 @@
-# AgentFuse (`afuse`) v0.6.2
+# AgentFuse (`afuse`) v0.6.3
 
 > Millisecond-scale APFS Copy-on-Write workspace time machine, selective path recovery, opt-in agent hooks, and process-group circuit breaker for macOS coding agents (`Claude Code`, `Cursor`, `Codex`, `Aider`, `zsh`).
 
@@ -13,7 +13,7 @@ Autonomous CLI coding agents run `rm -rf`, `mv`, or mass file overwrites on dirt
 
 ## Verified Benchmarks (2015 MacBook Pro, Core i5-5257U, 8 GB RAM, macOS 12.7.6 APFS)
 - `afuse` MIT CLI binary: `< 900 KiB` stripped (`0` external Rust crates, 33 production `.rs` modules, 85/85 unit & chaos tests, links only `libSystem.B.dylib`)
-- `AgentFuse-0.6.2-macos.dmg`: `< 5 MiB` Universal (`~2.5 MiB` single-arch; `< 1.2 MiB` stripped AppKit HIG GUI + Retina `AppIcon.icns` + embedded CLI)
+- `AgentFuse-0.6.3-macos.dmg`: `< 5 MiB` Universal (`~2.5 MiB` single-arch; `< 1.2 MiB` stripped AppKit HIG GUI + Retina `AppIcon.icns` + embedded CLI)
 - Peak RSS: `1.67 MiB` (`1,748,992 B`) on 1,000-file snapshot (`2.49 MiB` / `2,613,248 B` guard+restore); `1.29 MiB` (`1,347,584 B`) on 64 MiB streaming SHA-256 snapshot
 - 142-file dirty repo `snap`: `6.46 ms` | in-place `restore` (with `auto:pre-restore` + Merkle verify): `12.60 ms`
 - 1,000-file `snap --fast`: `26.90 ms` (`30.22 ms` with full streaming Merkle SHA-256)

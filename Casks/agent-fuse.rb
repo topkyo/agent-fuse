@@ -5,7 +5,7 @@ cask "agent-fuse" do
   url "https://github.com/topkyo/agent-fuse/releases/download/v#{version}/AgentFuse-#{version}-macos.dmg"
   name "AgentFuse Pro"
   desc "Millisecond-scale APFS CoW workspace time machine & runaway circuit breaker for AI agents"
-  homepage "https://github.com/topkyo/agent-fuse"
+  homepage "https://agentfuse.topkyo.dev/"
 
   depends_on macos: ">= :monterey"
 

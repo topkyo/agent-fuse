@@ -1,4 +1,4 @@
-# ⚡️ `agent-fuse` (`afuse`) v0.6.2
+# ⚡️ `agent-fuse` (`afuse`) v0.6.3
 
 **English** | **[简体中文](./README.zh-CN.md)** · **[Website](https://agentfuse.topkyo.dev/)** · **[Contributing](./CONTRIBUTING.md)** · **[Security](./SECURITY.md)**
 
@@ -41,7 +41,7 @@ xattr -cr /Applications/AgentFuse.app
 
 Measured on a **2015 MacBook Pro (`Intel Core i5-5257U`, 8 GB RAM, `macOS 12.7.6` APFS)**:
 
-| Dimension | `git stash -u` | Electron / IDE Checkpoints | **`agent-fuse` (`afuse` v0.6.2)** |
+| Dimension | `git stash -u` | Electron / IDE Checkpoints | **`agent-fuse` (`afuse` v0.6.3)** |
 | :--- | :--- | :--- | :--- |
 | Untracked + dirty files + `.git` guard | Partial / touches `.git` lock | Open IDE buffers only | **Full workspace tree + `.git` 0-byte truncation guard + selective path restore (external `.noindex` vault)** |
 | 142-file dirty workspace snap / restore | `50–800 ms` | `200–2,000 ms` | **`6.46 ms` snap / `12.60 ms` restore (with `auto:pre-restore` + SHA-256 verify)** |
