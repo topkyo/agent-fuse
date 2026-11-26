@@ -296,8 +296,14 @@ fn validate_asset_url_inner(url: &str, allow_cdn: bool) -> Result<(), AfuseError
     let rest = url
         .strip_prefix("https://")
         .ok_or_else(|| AfuseError::new(ERR_EINVAL, "release asset URL must use https://"))?;
-    let (authority, path_and_query) = rest.split_once('/').unwrap_or((rest, ""));
-    let authority = authority.split(['?', '#']).next().unwrap_or("");
+    let (authority, path_only) = match rest.find(['/', '?', '#']) {
+        Some(pos) if rest.as_bytes()[pos] == b'/' => {
+            let after_slash = &rest[pos + 1..];
+            (&rest[..pos], after_slash.split(['?', '#']).next().unwrap_or(""))
+        }
+        Some(pos) => (&rest[..pos], ""),
+        None => (rest, ""),
+    };
     if authority.is_empty() || authority.contains('@') || authority.contains('\\') {
         return Err(AfuseError::new(ERR_EINVAL, "invalid release asset authority"));
     }
@@ -314,7 +320,6 @@ fn validate_asset_url_inner(url: &str, allow_cdn: bool) -> Result<(), AfuseError
         }
     }
     let host = host_raw.to_ascii_lowercase();
-    let path_only = path_and_query.split(['?', '#']).next().unwrap_or("");
     match host.as_str() {
         "github.com" => {
             let lower_path = path_only.to_ascii_lowercase();

@@ -64,7 +64,18 @@ fn clone_dir_fallback_readable(
         .map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))?;
     for entry in rd {
         let entry = entry.map_err(|e| AfuseError::new(1, e.to_string()))?;
-        clonefile_readable_depth(&entry.path(), &dst.join(entry.file_name()), depth + 1)?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if is_ignored_name(&name) {
+            continue;
+        }
+        let child_src = entry.path();
+        if let Ok(cm) = fs::symlink_metadata(&child_src) {
+            let cft = cm.file_type();
+            if !cft.is_file() && !cft.is_dir() && !cft.is_symlink() {
+                continue;
+            }
+        }
+        clonefile_readable_depth(&child_src, &dst.join(entry.file_name()), depth + 1)?;
     }
     let _ = chmod_nofollow(dst, orig & 0o777);
     Ok(())
@@ -75,7 +86,7 @@ fn clonefile_readable_depth(src: &Path, dst: &Path, depth: usize) -> Result<(), 
         if !m.file_type().is_symlink() {
             let orig = m.permissions().mode() & 0o777;
             let is_dir = m.file_type().is_dir();
-            let need = if is_dir { 0o700 } else { 0o400 };
+            let need = if is_dir { 0o500 } else { 0o400 };
             if (orig & need) != need {
                 let _g = TempPermGuard::ensure(src, need);
                 match clonefile_nofollow(src, dst) {
@@ -226,12 +237,21 @@ pub(crate) struct HeteroStashGuard {
     orig: PathBuf,
     stashed: Option<PathBuf>,
     pub(crate) cleared: bool,
-    #[allow(dead_code)]
-    pub(crate) backup_path: Option<PathBuf>,
+    placeholder_created: bool,
     committed: bool,
 }
 
 impl HeteroStashGuard {
+    fn unlock_parent_for(p: &Path) -> UnlockedDirsGuard {
+        let mut guard = UnlockedDirsGuard::new();
+        if let Some(parent) = p.parent() {
+            if fs::symlink_metadata(parent).is_ok() {
+                let _ = guard.unlock_if_needed(parent);
+            }
+        }
+        guard
+    }
+
     pub(crate) fn stash_if_needed(
         p: &Path,
         ws_vault: &Path,
@@ -243,7 +263,7 @@ impl HeteroStashGuard {
                 orig: p.to_path_buf(),
                 stashed: None,
                 cleared: false,
-                backup_path: None,
+                placeholder_created: false,
                 committed: true,
             });
         };
@@ -254,28 +274,12 @@ impl HeteroStashGuard {
                 orig: p.to_path_buf(),
                 stashed: None,
                 cleared: false,
-                backup_path: None,
+                placeholder_created: false,
                 committed: true,
             });
         }
-        let mut guard = UnlockedDirsGuard::new();
+        let mut guard = Self::unlock_parent_for(p);
         let parent = p.parent().unwrap_or(Path::new("/"));
-        if fs::symlink_metadata(parent).is_ok() {
-            let _ = guard.unlock_if_needed(parent);
-        }
-        if ft.is_symlink() {
-            let res = fs::remove_file(p)
-                .map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()));
-            guard.restore_all();
-            res?;
-            return Ok(Self {
-                orig: p.to_path_buf(),
-                stashed: None,
-                cleared: true,
-                backup_path: None,
-                committed: true,
-            });
-        }
         let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
         let stashed = parent.join(format!(
             ".afuse.tmp.hetero.{}.{}.{}",
@@ -291,8 +295,7 @@ impl HeteroStashGuard {
         });
         guard.restore_all();
         mv_res?;
-        let mut backup_path = None;
-        if safety_backup {
+        if safety_backup && !ft.is_symlink() {
             let backup_root = ws_vault.join("hetero-backups");
             if fs::create_dir_all(&backup_root).is_ok() {
                 let _ = chmod_nofollow(&backup_root, 0o700);
@@ -301,24 +304,28 @@ impl HeteroStashGuard {
                     .unwrap_or_default()
                     .as_millis();
                 let dst = backup_root.join(format!("hetero-{}-{}", ms, random_hex_suffix()));
-                if clonefile_readable(&stashed, &dst).is_ok() {
-                    backup_path = Some(dst);
-                }
+                let _ = clonefile_readable(&stashed, &dst);
             }
         }
         Ok(Self {
             orig: p.to_path_buf(),
             stashed: Some(stashed),
             cleared: true,
-            backup_path,
+            placeholder_created: false,
             committed: false,
         })
+    }
+
+    pub(crate) fn mark_placeholder_created(&mut self) {
+        self.placeholder_created = true;
     }
 
     pub(crate) fn commit(&mut self) {
         self.committed = true;
         if let Some(st) = self.stashed.take() {
+            let mut guard = Self::unlock_parent_for(&st);
             let _ = force_remove_all(&st);
+            guard.restore_all();
         }
     }
 }
@@ -327,11 +334,16 @@ impl Drop for HeteroStashGuard {
     fn drop(&mut self) {
         if !self.committed {
             if let Some(st) = self.stashed.take() {
+                let mut guard = Self::unlock_parent_for(&self.orig);
+                if self.placeholder_created && fs::symlink_metadata(&self.orig).is_ok() {
+                    let _ = force_remove_all(&self.orig);
+                }
                 if fs::symlink_metadata(&self.orig).is_err() {
                     let _ = fs::rename(&st, &self.orig);
                 } else {
                     let _ = force_remove_all(&st);
                 }
+                guard.restore_all();
             }
         }
     }

@@ -15,7 +15,7 @@ fn subcmd_usage(sub: &str) -> &'static str {
         "diff" => "USAGE: afuse [--workspace <DIR>] [--json] diff [<SNAP_ID|latest>] [--fast]",
         "restore" => "USAGE: afuse [--workspace <DIR>] [--json] restore [<SNAP_ID|latest>] [--fast] [--no-backup] [-- <REL_PATH>...]",
         "validate" => "USAGE: afuse [--json] validate [<DIR>]",
-        "prune" => "USAGE: afuse [--workspace <DIR>] [--json] prune --keep <N> [--label-prefix <P>]",
+        "prune" => "USAGE: afuse [--workspace <DIR>] [--json] prune (--keep <N> [--label-prefix <P>] | --orphans [--min-age-days <D>] [--dry-run])",
         _ => "USAGE: afuse [--workspace <DIR>] [--json] <SUBCOMMAND> [OPTIONS]",
     }
 }

@@ -1,7 +1,7 @@
 use crate::apfs::{chmod_nofollow, lstat_inode_mode, MAX_WALK_DEPTH};
 use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
 use crate::fs_guard::{clonefile_readable, TempPermGuard};
-pub(crate) use crate::meta::{read_meta, write_meta};
+pub(crate) use crate::meta::{read_verified_snap_meta, write_meta};
 pub use crate::meta::{json_escape, sanitize_terminal_text, SnapshotMeta, SnapshotOrigin};
 use crate::sha256::{sha256_hex, Sha256};
 use crate::vault::{is_ignored_name, TargetKind};
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 fn fast_entry_sig(path: &Path, meta: &fs::Metadata) -> Result<Option<String>, AfuseError> {
     let ft = meta.file_type();
-    let mode = meta.permissions().mode() & 0o7777;
+    let mode = meta.permissions().mode() & 0o777;
     if ft.is_dir() {
         Ok(Some(format!("D:{:04o}", mode)))
     } else if ft.is_symlink() {
@@ -170,7 +170,7 @@ pub fn compute_single_file_manifest(
         .ok_or_else(|| AfuseError::new(ERR_EINVAL, "missing file name"))?
         .to_string_lossy()
         .into_owned();
-    let mode = meta.permissions().mode() & 0o7777;
+    let mode = meta.permissions().mode() & 0o777;
     let fhash = hash_file_streaming(file_path)?;
     let sig = format!("F:{:04o}:{}:{}", mode, meta.len(), fhash);
     let mut map = BTreeMap::new();
@@ -257,7 +257,7 @@ pub fn compute_tree_manifest(
                 )
             })?;
             let ft = meta.file_type();
-            let mode = meta.permissions().mode() & 0o7777;
+            let mode = meta.permissions().mode() & 0o777;
 
             if ft.is_dir() {
                 map.insert(rel.clone(), format!("D:{:04o}", mode));
@@ -333,7 +333,7 @@ fn collect_filtered_dirs(
             {
                 need = true;
             }
-            if ft.is_dir() && name != ".git" && collect_filtered_dirs(&child, depth + 1, filtered) {
+            if ft.is_dir() && collect_filtered_dirs(&child, depth + 1, filtered) {
                 need = true;
             }
         }
@@ -370,7 +370,7 @@ fn clone_filtered_inner(
         let meta = fs::symlink_metadata(&s_child).map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))?;
         let ft = meta.file_type();
         if !ft.is_file() && !ft.is_dir() && !ft.is_symlink() { continue; }
-        if ft.is_dir() && name != ".git" && filtered.contains(&s_child) {
+        if ft.is_dir() && filtered.contains(&s_child) {
             clone_filtered_inner(&s_child, &d_child, depth + 1, filtered)?;
         } else {
             clonefile_readable(&s_child, &d_child)?;

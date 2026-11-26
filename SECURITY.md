@@ -18,10 +18,10 @@
    - Workspace validation accepts any plain APFS folder or regular single file (including items inside Desktop/Documents/Downloads), while rejecting `/`, `$HOME`, system roots, top-level TCC container roots (`~/Desktop`, `~/Documents`, `~/Downloads` themselves), symlinks, and vault subdirectories under case-insensitive Unicode NFD comparison.
    - Recursive removal and permission adjustments operate via `O_NOFOLLOW` / `openat` / `fdopendir` / `unlinkat` / `fchmodat(AT_SYMLINK_NOFOLLOW)` primitives and strip `SUID`/`SGID`/sticky bits.
    - Selective path restore (`afuse restore <snap> -- <paths>`) rejects absolute paths, `..` parent traversal segments, and internal `.afuse.tmp.*` staging names.
-   - Snapshot metadata IDs (`meta.kv`) are strictly validated against `[A-Za-z0-9_-]` and must match the on-disk snapshot directory name.
+   - Snapshot metadata (`meta.kv`) is persisted atomically via exclusive `0600` temp file + `fsync` + `rename`, and snapshot IDs are strictly validated against `[A-Za-z0-9_-]` and must match the on-disk snapshot directory name. Vault `flock(2)` locks re-verify `(st_dev, st_ino)` after acquisition to prevent split-brain locks across unlinks.
 3. **Zero Background Network Activity & Verified Updates**:
    - Neither `afuse` nor `AgentFuse.app` initiates network connections on launch or during background watching.
-   - Manual CLI self-upgrade (`afuse upgrade`) fetches official GitHub release metadata over HTTPS strictly when invoked by the user, enforces initial `https://github.com/topkyo/agent-fuse/releases/download/...` asset URLs and GitHub CDN post-redirect URLs, verifies the `SHA256SUMS` digest, preflights tar members (`-tvzf`) before extraction, and validates Mach-O/codesign identity (`TeamIdentifier` and `Identifier`) before atomic replacement.
+   - Manual CLI self-upgrade (`afuse upgrade`) fetches official GitHub release metadata over HTTPS strictly when invoked by the user, validates both Release API and asset post-redirect URLs, enforces initial `https://github.com/topkyo/agent-fuse/releases/download/...` asset URLs and GitHub CDN post-redirect URLs, verifies the `SHA256SUMS` digest, preflights tar members (`LC_ALL=C tar --numeric-owner -tvzf`, rejecting globs/duplicates/non-regular entries) before extraction, and validates Mach-O/codesign identity (`TeamIdentifier` and `Identifier`, fail-closed when the host binary is signed) inside a `0700` staging directory before atomic replacement.
    - Desktop in-app updates (`AgentFuse.app`) verify HTTPS asset URLs and post-redirect URLs, verify DMG `SHA-256`, mount read-only, validate `CFBundleIdentifier`, enforce monotonic `CFBundleVersion` anti-downgrade checks, and run `codesign --verify --deep --strict` plus `TeamIdentifier` / `Developer ID Application` checks before atomic app swap.
 4. **Process-Group Circuit Breaker Boundary (`afuse guard`)**:
    - `afuse guard` launches the target command in an isolated process group (`POSIX_SPAWN_SETPGROUP`) and terminates the group with `SIGSTOP` + `SIGKILL` upon deletion, truncation, or disk write spikes.
@@ -59,10 +59,10 @@ Please **do NOT open a public GitHub issue** for exploitable security vulnerabil
    - 目标校验器支持任意普通文件夹与单文件（含桌面/文稿/下载内部子目录与文件），并在大小写不敏感 Unicode NFD 归一比较下强制拒绝挂载 `/`、`$HOME`、系统目录、顶级 TCC 容器根目录（`~/Desktop`、`~/Documents`、`~/Downloads` 本身）、符号链接以及保险库自身子目录。
    - 递归清理与权限修改基于 `O_NOFOLLOW` / `openat` / `fdopendir` / `unlinkat` / `fchmodat(AT_SYMLINK_NOFOLLOW)` 原语实现，并自动剥离 `SUID`/`SGID`/Sticky 特权位。
    - 单文件精准恢复（`afuse restore <snap> -- <paths>`）强制拒绝绝对路径、`..` 父目录穿越以及 `.afuse.tmp.*` 内部暂存路径。
-   - 快照元数据 `id`（`meta.kv`）强制校验仅含 `[A-Za-z0-9_-]` 且必须与磁盘快照子目录名完全一致。
+   - 快照元数据（`meta.kv`）通过排他 `0600` 临时文件 + `fsync` + 原子 `rename` 落盘，且元数据 `id` 强制校验仅含 `[A-Za-z0-9_-]` 并必须与磁盘快照子目录名完全一致；保险库 `flock(2)` 获锁后复验 `(st_dev, st_ino)` 防止锁分裂。
 3. **零启动/后台网络请求与校验升级边界**：
    - `afuse` 与 `AgentFuse.app` 在启动及守护期间均保持 `0` 联网请求。
-   - CLI 按需升级（`afuse upgrade`）仅在用户手动触发时通过 HTTPS 拉取官方发布物，严格区分初始 `https://github.com/topkyo/agent-fuse/releases/download/...` 资产地址与重定向后 GitHub CDN 地址，完成 `SHA256SUMS` 校验、`tar -tvzf` 预检及 Mach-O/代码签名（`TeamIdentifier` 与 `Identifier`）校验后方可执行原子替换。
+   - CLI 按需升级（`afuse upgrade`）仅在用户手动触发时通过 HTTPS 拉取官方发布物，校验 Release API 与下载资产的重定向终址，严格区分初始 `https://github.com/topkyo/agent-fuse/releases/download/...` 资产地址与重定向后 GitHub CDN 地址，完成 `SHA256SUMS` 校验、`LC_ALL=C tar --numeric-owner -tvzf` 预检（拒收通配符、重名与非普通条目），并在 `0700` 暂存目录内完成 Mach-O/代码签名（`TeamIdentifier` 与 `Identifier`，宿主已签名时 Fail-Closed）校验后方可执行原子替换。
    - 桌面端应用内更新（`AgentFuse.app`）执行 HTTPS 与重定向后 URL 白名单校验、DMG `SHA-256` 校验、只读挂载、`CFBundleIdentifier` 匹配、`CFBundleVersion` 单调防降级校验，以及 `codesign --verify --deep --strict` 与 `TeamIdentifier` / `Developer ID Application` 签名链校验后方可原子覆盖。
 4. **进程组熔断器边界（`afuse guard`）**：
    - `afuse guard` 通过 `POSIX_SPAWN_SETPGROUP` 在独立进程组启动目标命令，并在触发批量删除、截断或磁盘写爆阈值时向进程组发送 `SIGSTOP` + `SIGKILL`。

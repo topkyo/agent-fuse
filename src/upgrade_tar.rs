@@ -13,12 +13,14 @@ const MAX_TAR_PATH_DEPTH: usize = 5;
 
 fn validate_tar_member_path(raw: &str) -> Result<PathBuf, AfuseError> {
     let trimmed = raw.trim();
-    if trimmed.is_empty()
+    if raw != trimmed
+        || trimmed.is_empty()
         || trimmed.starts_with('/')
         || trimmed.contains('\0')
         || trimmed.contains('\\')
         || trimmed.contains(" -> ")
         || trimmed.contains(" link to ")
+        || trimmed.contains(['*', '?', '[', ']'])
         || trimmed.chars().any(|c| (c as u32) < 0x20 || c as u32 == 0x7f)
     {
         return Err(AfuseError::new(
@@ -98,6 +100,7 @@ pub(crate) fn preflight_tar_listing(listing: &str) -> Result<String, AfuseError>
     let mut entry_count = 0usize;
     let mut total_bytes = 0u64;
     let mut target_member: Option<String> = None;
+    let mut seen_paths = std::collections::HashSet::new();
 
     for raw_line in listing.lines() {
         if raw_line.trim().is_empty() {
@@ -125,12 +128,20 @@ pub(crate) fn preflight_tar_listing(listing: &str) -> Result<String, AfuseError>
             ));
         }
         let clean = validate_tar_member_path(&member_raw)?;
-        if kind == '-' {
-            if clean.file_name().and_then(|n| n.to_str()) == Some("afuse")
-                && target_member.is_none()
-            {
-                target_member = Some(member_raw);
+        if !seen_paths.insert(clean.clone()) {
+            return Err(AfuseError::new(
+                ERR_EINVAL,
+                "release archive contains duplicate member path",
+            ));
+        }
+        if kind == '-' && clean.file_name().and_then(|n| n.to_str()) == Some("afuse") {
+            if target_member.is_some() {
+                return Err(AfuseError::new(
+                    ERR_EINVAL,
+                    "release archive contains multiple 'afuse' binaries",
+                ));
             }
+            target_member = Some(member_raw);
         }
     }
     if entry_count == 0 {
@@ -183,7 +194,8 @@ pub(crate) fn preflight_and_extract_afuse(
     extract_dir: &Path,
 ) -> Result<PathBuf, AfuseError> {
     let list_out = Command::new("/usr/bin/tar")
-        .arg("-tvzf")
+        .env("LC_ALL", "C")
+        .args(["--numeric-owner", "-tvzf"])
         .arg(tarball_path)
         .output()
         .map_err(|e| AfuseError::new(1, format!("tar listing failed: {}", e)))?;
@@ -321,4 +333,48 @@ pub(crate) fn expected_sha256_from_sums(sums_text: &str, tarball_name: &str) -> 
         ERR_EINVAL,
         format!("checksum entry for '{}' not found in SHA256SUMS", tarball_name),
     ))
+}
+
+pub(crate) fn validate_release_api_effective_url(url: &str) -> Result<(), AfuseError> {
+    if url
+        .chars()
+        .any(|c| c.is_whitespace() || (c as u32) < 0x20 || c as u32 == 0x7f)
+    {
+        return Err(AfuseError::new(ERR_EINVAL, "invalid release API effective URL"));
+    }
+    let rest = url
+        .strip_prefix("https://")
+        .ok_or_else(|| AfuseError::new(ERR_EINVAL, "release API effective URL must use https://"))?;
+    let (authority, path_only) = match rest.find(['/', '?', '#']) {
+        Some(pos) if rest.as_bytes()[pos] == b'/' => {
+            (&rest[..pos], rest[pos + 1..].split(['?', '#']).next().unwrap_or(""))
+        }
+        Some(pos) => (&rest[..pos], ""),
+        None => (rest, ""),
+    };
+    if authority.is_empty() || authority.contains('@') || authority.contains('\\') {
+        return Err(AfuseError::new(ERR_EINVAL, "invalid release API authority"));
+    }
+    let (host_raw, port_opt) = match authority.split_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (authority, None),
+    };
+    if let Some(port) = port_opt {
+        if port != "443" {
+            return Err(AfuseError::new(ERR_EINVAL, "non-443 port rejected for release API"));
+        }
+    }
+    let host = host_raw.to_ascii_lowercase();
+    let lower_path = path_only.to_ascii_lowercase();
+    let has_trav = lower_path.contains("..")
+        || lower_path.contains("%2e")
+        || lower_path.contains('\\')
+        || lower_path.contains("%5c");
+    if host != "api.github.com" || has_trav || !path_only.starts_with("repos/topkyo/agent-fuse/releases") {
+        return Err(AfuseError::new(
+            ERR_EINVAL,
+            format!("untrusted release API effective URL: {}", url),
+        ));
+    }
+    Ok(())
 }

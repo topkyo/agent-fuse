@@ -124,8 +124,17 @@ fn collect_and_move_nested(
             "directory nesting exceeded maximum depth limit",
         ));
     }
-    let Ok(rd) = fs::read_dir(dir) else {
-        return Ok(());
+    let rd = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => {
+            if guard.unlock_if_needed(dir).is_err() {
+                return Ok(());
+            }
+            match fs::read_dir(dir) {
+                Ok(rd) => rd,
+                Err(_) => return Ok(()),
+            }
+        }
     };
     let mut entries: Vec<_> = rd.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
@@ -234,10 +243,17 @@ impl NestedIgnoredGuard {
             }
         }
         dir_guard.restore_all();
-        let _ = force_remove_all(&self.stage_root);
         if let Some(e) = first_err {
-            return Err(e);
+            return Err(AfuseError::new(
+                e.code,
+                format!(
+                    "{} (preserved ignored subtrees kept safely in {})",
+                    e.message,
+                    self.stage_root.display()
+                ),
+            ));
         }
+        let _ = force_remove_all(&self.stage_root);
         Ok(())
     }
 }
@@ -335,17 +351,13 @@ pub(crate) fn selective_differs(
 pub fn workspace_has_visible_files(ws: &Path) -> bool {
     let mut stack = vec![(ws.to_path_buf(), 0usize)];
     while let Some((dir, depth)) = stack.pop() {
-        if depth >= MAX_WALK_DEPTH {
-            continue;
-        }
+        if depth >= MAX_WALK_DEPTH { continue; }
         let Ok(rd) = fs::read_dir(&dir) else { continue };
         for entry in rd.flatten() {
             if is_ignored_name(&entry.file_name().to_string_lossy()) { continue; }
             let p = entry.path();
             match fs::symlink_metadata(&p) {
-                Ok(m) if !m.file_type().is_symlink() && m.file_type().is_dir() => {
-                    stack.push((p, depth + 1))
-                }
+                Ok(m) if !m.file_type().is_symlink() && m.file_type().is_dir() => stack.push((p, depth + 1)),
                 Ok(_) => return true,
                 Err(_) => {}
             }

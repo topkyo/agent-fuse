@@ -15,11 +15,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-universal:
+  build-and-test:
     runs-on: macos-15
     timeout-minutes: 30
     permissions:
       contents: read
+    outputs:
+      afuse_sha256: ${{ steps.build.outputs.afuse_sha256 }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -31,12 +33,23 @@ jobs:
           set -euo pipefail
           rustup target add x86_64-apple-darwin aarch64-apple-darwin
 
-      - name: Build & lipo Universal CLI binary
+      - name: Verify zero external crates, test & build Universal CLI binary
+        id: build
+        env:
+          RUSTFLAGS: -D warnings
+          CARGO_NET_OFFLINE: "true"
         run: |
           set -euo pipefail
-          cargo test --locked
-          cargo build --release --locked --target x86_64-apple-darwin
-          cargo build --release --locked --target aarch64-apple-darwin
+          cargo metadata --format-version 1 --locked | python3 -c '
+          import json, sys
+          m = json.load(sys.stdin)
+          pkgs = m["packages"]
+          assert len(pkgs) == 1, f"expected 0 external crates (packages == 1), got {len(pkgs)}"
+          '
+          cargo test --locked --offline
+          cargo test --locked --offline --features test-hooks
+          cargo build --release --locked --offline --target x86_64-apple-darwin
+          cargo build --release --locked --offline --target aarch64-apple-darwin
           mkdir -p dist
           lipo -create \
             target/x86_64-apple-darwin/release/afuse \
@@ -45,6 +58,54 @@ jobs:
           strip -x dist/afuse
           lipo -archs dist/afuse
           chmod +x dist/afuse
+          (
+            cd dist
+            shasum -a 256 afuse > afuse.sha256
+            shasum -a 256 -c afuse.sha256
+          )
+          AFUSE_SHA=$(awk '{print $1}' dist/afuse.sha256)
+          echo "afuse_sha256=${AFUSE_SHA}" >> "$GITHUB_OUTPUT"
+          cat dist/afuse.sha256
+
+      - name: Upload unsigned Universal CLI binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: afuse-universal-unsigned
+          path: |
+            dist/afuse
+            dist/afuse.sha256
+          if-no-files-found: error
+
+  sign-and-notarize:
+    needs: build-and-test
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Download unsigned Universal CLI binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: afuse-universal-unsigned
+          path: dist
+
+      - name: Verify unsigned artifact SHA-256 integrity
+        env:
+          EXPECTED_SHA256: ${{ needs.build-and-test.outputs.afuse_sha256 }}
+        run: |
+          set -euo pipefail
+          [ -n "$EXPECTED_SHA256" ] || { echo "Missing expected afuse SHA-256 output" >&2; exit 2; }
+          chmod +x dist/afuse
+          ACTUAL_SHA256=$(shasum -a 256 dist/afuse | awk '{print $1}')
+          if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
+            echo "Unsigned artifact SHA-256 mismatch: expected=$EXPECTED_SHA256 actual=$ACTUAL_SHA256" >&2
+            exit 2
+          fi
+          (
+            cd dist
+            shasum -a 256 -c afuse.sha256
+          )
+          rm -f dist/afuse.sha256
 
       - name: Code Signing & Optional Apple Notarization
         env:
@@ -92,6 +153,8 @@ jobs:
             IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F '"' '/Developer ID Application/ {print $2; exit}')
             [ -n "$IDENTITY" ] || { echo "Missing Developer ID Application identity" >&2; exit 2; }
             codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/afuse
+            codesign --verify --strict --verbose=2 dist/afuse
+            codesign -dvv dist/afuse 2>&1 | grep -Fq 'flags=0x10000(runtime)'
             ditto -c -k --keepParent dist/afuse dist/afuse-macos-universal.zip
             printf '%s\n' "$APPLE_APP_SPECIFIC_PASSWORD" | xcrun notarytool store-credentials "$NOTARY_PROFILE" \
               --apple-id "$APPLE_ID" \
@@ -106,6 +169,7 @@ jobs:
           else
             echo "Ad-hoc track -> applying deterministic ad-hoc signature..."
             codesign --force --sign - dist/afuse
+            codesign --verify --strict --verbose=2 dist/afuse
             tar -czf dist/afuse-macos-universal.tar.gz -C dist afuse
           fi
           rm -f dist/afuse dist/afuse-macos-universal.zip
@@ -124,7 +188,7 @@ jobs:
           fi
           rm -f "$RUNNER_TEMP/cert.p12"
 
-      - name: Upload release artifacts
+      - name: Upload signed release artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: afuse-universal-dist
@@ -134,7 +198,7 @@ jobs:
           if-no-files-found: error
 
   publish-release:
-    needs: build-universal
+    needs: sign-and-notarize
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 15

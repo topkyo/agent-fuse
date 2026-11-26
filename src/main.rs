@@ -17,19 +17,20 @@ fn print_usage() {
            afuse [-w | --workspace <DIR>] [--json] <SUBCOMMAND> [OPTIONS]\n\
          \n\
          SUBCOMMANDS:\n\
-           snap [-m <LABEL>] [--fast] [--if-changed]\n\
+           snap [-m <LABEL>] [--fast] [--rolling] [--if-changed]\n\
                                                  Take an APFS CoW workspace snapshot (0 B at t=0)\n\
            list                                  List timeline snapshots (newest first)\n\
            diff [<SNAP_ID|latest>] [--fast]    Compare dirty workspace against snapshot\n\
-           restore [<SNAP_ID|latest>] [--no-backup] [-- <REL_PATH>...]\n\
+           restore [<SNAP_ID|latest>] [--fast] [--no-backup] [-- <REL_PATH>...]\n\
                                                  Atomically restore workspace (or selected paths) preserving root Inode\n\
-           guard [--max-delete N] [--max-write-mb M] [--auto-rollback] -- <CMD...>\n\
+           guard [--max-delete N] [--max-write-mb M] [--poll-ms P] [--auto-rollback] -- <CMD...>\n\
                                                  Run agent in isolated process group with instant fuse\n\
            hook <zsh|claude>                     Print opt-in hook snippet to stdout (never edits files)\n\
-           hook uninstall [--apply]              Dry-run scan (or remove with backup) afuse hook blocks\n\
+           hook uninstall [--apply] [--home DIR] Dry-run scan (or remove with backup) afuse hook blocks\n\
            validate [<DIR>]                      Validate safe APFS project root binding\n\
            locate [--ino <N>]                    Locate moved/trashed target by APFS inode\n\
-           relocate --from <P1> --to <P2>        Atomically migrate vault history after move/rename\n\
+           relocate --from <P1> --to <P2> [--ino <N>]\n\
+                                                 Atomically migrate vault history after move/rename\n\
            purge-trash                           Purge stale restored copies remaining in Trash\n\
            doctor [--json] [<DIR>]               Print privacy-safe APFS & vault diagnostics\n\
            prune --keep <N> [--label-prefix P]   Reclaim snapshots & stale incomplete directories\n\
@@ -94,7 +95,30 @@ fn cmd_locate(workspace: &Path, rest: &[String], mut json: bool) {
     }
     match agent_fuse::locate_workspace_target_with_vault(workspace, None, hint_ino) {
         Ok(out) => {
-            if json { println!("{}", out.to_json()); } else { println!("{}", out.to_json()); }
+            if json {
+                println!("{}", out.to_json());
+            } else {
+                match &out {
+                    agent_fuse::LocateOutcome::MovedValid { new_path, ino, kind } => println!(
+                        "MOVED_VALID {} (kind={} ino={})",
+                        sanitize_terminal_text(&new_path.to_string_lossy()),
+                        kind.as_str(),
+                        ino
+                    ),
+                    agent_fuse::LocateOutcome::MovedBlocked { new_path, reason } => println!(
+                        "MOVED_BLOCKED {} ({})",
+                        sanitize_terminal_text(&new_path.to_string_lossy()),
+                        sanitize_terminal_text(reason)
+                    ),
+                    agent_fuse::LocateOutcome::Trashed { path } => println!(
+                        "TRASHED {}",
+                        sanitize_terminal_text(&path.to_string_lossy())
+                    ),
+                    agent_fuse::LocateOutcome::MissingOrTcc { errno } => {
+                        println!("MISSING_OR_TCC (errno={})", errno)
+                    }
+                }
+            }
         }
         Err(e) => emit_error(json, &e),
     }
@@ -264,6 +288,9 @@ fn main() {
     }
 
     if idx >= raw_args.len() {
+        if json {
+            emit_error(true, &AfuseError::new(2, "missing subcommand"));
+        }
         print_usage();
         process::exit(2);
     }
@@ -278,6 +305,21 @@ fn main() {
         if tok == "--" {
             rest_owned.extend_from_slice(&raw_rest[r_idx..]);
             break;
+        }
+        if matches!(
+            tok,
+            "-m" | "--label" | "--label-prefix" | "--keep" | "--min-age-days"
+                | "--from" | "--to" | "--ino" | "--home" | "--cwd" | "--tool"
+                | "--max-delete" | "--max-write-mb" | "--poll-ms"
+        ) {
+            rest_owned.push(raw_rest[r_idx].clone());
+            if r_idx + 1 < raw_rest.len() {
+                rest_owned.push(raw_rest[r_idx + 1].clone());
+                r_idx += 2;
+            } else {
+                r_idx += 1;
+            }
+            continue;
         }
         if allow_post_global && (tok == "--workspace" || tok == "-w" || tok == "-C") {
             if r_idx + 1 >= raw_rest.len() {

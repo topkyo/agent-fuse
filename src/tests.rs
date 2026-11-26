@@ -56,24 +56,25 @@ pub(crate) fn compile_dummy_afuse_macho(dest: &Path, version_str: &str) {
     assert!(st.success(), "clang dummy afuse failed");
 }
 
-struct ScopedDir(PathBuf);
-    impl ScopedDir {
-        fn new(tag: &str) -> Self {
-            let p = env::temp_dir().join(format!(
-                "afuse-test-{}-{}-{}",
-                tag,
-                std::process::id(),
-                TMP_SEQ.fetch_add(1, Ordering::Relaxed)
-            ));
-            fs::create_dir_all(&p).unwrap();
-            Self(p)
-        }
+pub(crate) struct ScopedDir(pub(crate) PathBuf);
+impl ScopedDir {
+    pub(crate) fn new(tag: &str) -> Self {
+        let p = env::temp_dir().join(format!(
+            "afuse-test-{}-{}-{}",
+            tag,
+            std::process::id(),
+            TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = force_remove_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        Self(fs::canonicalize(&p).unwrap_or(p))
     }
-    impl Drop for ScopedDir {
-        fn drop(&mut self) {
-            let _ = force_remove_all(&self.0);
-        }
+}
+impl Drop for ScopedDir {
+    fn drop(&mut self) {
+        let _ = force_remove_all(&self.0);
     }
+}
 
     #[test]
     fn sha256_nist_vectors() {

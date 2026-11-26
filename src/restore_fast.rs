@@ -1,11 +1,14 @@
+use crate::apfs::{force_remove_all, force_unlock, lstat_inode_mode, swap_paths, TMP_SEQ};
 use crate::diff::diff_fast_unlocked;
 use crate::error::{AfuseError, ERR_EACCES, ERR_EINVAL, ERR_ENOENT};
+use crate::fs_guard::clonefile_readable;
 use crate::manifest::{
     compute_fast_fingerprint, compute_snap_tree_manifest, compute_tree_manifest,
     hash_file_streaming, SnapshotMeta, SnapshotOrigin,
 };
 use crate::restore_tree::{
     find_single_snap_file, force_unlock_tree_recursive, workspace_differs_full,
+    workspace_has_visible_files, HeteroStashGuard, UnlockedDirsGuard,
 };
 use crate::sha256::{sha256_hex, Sha256};
 use crate::snapshot::{
@@ -15,6 +18,7 @@ use crate::vault::TargetKind;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 
 pub(crate) fn find_latest_primary(ws_vault: &Path) -> Option<SnapshotMeta> {
     list_snapshots_unlocked(ws_vault)
@@ -108,7 +112,7 @@ pub(crate) fn take_pre_restore_unconditional(
         Ok(m) => Ok(Some(m.id)),
         Err(e) if e.code == ERR_EACCES => {
             force_unlock_tree_recursive(ws);
-            Ok(create_snapshot_unlocked_full(
+            create_snapshot_unlocked_full(
                 ws,
                 ws_vault,
                 "auto:pre-restore",
@@ -117,8 +121,7 @@ pub(crate) fn take_pre_restore_unconditional(
                 None,
                 None,
             )
-            .ok()
-            .map(|m| m.id))
+            .map(|m| Some(m.id))
         }
         Err(e) => Err(e),
     }
@@ -214,4 +217,99 @@ pub(crate) fn verify_selective_restored_paths(
         }
     }
     Ok((receipt.finalize_hex(), verified_files))
+}
+
+pub(crate) fn prepare_restore_stage(
+    ws: &Path,
+    ws_vault: &Path,
+    need_backup: bool,
+    safety_backup: bool,
+) -> Result<(u64, Option<String>, HeteroStashGuard), AfuseError> {
+    let mut hetero = HeteroStashGuard::stash_if_needed(ws, ws_vault, true, safety_backup)?;
+    if hetero.cleared || fs::symlink_metadata(ws).is_err() {
+        let mut p_guard = UnlockedDirsGuard::new();
+        if let Some(parent) = ws.parent() {
+            if fs::symlink_metadata(parent).is_ok() {
+                let _ = p_guard.unlock_if_needed(parent);
+            }
+        }
+        let mk_res = fs::create_dir_all(ws).map_err(|e| {
+            AfuseError::new(
+                e.raw_os_error().unwrap_or(1),
+                format!("cannot recreate workspace dir: {}", e),
+            )
+        });
+        p_guard.restore_all();
+        mk_res?;
+        hetero.mark_placeholder_created();
+        return Ok((0, None, hetero));
+    }
+    let (ino_before, _) = lstat_inode_mode(ws)?;
+    force_unlock(ws);
+    let safety_id = if need_backup && workspace_has_visible_files(ws) {
+        take_pre_restore_unconditional(ws, ws_vault)?
+    } else {
+        None
+    };
+    Ok((ino_before, safety_id, hetero))
+}
+
+pub(crate) fn verify_root_inode(ws: &Path, ino_before: u64) -> Result<u64, AfuseError> {
+    let (ino_after, _) = lstat_inode_mode(ws)?;
+    if ino_before != 0 && ino_before != ino_after {
+        return Err(AfuseError::new(
+            ERR_EINVAL,
+            format!("root Inode invariant violated: before={} after={}", ino_before, ino_after),
+        ));
+    }
+    Ok(ino_after)
+}
+
+fn commit_staged_entry(tmp_new: &Path, target: &Path, tmp_old: &Path) -> Result<(), AfuseError> {
+    if fs::symlink_metadata(target).is_err() {
+        return fs::rename(tmp_new, target).map_err(|e| {
+            let _ = force_remove_all(tmp_new);
+            AfuseError::new(e.raw_os_error().unwrap_or(1), format!("rename failed: {}", e))
+        });
+    }
+    force_unlock(target);
+    if swap_paths(tmp_new, target).is_ok() {
+        return force_remove_all(tmp_new);
+    }
+    if fs::symlink_metadata(tmp_old).is_ok() {
+        force_remove_all(tmp_old)?;
+    }
+    fs::rename(target, tmp_old).map_err(|e| {
+        let _ = force_remove_all(tmp_new);
+        AfuseError::new(e.raw_os_error().unwrap_or(1), format!("stage-1 rename failed: {}", e))
+    })?;
+    if let Err(e) = fs::rename(tmp_new, target) {
+        let _ = fs::rename(tmp_old, target);
+        let _ = force_remove_all(tmp_new);
+        return Err(AfuseError::new(
+            e.raw_os_error().unwrap_or(1),
+            format!("stage-2 rename failed: {}", e),
+        ));
+    }
+    force_remove_all(tmp_old)
+}
+
+pub(crate) fn stage_and_replace(
+    parent: &Path,
+    tag: &str,
+    snap_item: &Path,
+    target: &Path,
+) -> Result<(), AfuseError> {
+    let pid = std::process::id();
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_new = parent.join(format!(".afuse.tmp.{}.{}.{}", tag, pid, seq));
+    if fs::symlink_metadata(&tmp_new).is_ok() {
+        force_remove_all(&tmp_new)?;
+    }
+    if let Err(e) = clonefile_readable(snap_item, &tmp_new) {
+        let _ = force_remove_all(&tmp_new);
+        return Err(e);
+    }
+    let tmp_old = parent.join(format!(".afuse.tmp.old.{}.{}", pid, seq));
+    commit_staged_entry(&tmp_new, target, &tmp_old)
 }

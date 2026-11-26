@@ -1,10 +1,13 @@
-use crate::apfs::chmod_nofollow;
+use crate::apfs::{chmod_nofollow, random_hex_suffix, TMP_SEQ};
 use crate::diff_rename::RenamePair;
 use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
 use crate::vault::TargetKind;
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
 pub const PIN_CONTAINS_DELETED: &str = "contains_deleted";
 
@@ -209,14 +212,70 @@ pub(crate) fn write_meta(meta_path: &Path, m: &SnapshotMeta) -> Result<(), Afuse
             content.push('\n');
         }
     }
-    fs::write(meta_path, content).map_err(|e| {
-        AfuseError::new(
+    let parent = meta_path
+        .parent()
+        .ok_or_else(|| AfuseError::new(ERR_EINVAL, "missing meta parent directory"))?;
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = parent.join(format!(
+        ".meta.kv.tmp.{}.{}.{}",
+        std::process::id(),
+        seq,
+        random_hex_suffix()
+    ));
+    let mut f = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .map_err(|e| {
+            AfuseError::new(
+                e.raw_os_error().unwrap_or(1),
+                format!("failed to create temp meta {}: {}", tmp.display(), e),
+            )
+        })?;
+    if let Err(e) = f.write_all(content.as_bytes()).and_then(|_| f.sync_all()) {
+        drop(f);
+        let _ = fs::remove_file(&tmp);
+        return Err(AfuseError::new(
             e.raw_os_error().unwrap_or(1),
             format!("failed to write meta {}: {}", meta_path.display(), e),
-        )
-    })?;
-    let _ = chmod_nofollow(meta_path, 0o600);
+        ));
+    }
+    drop(f);
+    let _ = chmod_nofollow(&tmp, 0o600);
+    if let Err(e) = fs::rename(&tmp, meta_path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(AfuseError::new(
+            e.raw_os_error().unwrap_or(1),
+            format!("failed to commit meta {}: {}", meta_path.display(), e),
+        ));
+    }
     Ok(())
+}
+
+pub(crate) fn read_verified_snap_meta(snap_dir: &Path) -> Result<SnapshotMeta, AfuseError> {
+    let dir_meta = fs::symlink_metadata(snap_dir).map_err(|e| {
+        AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), "snapshot directory missing")
+    })?;
+    if dir_meta.file_type().is_symlink() || !dir_meta.file_type().is_dir() {
+        return Err(AfuseError::new(ERR_EINVAL, "snapshot entry is not a real directory"));
+    }
+    let meta_path = snap_dir.join("meta.kv");
+    let tree_path = snap_dir.join("tree");
+    let meta_ok = fs::symlink_metadata(&meta_path)
+        .map(|m| !m.file_type().is_symlink() && m.file_type().is_file())
+        .unwrap_or(false);
+    let tree_ok = fs::symlink_metadata(&tree_path)
+        .map(|m| !m.file_type().is_symlink() && m.file_type().is_dir())
+        .unwrap_or(false);
+    if !meta_ok || !tree_ok {
+        return Err(AfuseError::new(ERR_EINVAL, "snapshot meta.kv or tree invalid or symlinked"));
+    }
+    let meta = SnapshotMeta::read_from(&meta_path)?;
+    if snap_dir.file_name().and_then(|n| n.to_str()) != Some(meta.id.as_str()) {
+        return Err(AfuseError::new(ERR_EINVAL, "snapshot meta.kv id does not match directory name"));
+    }
+    Ok(meta)
 }
 
 impl SnapshotMeta {
@@ -268,6 +327,7 @@ impl SnapshotMeta {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn read_meta(meta_path: &Path) -> Result<SnapshotMeta, AfuseError> {
     SnapshotMeta::read_from(meta_path)
 }

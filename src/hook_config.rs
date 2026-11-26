@@ -63,6 +63,7 @@ pub fn render_hook_snippet(target: &str) -> Result<String, AfuseError> {
              \x20       fi\n\
              \x20     done\n\
              \x20     local _af_raw=\"${{_af_w[$_af_i]:-}}\"\n\
+             \x20     _af_raw=\"${{${{_af_raw#[\\\"\\']}}%[\\\"\\']}}\"\n\
              \x20     local _af_cmd=\"${{_af_pkg:-${{_af_raw:t}}}}\"\n\
              \x20     case \"$_af_cmd\" in\n\
              \x20       claude|cursor-agent|codex|aider|gemini|opencode|goose|claude-code)\n\
@@ -75,6 +76,8 @@ pub fn render_hook_snippet(target: &str) -> Result<String, AfuseError> {
              \x20           _af_bin=\"/usr/local/bin/afuse\"\n\
              \x20         elif [[ -x \"$HOME/.local/bin/afuse\" ]]; then\n\
              \x20           _af_bin=\"$HOME/.local/bin/afuse\"\n\
+             \x20         elif [[ -x \"$HOME/.cargo/bin/afuse\" ]]; then\n\
+             \x20           _af_bin=\"$HOME/.cargo/bin/afuse\"\n\
              \x20         elif command -v afuse >/dev/null 2>&1; then\n\
              \x20           _af_bin=\"afuse\"\n\
              \x20         fi\n\
@@ -98,7 +101,7 @@ pub fn render_hook_snippet(target: &str) -> Result<String, AfuseError> {
              \x20       \"hooks\": [\n\
              \x20         {\n\
              \x20           \"type\": \"command\",\n\
-             \x20           \"command\": \"if [ -x \\\"/Applications/AgentFuse.app/Contents/MacOS/afuse\\\" ]; then \\\"/Applications/AgentFuse.app/Contents/MacOS/afuse\\\" hook claude --exec; elif [ -x \\\"/opt/homebrew/bin/afuse\\\" ]; then \\\"/opt/homebrew/bin/afuse\\\" hook claude --exec; elif [ -x \\\"/usr/local/bin/afuse\\\" ]; then \\\"/usr/local/bin/afuse\\\" hook claude --exec; elif [ -x \\\"$HOME/.local/bin/afuse\\\" ]; then \\\"$HOME/.local/bin/afuse\\\" hook claude --exec; elif command -v afuse >/dev/null 2>&1; then afuse hook claude --exec; fi || true\",\n\
+             \x20           \"command\": \"if [ -x \\\"/Applications/AgentFuse.app/Contents/MacOS/afuse\\\" ]; then \\\"/Applications/AgentFuse.app/Contents/MacOS/afuse\\\" hook claude --exec; elif [ -x \\\"/opt/homebrew/bin/afuse\\\" ]; then \\\"/opt/homebrew/bin/afuse\\\" hook claude --exec; elif [ -x \\\"/usr/local/bin/afuse\\\" ]; then \\\"/usr/local/bin/afuse\\\" hook claude --exec; elif [ -x \\\"$HOME/.local/bin/afuse\\\" ]; then \\\"$HOME/.local/bin/afuse\\\" hook claude --exec; elif [ -x \\\"$HOME/.cargo/bin/afuse\\\" ]; then \\\"$HOME/.cargo/bin/afuse\\\" hook claude --exec; elif command -v afuse >/dev/null 2>&1; then afuse hook claude --exec; fi || true\",\n\
              \x20           \"timeout\": 10\n\
              \x20         }\n\
              \x20       ]\n\
@@ -192,6 +195,18 @@ pub fn uninstall_hooks(
                     "refusing to rewrite symlinked shell config file",
                 ));
             }
+            if let Ok(raw) = fs::read_to_string(sf) {
+                if raw.contains(HOOK_MARKER_BEGIN) || raw.contains("afuse hook") {
+                    actions.push(UninstallAction {
+                        path: sf.to_string_lossy().into_owned(),
+                        kind: "manual_symlink_shell_config".to_string(),
+                        start_line: 1,
+                        end_line: 1,
+                        applied: false,
+                        backup_path: None,
+                    });
+                }
+            }
             continue;
         }
         if !sf_meta.file_type().is_file() {
@@ -202,22 +217,24 @@ pub fn uninstall_hooks(
         };
         let lines: Vec<&str> = raw.lines().collect();
         let mut blocks: Vec<(usize, usize)> = Vec::new();
-        let mut orphan_begins: Vec<usize> = Vec::new();
+        let mut orphan_markers: Vec<usize> = Vec::new();
         let mut cur_begin: Option<usize> = None;
         for (idx, line) in lines.iter().enumerate() {
             let trimmed = line.trim();
             if trimmed == HOOK_MARKER_BEGIN {
                 if let Some(prev_b) = cur_begin.replace(idx) {
-                    orphan_begins.push(prev_b);
+                    orphan_markers.push(prev_b);
                 }
             } else if trimmed == HOOK_MARKER_END {
                 if let Some(b) = cur_begin.take() {
                     blocks.push((b, idx));
+                } else {
+                    orphan_markers.push(idx);
                 }
             }
         }
         if let Some(b) = cur_begin {
-            orphan_begins.push(b);
+            orphan_markers.push(b);
         }
         if !blocks.is_empty() {
             let mut backup_path = None;
@@ -234,13 +251,33 @@ pub fn uninstall_hooks(
                     .unwrap_or_default()
                     .as_millis();
                 let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-                let bak = PathBuf::from(format!("{}.afuse-bak-{}-{}", sf.display(), ms, seq));
-                fs::copy(sf, &bak).map_err(|err| {
-                    AfuseError::new(
+                let bak = PathBuf::from(format!(
+                    "{}.afuse-bak-{}-{}-{}",
+                    sf.display(),
+                    ms,
+                    seq,
+                    random_hex_suffix()
+                ));
+                let mut bf = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&bak)
+                    .map_err(|err| {
+                        AfuseError::new(
+                            err.raw_os_error().unwrap_or(1),
+                            format!("backup failed {}: {}", bak.display(), err),
+                        )
+                    })?;
+                if let Err(err) = bf.write_all(raw.as_bytes()).and_then(|_| bf.sync_all()) {
+                    drop(bf);
+                    let _ = fs::remove_file(&bak);
+                    return Err(AfuseError::new(
                         err.raw_os_error().unwrap_or(1),
                         format!("backup failed {}: {}", bak.display(), err),
-                    )
-                })?;
+                    ));
+                }
+                drop(bf);
                 let _ = chmod_nofollow(&bak, 0o600);
                 let mut kept: Vec<&str> = Vec::with_capacity(lines.len());
                 for (idx, line) in lines.iter().enumerate() {
@@ -274,7 +311,7 @@ pub fn uninstall_hooks(
                 });
             }
         }
-        let mut manual_lines: BTreeSet<usize> = orphan_begins.into_iter().collect();
+        let mut manual_lines: BTreeSet<usize> = orphan_markers.into_iter().collect();
         for (idx, line) in lines.iter().enumerate() {
             if !blocks.iter().any(|(b, e)| idx >= *b && idx <= *e) && line.contains("afuse hook") {
                 manual_lines.insert(idx);

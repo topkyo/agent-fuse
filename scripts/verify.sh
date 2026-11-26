@@ -20,17 +20,32 @@ export RUSTFLAGS="${RUSTFLAGS:--D warnings}"
 
 echo "=== [Gate 2.0] Production Module Size Gate (< 400 LOC per .rs file) ==="
 for rs_file in "$PROJECT_DIR"/src/*.rs; do
-  [ "$(basename "$rs_file")" = "tests.rs" ] && continue
+  rs_base="$(basename "$rs_file")"
+  case "$rs_base" in
+    tests*.rs) continue ;;
+  esac
   rs_lines=$(wc -l < "$rs_file" | tr -d ' ')
   if [ "$rs_lines" -ge 400 ]; then
-    echo "FAIL: production module $(basename "$rs_file") has ${rs_lines} lines (must be < 400 LOC)" >&2
+    echo "FAIL: production module ${rs_base} has ${rs_lines} lines (must be < 400 LOC)" >&2
     exit 1
   fi
 done
-echo "All production .rs modules strictly < 400 LOC."
+python3 - "$PROJECT_DIR/src" <<'PY'
+import glob, os, sys
+src_dir = sys.argv[1]
+header = "\n".join(open(os.path.join(src_dir, "lib.rs"), encoding="utf-8").read().splitlines()[:30])
+for path in sorted(glob.glob(os.path.join(src_dir, "*.rs"))):
+    base = os.path.basename(path)
+    if base.startswith("tests") or base in ("lib.rs", "main.rs"):
+        continue
+    mod_name = base[:-3]
+    assert f"`{mod_name}`" in header, f"production module '{mod_name}' missing from src/lib.rs top //! overview"
+print("All production .rs modules strictly < 400 LOC and indexed in src/lib.rs.")
+PY
 
 echo "=== [Gate 2.1] Offline Unit & Kernel Integration Tests ==="
 cargo test --offline --manifest-path "$PROJECT_DIR/Cargo.toml"
+cargo test --offline --features test-hooks --manifest-path "$PROJECT_DIR/Cargo.toml"
 
 echo "=== [Gate 2.2] Release Build, Hardened Env Isolation & Binary Size Gate (< 10 MB) ==="
 cargo build --release --offline --manifest-path "$PROJECT_DIR/Cargo.toml"
@@ -189,14 +204,21 @@ SHA_AFTER=$(shasum -a 256 "$FAKE_HOME/.zshrc" "$FAKE_HOME/.claude/settings.json"
 
 [ -s "$PROJECT_DIR/SKILL.md" ] || { echo "FAIL: missing SKILL.md" >&2; exit 1; }
 [ -s "$PROJECT_DIR/llms.txt" ] || { echo "FAIL: missing llms.txt" >&2; exit 1; }
-python3 - "$PROJECT_DIR/README.md" "$PROJECT_DIR/SKILL.md" "$PROJECT_DIR/llms.txt" "$PROJECT_DIR/Cargo.toml" <<'PY'
+python3 - "$PROJECT_DIR/Cargo.toml" "$PROJECT_DIR/README.md" "$PROJECT_DIR/README.zh-CN.md" "$PROJECT_DIR/SKILL.md" "$PROJECT_DIR/llms.txt" "$PROJECT_DIR/SECURITY.md" <<'PY'
 import re, sys
-banned = re.compile(r"\b(revolutionary|game-changer|blazing|seamless|supercharge|sub-millisecond)\b|🚀|\[FILL|agentfuse\.pages\.dev", re.I)
+cargo_txt = open(sys.argv[1], encoding="utf-8").read()
+ver_m = re.search(r'^version\s*=\s*"([^"]+)"', cargo_txt, re.M)
+assert ver_m, "missing version in Cargo.toml"
+cur_ver = ver_m.group(1)
+banned = re.compile(r"\b(revolutionary|game-changer|blazing|seamless|supercharge|sub-millisecond)\b|🚀|\[FILL|agentfuse\.pages\.dev|站内私信/通知", re.I)
 for path in sys.argv[1:]:
     txt = open(path, encoding="utf-8").read()
     m = banned.search(txt)
     assert not m, f"banned/dead token {m.group(0)!r} in {path}"
-print("README, SKILL, llms.txt & Cargo.toml verified (zero banned tokens, zero sub-ms/dead links)")
+for doc_path in sys.argv[2:]:
+    txt = open(doc_path, encoding="utf-8").read()
+    assert cur_ver in txt, f"version {cur_ver} missing from {doc_path}"
+print(f"README(en/zh), SKILL, llms.txt, SECURITY & Cargo.toml verified (v{cur_ver}, zero banned/stale tokens)")
 PY
 
 # B-3 end-to-end check: malformed prune flags return non-zero and keep manual-milestone intact

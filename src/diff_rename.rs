@@ -128,7 +128,7 @@ pub(crate) fn detect_renames_in_dir(
     }
     let mut used_added = vec![false; added.len()];
     let mut used_deleted = vec![false; deleted.len()];
-    let mut added_sigs: HashMap<usize, Option<String>> = HashMap::new();
+    let mut sig_index_by_bucket: HashMap<(bool, u64), HashMap<String, Vec<usize>>> = HashMap::new();
     let mut renamed = Vec::new();
 
     for (d_idx, d_rel) in deleted.iter().enumerate() {
@@ -138,25 +138,33 @@ pub(crate) fn detect_renames_in_dir(
         let Some(d_len) = extract_sig_len(d_sig) else {
             continue;
         };
-        let Some(candidates) = added_buckets.get(&(is_git_path(d_rel), d_len)) else {
+        let bucket_key = (is_git_path(d_rel), d_len);
+        let Some(candidates) = added_buckets.get(&bucket_key) else {
             continue;
         };
         let Some(d_content) = rename_content_sig(&snap_root.join(d_rel), d_len, d_sig) else {
             continue;
         };
+        let by_sig = sig_index_by_bucket.entry(bucket_key).or_insert_with(|| {
+            let mut m: HashMap<String, Vec<usize>> = HashMap::new();
+            for &a_idx in candidates {
+                let a_rel = &added[a_idx];
+                let a_hint = live_entries.get(a_rel).map(|s| s.as_str()).unwrap_or("");
+                if let Some(sig) = rename_content_sig(&live_root.join(a_rel), d_len, a_hint) {
+                    m.entry(sig).or_default().push(a_idx);
+                }
+            }
+            m
+        });
+        let Some(matching) = by_sig.get(&d_content) else {
+            continue;
+        };
         let mut best: Option<(u8, usize)> = None;
-        for &a_idx in candidates {
+        for &a_idx in matching {
             if used_added[a_idx] {
                 continue;
             }
             let a_rel = &added[a_idx];
-            let a_hint = live_entries.get(a_rel).map(|s| s.as_str()).unwrap_or("");
-            let a_content = added_sigs
-                .entry(a_idx)
-                .or_insert_with(|| rename_content_sig(&live_root.join(a_rel), d_len, a_hint));
-            if a_content.as_deref() != Some(d_content.as_str()) {
-                continue;
-            }
             let prio = match_priority(d_rel, a_rel);
             let better = match best {
                 None => true,
