@@ -10,7 +10,7 @@ description: >-
   active shell's root cwd Inode.
 ---
 
-# Agent-Fuse (`afuse` v0.6.3) · APFS Workspace Safety Airbag
+# Agent-Fuse (`afuse` v0.6.4) · APFS Workspace Safety Airbag
 
 `afuse` snapshots uncommitted edits, untracked files, plain directories (no `.git` or manifest marker required), single protected files (with sibling-file isolation), and `.git` state on macOS APFS volumes into an external same-volume vault (`~/.agent-fuse/vault.noindex`, `0700` permissions) using kernel `clonefile(2)` (`0 Bytes` at `t=0` until blocks diverge) and `renamex_np(RENAME_SWAP)` in-place rollback (preserving root cwd Inode for folders and purging identical `(fsid, ino)` copies left in `~/.Trash`). Automatic `auto:*` snapshots enforce a rolling cap via `AFUSE_MAX_AUTO_SNAPS` (default `50`) while preserving manual milestones.
 

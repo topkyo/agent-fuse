@@ -1,4 +1,4 @@
-# ⚡️ `agent-fuse` (`afuse`) v0.6.3
+# ⚡️ `agent-fuse` (`afuse`) v0.6.4
 
 **[English](./README.md)** | **简体中文** · **[官网](https://agentfuse.topkyo.dev/zh/)** · **[参与贡献](./CONTRIBUTING.md)** · **[安全策略](./SECURITY.md)**
 
@@ -41,7 +41,7 @@ xattr -cr /Applications/AgentFuse.app
 
 实测硬件基准：**2015 款 MacBook Pro（`Intel Core i5-5257U`，8 GB 内存，`macOS 12.7.6` APFS）**：
 
-| 对比维度 | `git stash -u` | Electron / IDE 内置检查点 | **`agent-fuse` (`afuse` v0.6.3)** |
+| 对比维度 | `git stash -u` | Electron / IDE 内置检查点 | **`agent-fuse` (`afuse` v0.6.4)** |
 | :--- | :--- | :--- | :--- |
 | 未追踪文件 + 脏工作区 + `.git` 索引 | 局部覆盖且争抢 `.git` 锁 | 仅限编辑器已打开文件且漏检 Bash 删除 | **全工作区 + `.git` 0 字节截断防护 + 单文件精准恢复（外部 `.noindex` 隔离保险库）** |
 | 142 文件脏仓库快照 / 恢复耗时 | `50–800 ms` | `200–2,000 ms` | **`6.46 ms` 快照 / `12.60 ms` 原位恢复（含安全前备与 SHA-256 校验）** |

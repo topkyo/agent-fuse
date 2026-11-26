@@ -1,6 +1,6 @@
 [package]
 name = "agent-fuse"
-version = "0.6.3"
+version = "0.6.4"
 edition = "2021"
 description = "Millisecond-scale APFS CoW workspace time machine & runaway circuit breaker for AI coding agents"
 license = "MIT"

@@ -6,8 +6,8 @@
 
 | Version | Supported | Notes |
 | :--- | :--- | :--- |
-| `0.6.3+` | Yes | Active security & APFS boundary maintenance |
-| `< 0.6.3` | Upgrade recommended | Run `afuse upgrade` or reinstall via Homebrew / Cargo |
+| `0.6.4+` | Yes | Active security & APFS boundary maintenance |
+| `< 0.6.4` | Upgrade recommended | Run `afuse upgrade` or reinstall via Homebrew / Cargo |
 
 ## Threat Model & Security Architecture
 
@@ -47,8 +47,8 @@ Please **do NOT open a public GitHub issue** for exploitable security vulnerabil
 
 | 版本范围 | 安全维护状态 | 说明 |
 | :--- | :--- | :--- |
-| `0.6.3+` | 支持中 | 持续维护安全边界与 APFS 原子性补丁 |
-| `< 0.6.3` | 建议升级 | 请执行 `afuse upgrade` 或通过 Homebrew / Cargo 更新至最新版 |
+| `0.6.4+` | 支持中 | 持续维护安全边界与 APFS 原子性补丁 |
+| `< 0.6.4` | 建议升级 | 请执行 `afuse upgrade` 或通过 Homebrew / Cargo 更新至最新版 |
 
 ### 安全架构边界与威胁模型
 
