@@ -1,6 +1,6 @@
 use crate::apfs::{can_read_write, current_euid, real_home_dir};
 use crate::error::{AfuseError, ERR_EACCES, ERR_EINVAL, ERR_ENOENT};
-use crate::meta::read_meta;
+use crate::meta::read_verified_snap_meta;
 use crate::unicode_norm::{path_eq_casefold_nfd, path_starts_with_casefold_nfd};
 use crate::vault::{is_ignored_name, TargetKind};
 use std::env;
@@ -192,33 +192,27 @@ pub(crate) fn enforce_vault_target_kind(
     let mut entries: Vec<_> = rd.flatten().map(|e| e.path()).collect();
     entries.sort();
     for dir in entries.into_iter().rev() {
-        let meta_p = dir.join("meta.kv");
-        if meta_p.is_file() && dir.join("tree").is_dir() {
-            if let Ok(m) = read_meta(&meta_p) {
-                if m.target_kind != live_kind {
-                    return Err(AfuseError::new(
-                        ERR_EINVAL,
-                        format!(
-                            "target kind mismatch: vault is bound as '{}' while target path is '{}'",
-                            m.target_kind.as_str(),
-                            live_kind.as_str()
-                        ),
-                    ));
-                }
-                return Ok(());
+        if let Ok(m) = read_verified_snap_meta(&dir) {
+            if m.target_kind != live_kind {
+                return Err(AfuseError::new(
+                    ERR_EINVAL,
+                    format!(
+                        "target kind mismatch: vault is bound as '{}' while target path is '{}'",
+                        m.target_kind.as_str(),
+                        live_kind.as_str()
+                    ),
+                ));
             }
+            return Ok(());
         }
     }
     Ok(())
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(crate) struct VerifiedLiveTarget {
     path: PathBuf,
     kind: TargetKind,
-    dev: u64,
-    ino: u64,
 }
 
 impl VerifiedLiveTarget {
@@ -249,13 +243,9 @@ impl VerifiedLiveTarget {
                 ),
             ));
         }
-        Ok(Self { path: ws.to_path_buf(), kind: live_kind, dev: meta.dev(), ino: meta.ino() })
+        Ok(Self { path: ws.to_path_buf(), kind: live_kind })
     }
 
     pub(crate) fn path(&self) -> &Path { &self.path }
     pub(crate) fn kind(&self) -> TargetKind { self.kind }
-    #[allow(dead_code)]
-    pub(crate) fn dev(&self) -> u64 { self.dev }
-    #[allow(dead_code)]
-    pub(crate) fn ino(&self) -> u64 { self.ino }
 }

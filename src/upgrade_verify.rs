@@ -144,25 +144,25 @@ pub(crate) fn parse_codesign_identity(text: &str) -> CodesignIdentity {
 }
 
 #[cfg(target_os = "macos")]
-fn probe_codesign_identity(path: &Path) -> CodesignIdentity {
-    let Ok(out) = Command::new("/usr/bin/codesign")
+fn probe_codesign_identity(path: &Path) -> Result<CodesignIdentity, AfuseError> {
+    let out = Command::new("/usr/bin/codesign")
         .args(["-dvv"])
         .arg(path)
         .stdin(Stdio::null())
         .output()
-    else {
-        return CodesignIdentity {
-            identifier: None,
-            team_id: None,
-            authorities: Vec::new(),
-        };
-    };
+        .map_err(|e| AfuseError::new(ERR_EINVAL, format!("codesign -dvv failed: {}", e)))?;
+    if !out.status.success() {
+        return Err(AfuseError::new(
+            ERR_EINVAL,
+            format!("codesign -dvv exited non-zero for {}", path.display()),
+        ));
+    }
     let merged = format!(
         "{}\n{}",
         String::from_utf8_lossy(&out.stderr),
         String::from_utf8_lossy(&out.stdout)
     );
-    parse_codesign_identity(&merged)
+    Ok(parse_codesign_identity(&merged))
 }
 
 pub(crate) fn validate_candidate_codesign_identity(
@@ -228,11 +228,10 @@ fn ensure_macos_codesign(staged_bin: &Path, host_exe: Option<&Path>) -> Result<(
     };
     let host_signed = host_exe.map(verify_ok).unwrap_or(false);
     let host_id = if host_signed {
-        host_exe.map(probe_codesign_identity).unwrap_or(CodesignIdentity {
-            identifier: None,
-            team_id: None,
-            authorities: Vec::new(),
-        })
+        let Some(hpath) = host_exe else {
+            return Err(AfuseError::new(ERR_EINVAL, "missing signed host path for codesign check"));
+        };
+        probe_codesign_identity(hpath)?
     } else {
         CodesignIdentity {
             identifier: None,
@@ -242,7 +241,7 @@ fn ensure_macos_codesign(staged_bin: &Path, host_exe: Option<&Path>) -> Result<(
     };
     if host_id.team_id.is_some() {
         let strict_ok = verify_ok(staged_bin);
-        let cand_id = probe_codesign_identity(staged_bin);
+        let cand_id = probe_codesign_identity(staged_bin)?;
         return validate_candidate_codesign_identity(&host_id, strict_ok, &cand_id);
     }
     if verify_ok(staged_bin) {
@@ -293,7 +292,7 @@ pub(crate) fn probe_staged_version(
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|e| {
             AfuseError::new(
@@ -301,10 +300,18 @@ pub(crate) fn probe_staged_version(
                 format!("staged binary failed to spawn '--version' probe: {}", e),
             )
         })?;
+    let stdout_pipe = child.stdout.take();
+    let reader = thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(out) = stdout_pipe {
+            let _ = out.take(4096).read_to_end(&mut buf);
+        }
+        buf
+    });
     let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(st)) => break st,
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(15)),
             Ok(None) => {
                 let _ = child.kill();
@@ -323,20 +330,15 @@ pub(crate) fn probe_staged_version(
                 ));
             }
         }
-    }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| AfuseError::new(ERR_EINVAL, format!("staged binary probe read failed: {}", e)))?;
-    if !out.status.success() {
+    };
+    let out_bytes = reader.join().unwrap_or_default();
+    if !status.success() {
         return Err(AfuseError::new(
             ERR_EINVAL,
-            format!(
-                "staged binary '--version' probe exited with {:?}",
-                out.status.code()
-            ),
+            format!("staged binary '--version' probe exited with {:?}", status.code()),
         ));
     }
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = String::from_utf8_lossy(&out_bytes);
     if !stdout.contains("afuse") {
         return Err(AfuseError::new(
             ERR_EINVAL,
@@ -344,7 +346,7 @@ pub(crate) fn probe_staged_version(
         ));
     }
     if let Some(exp_raw) = expected_version {
-        let norm = exp_raw.trim().trim_start_matches('v');
+        let norm = exp_raw.trim().trim_start_matches(['v', 'V']);
         if !norm.is_empty()
             && !stdout
                 .split_whitespace()
@@ -365,13 +367,21 @@ pub(crate) fn probe_staged_version(
 
 pub(crate) fn prepare_and_verify_staged_binary(
     staged_bin: &Path,
+    host_exe: Option<&Path>,
     expected_version: Option<&str>,
 ) -> Result<(), AfuseError> {
     verify_executable_magic(staged_bin)?;
     #[cfg(target_os = "macos")]
     {
-        let host_exe = env::current_exe().ok();
-        ensure_macos_codesign(staged_bin, host_exe.as_deref())?;
+        let fallback_exe;
+        let host_ref = match host_exe {
+            Some(p) => Some(p),
+            None => {
+                fallback_exe = env::current_exe().ok();
+                fallback_exe.as_deref()
+            }
+        };
+        ensure_macos_codesign(staged_bin, host_ref)?;
     }
     probe_staged_version(staged_bin, expected_version)
 }

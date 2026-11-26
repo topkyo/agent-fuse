@@ -30,7 +30,7 @@ pub(crate) fn cmd_upgrade(rest: &[String], mut json: bool) {
         emit_error(json, &AfuseError::new(2, "unexpected upgrade argument"));
     }
     if want_help {
-        let usage = "USAGE: afuse [-w | --workspace <DIR>] [--json] upgrade [--check]";
+        let usage = "USAGE: afuse [--json] upgrade [--check]";
         if json {
             println!("{{\"ok\":true,\"usage\":\"{}\"}}", json_escape(usage));
         } else {

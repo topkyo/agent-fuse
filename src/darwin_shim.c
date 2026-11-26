@@ -1,6 +1,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <libproc.h>
 #include <pwd.h>
 #include <signal.h>
 #include <spawn.h>
@@ -101,6 +102,9 @@ int afuse_chmod_nofollow(const char *path, uint32_t mode) {
     if (errno == ELOOP) {
         return EINVAL;
     }
+    if (errno == ENOENT) {
+        return ENOENT;
+    }
     struct stat st;
     if (lstat(path, &st) != 0) {
         return errno ? errno : -1;
@@ -176,7 +180,15 @@ static int afuse_remove_dir_fd(int dirfd, int depth) {
     }
     int first_err = 0;
     struct dirent *ent;
-    while ((ent = readdir(dir)) != NULL) {
+    for (;;) {
+        errno = 0;
+        ent = readdir(dir);
+        if (ent == NULL) {
+            if (errno != 0 && first_err == 0) {
+                first_err = errno;
+            }
+            break;
+        }
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
             continue;
         }
@@ -258,34 +270,45 @@ static int afuse_open_and_flock(const char *lock_path, int flock_op, int *out_fd
     if (!lock_path || !out_fd) {
         return EINVAL;
     }
-    int fd = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
-    if (fd < 0) {
-        return errno ? errno : -1;
-    }
-    struct stat st;
-    if (fstat(fd, &st) != 0) {
-        int err = errno ? errno : -1;
-        close(fd);
-        return err;
-    }
-    if (!S_ISREG(st.st_mode)) {
-        close(fd);
-        return EINVAL;
-    }
-    if (st.st_uid != geteuid()) {
-        close(fd);
-        return EPERM;
-    }
-    while (flock(fd, flock_op) != 0) {
-        if (errno == EINTR) {
-            continue;
+    int max_attempts = (flock_op & LOCK_NB) ? 4 : 16;
+    for (int attempt = 0; attempt < max_attempts; attempt++) {
+        int fd = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (fd < 0) {
+            return errno ? errno : -1;
         }
-        int err = errno ? errno : EWOULDBLOCK;
+        struct stat st;
+        if (fstat(fd, &st) != 0) {
+            int err = errno ? errno : -1;
+            close(fd);
+            return err;
+        }
+        if (!S_ISREG(st.st_mode)) {
+            close(fd);
+            return EINVAL;
+        }
+        if (st.st_uid != geteuid()) {
+            close(fd);
+            return EPERM;
+        }
+        while (flock(fd, flock_op) != 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            int err = errno ? errno : EWOULDBLOCK;
+            close(fd);
+            return err;
+        }
+        struct stat path_st;
+        if (lstat(lock_path, &path_st) == 0
+            && path_st.st_dev == st.st_dev
+            && path_st.st_ino == st.st_ino) {
+            *out_fd = fd;
+            return 0;
+        }
+        (void)flock(fd, LOCK_UN);
         close(fd);
-        return err;
     }
-    *out_fd = fd;
-    return 0;
+    return (flock_op & LOCK_NB) ? EWOULDBLOCK : ENOENT;
 }
 
 int afuse_acquire_flock(const char *lock_path, int *out_fd) {
@@ -311,15 +334,39 @@ int afuse_real_home_dir(char *buf, size_t len) {
     if (!buf || len == 0) {
         return EINVAL;
     }
-    struct passwd *pw = getpwuid(getuid());
-    if (!pw || !pw->pw_dir || pw->pw_dir[0] == '\0') {
-        return ENOENT;
+    uid_t uid = getuid();
+    struct passwd pwd;
+    struct passwd *res = NULL;
+    size_t pw_len = 4096;
+    char *pw_buf = (char *)malloc(pw_len);
+    if (!pw_buf) {
+        return ENOMEM;
     }
-    size_t dlen = strlen(pw->pw_dir);
+    int rc = 0;
+    for (int i = 0; i < 4; i++) {
+        rc = getpwuid_r(uid, &pwd, pw_buf, pw_len, &res);
+        if (rc != ERANGE) {
+            break;
+        }
+        pw_len *= 2;
+        char *grown = (char *)realloc(pw_buf, pw_len);
+        if (!grown) {
+            free(pw_buf);
+            return ENOMEM;
+        }
+        pw_buf = grown;
+    }
+    if (rc != 0 || !res || !res->pw_dir || res->pw_dir[0] == '\0') {
+        free(pw_buf);
+        return rc != 0 ? rc : ENOENT;
+    }
+    size_t dlen = strlen(res->pw_dir);
     if (dlen + 1 > len) {
+        free(pw_buf);
         return ERANGE;
     }
-    memcpy(buf, pw->pw_dir, dlen + 1);
+    memcpy(buf, res->pw_dir, dlen + 1);
+    free(pw_buf);
     return 0;
 }
 
@@ -444,14 +491,20 @@ int afuse_fsgetpath(int32_t fsid0, int32_t fsid1, uint64_t obj_id, char *buf, si
 }
 
 int afuse_can_write(const char *path) {
-    if (!path || access(path, W_OK) != 0) {
+    if (!path) {
+        return EINVAL;
+    }
+    if (access(path, W_OK) != 0) {
         return errno ? errno : EACCES;
     }
     return 0;
 }
 
 int afuse_can_read_write(const char *path) {
-    if (!path || access(path, R_OK | W_OK) != 0) {
+    if (!path) {
+        return EINVAL;
+    }
+    if (access(path, R_OK | W_OK) != 0) {
         return errno ? errno : EACCES;
     }
     return 0;
@@ -459,6 +512,37 @@ int afuse_can_read_write(const char *path) {
 
 unsigned int afuse_current_euid(void) {
     return (unsigned int)geteuid();
+}
+
+int afuse_pgid_disk_bytes_written(int pgid, uint64_t *out_bytes) {
+    if (pgid <= 1 || !out_bytes) {
+        return EINVAL;
+    }
+    *out_bytes = 0;
+    pid_t pids[256];
+    int bytes = proc_listpgrppids((pid_t)pgid, pids, (int)sizeof(pids));
+    if (bytes <= 0) {
+        return 0;
+    }
+    int count = bytes / (int)sizeof(pid_t);
+    uint64_t total = 0;
+    for (int i = 0; i < count; i++) {
+        if (pids[i] <= 0) {
+            continue;
+        }
+        struct rusage_info_v4 ri;
+        memset(&ri, 0, sizeof(ri));
+        if (proc_pid_rusage(pids[i], RUSAGE_INFO_V4, (rusage_info_t *)&ri) == 0) {
+            uint64_t w = ri.ri_diskio_byteswritten;
+            if (UINT64_MAX - total < w) {
+                total = UINT64_MAX;
+            } else {
+                total += w;
+            }
+        }
+    }
+    *out_bytes = total;
+    return 0;
 }
 
 int afuse_pgid_alive(int pgid) {

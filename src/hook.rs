@@ -246,9 +246,32 @@ pub fn execute_hook_auto_snap(
     Ok(Some(meta))
 }
 
+fn has_file_redirection(cmd: &str) -> bool {
+    let bytes = cmd.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'>' {
+            if bytes.get(i + 1) == Some(&b'&') {
+                i += 2;
+                continue;
+            }
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 fn is_destructive_bash_command(cmd: &str) -> bool {
+    if has_file_redirection(cmd) {
+        return true;
+    }
     let low = cmd.to_ascii_lowercase();
-    for kw in ["rm ", "rm\t", "mv ", "mv\t", "git reset", "git clean", "git checkout", "chmod ", "truncate ", "dd ", "> ", ">>"] {
+    for kw in [
+        "rm ", "rm\t", "mv ", "mv\t", "rmdir ", "rmdir\t", "unlink ", "unlink\t",
+        "git reset", "git clean", "git checkout", "git restore", "git rm",
+        "chmod ", "truncate ", "dd ", "sed -i", "perl -i",
+    ] {
         if low.contains(kw) {
             return true;
         }

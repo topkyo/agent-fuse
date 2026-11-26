@@ -309,6 +309,17 @@ pub fn resolve_workspace_vault_recovery(
             let ws = fs::canonicalize(&trimmed).map_err(|e| {
                 AfuseError::new(e.raw_os_error().unwrap_or(ERR_ENOENT), "target path does not exist or is inaccessible")
             })?;
+            if let Ok((ws_exact, stat_dir)) = resolve_parent_keep_leaf(&trimmed) {
+                if ws_exact != ws {
+                    if let Ok((exact_p, exact_v)) =
+                        workspace_vault_common(&ws_exact, &stat_dir, vault_override, false)
+                    {
+                        if exact_v.is_dir() {
+                            return Ok((exact_p, exact_v));
+                        }
+                    }
+                }
+            }
             return workspace_vault_common(&ws, stat_dir_for(&ws), vault_override, false);
         }
         let (ws, stat_dir) = resolve_parent_keep_leaf(&trimmed)?;

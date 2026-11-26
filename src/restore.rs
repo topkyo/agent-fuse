@@ -1,22 +1,19 @@
-use crate::apfs::{
-    chmod_nofollow, force_remove_all, force_unlock, lstat_inode_mode, statfs_info, swap_paths,
-    TMP_SEQ,
-};
+use crate::apfs::{chmod_nofollow, force_remove_all, force_unlock, lstat_inode_mode, statfs_info};
 use crate::error::{AfuseError, ERR_EINVAL, ERR_ENOENT};
-use crate::fs_guard::clonefile_readable;
 use crate::manifest::{
     compute_single_file_manifest, compute_tree_manifest, count_project_files, SnapshotMeta,
 };
 use crate::restore_fast::{
     append_post_restore_head, compute_fast_receipt_hex, find_latest_primary,
-    live_matches_snapshot_unlocked, take_pre_restore_unconditional,
-    verify_selective_restored_paths, verify_snapshot_tree, workspace_differs_fast_check,
+    live_matches_snapshot_unlocked, prepare_restore_stage, stage_and_replace,
+    take_pre_restore_unconditional, verify_root_inode, verify_selective_restored_paths,
+    verify_snapshot_tree, workspace_differs_fast_check,
 };
 use crate::restore_tree::{
     align_ancestor_case, find_single_snap_file, lock_guard_single_dir, prepare_ancestors_writable,
     resolve_disk_rel_path, same_disk_entry, selective_differs, top_level_nfd_key,
-    validate_rel_restore_path, workspace_differs_full, workspace_has_visible_files,
-    HeteroStashGuard, NestedIgnoredGuard, UnlockedDirsGuard,
+    validate_rel_restore_path, workspace_differs_full, HeteroStashGuard, NestedIgnoredGuard,
+    UnlockedDirsGuard,
 };
 use crate::trash::{purge_trashed_counterparts, purge_trashed_selective_paths, TrashCleanupStatus};
 use crate::unicode_norm::components_equal_casefold_nfd;
@@ -25,7 +22,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 #[derive(Debug, Clone)]
@@ -42,73 +38,6 @@ pub struct RestoreReport {
     pub selective: bool,
     pub restored_paths: usize,
     pub trash_cleanup: TrashCleanupStatus,
-}
-
-fn prepare_restore_stage(
-    ws: &Path,
-    ws_vault: &Path,
-    need_backup: bool,
-    safety_backup: bool,
-) -> Result<(u64, Option<String>, HeteroStashGuard), AfuseError> {
-    let hetero = HeteroStashGuard::stash_if_needed(ws, ws_vault, true, safety_backup)?;
-    if hetero.cleared || fs::symlink_metadata(ws).is_err() {
-        fs::create_dir_all(ws).map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), format!("cannot recreate workspace dir: {}", e)))?;
-        return Ok((0, None, hetero));
-    }
-    let (ino_before, _) = lstat_inode_mode(ws)?;
-    force_unlock(ws);
-    let safety_id = if need_backup && workspace_has_visible_files(ws) {
-        take_pre_restore_unconditional(ws, ws_vault)?
-    } else {
-        None
-    };
-    Ok((ino_before, safety_id, hetero))
-}
-
-fn verify_root_inode(ws: &Path, ino_before: u64) -> Result<u64, AfuseError> {
-    let (ino_after, _) = lstat_inode_mode(ws)?;
-    if ino_before != 0 && ino_before != ino_after {
-        return Err(AfuseError::new(ERR_EINVAL, format!("root Inode invariant violated: before={} after={}", ino_before, ino_after)));
-    }
-    Ok(ino_after)
-}
-
-fn commit_staged_entry(tmp_new: &Path, target: &Path, tmp_old: &Path) -> Result<(), AfuseError> {
-    if fs::symlink_metadata(target).is_err() {
-        return fs::rename(tmp_new, target).map_err(|e| {
-            let _ = force_remove_all(tmp_new);
-            AfuseError::new(e.raw_os_error().unwrap_or(1), format!("rename failed: {}", e))
-        });
-    }
-    force_unlock(target);
-    if swap_paths(tmp_new, target).is_ok() {
-        return force_remove_all(tmp_new);
-    }
-    if fs::symlink_metadata(tmp_old).is_ok() {
-        force_remove_all(tmp_old)?;
-    }
-    fs::rename(target, tmp_old).map_err(|e| {
-        let _ = force_remove_all(tmp_new);
-        AfuseError::new(e.raw_os_error().unwrap_or(1), format!("stage-1 rename failed: {}", e))
-    })?;
-    if let Err(e) = fs::rename(tmp_new, target) {
-        let _ = fs::rename(tmp_old, target);
-        let _ = force_remove_all(tmp_new);
-        return Err(AfuseError::new(e.raw_os_error().unwrap_or(1), format!("stage-2 rename failed: {}", e)));
-    }
-    force_remove_all(tmp_old)
-}
-
-fn stage_and_replace(parent: &Path, tag: &str, snap_item: &Path, target: &Path) -> Result<(), AfuseError> {
-    let pid = std::process::id();
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_new = parent.join(format!(".afuse.tmp.{}.{}.{}", tag, pid, seq));
-    if fs::symlink_metadata(&tmp_new).is_ok() {
-        force_remove_all(&tmp_new)?;
-    }
-    clonefile_readable(snap_item, &tmp_new)?;
-    let tmp_old = parent.join(format!(".afuse.tmp.old.{}.{}", pid, seq));
-    commit_staged_entry(&tmp_new, target, &tmp_old)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -220,6 +149,9 @@ pub fn restore_snapshot_opts_with_vault(
     workspace: &Path, vault_override: Option<&Path>, target_id: &str, safety_backup: bool, fast: bool,
 ) -> Result<RestoreReport, AfuseError> {
     let (ws, ws_vault) = resolve_workspace_vault_recovery(workspace, vault_override)?;
+    if !ws_vault.join("snapshots").is_dir() {
+        return Err(AfuseError::new(ERR_ENOENT, "no snapshots exist for this workspace"));
+    }
     let _guard = lock_vault(&ws_vault)?;
     let t0 = Instant::now();
     let (meta, snap_tree, vault_hash) = verify_snapshot_tree(&ws, &ws_vault, target_id)?;
@@ -263,24 +195,46 @@ pub fn restore_snapshot_opts_with_vault(
             ws_children.push((top_level_nfd_key(&name), name));
         }
     }
+    let mut ws_by_fold: std::collections::HashMap<String, Vec<OsString>> =
+        std::collections::HashMap::with_capacity(ws_children.len());
+    for (_, ws_name) in &ws_children {
+        ws_by_fold
+            .entry(top_level_nfd_key(ws_name).to_ascii_lowercase())
+            .or_default()
+            .push(ws_name.clone());
+    }
     let mut handled_aliases: BTreeSet<OsString> = BTreeSet::new();
     for (nfd_k, (snap_name, snap_child)) in &snap_children {
-        for (ws_k, ws_name) in &ws_children {
-            let is_alias = ws_name != snap_name
-                && (ws_k == nfd_k
-                    || (components_equal_casefold_nfd(Path::new(ws_name), Path::new(snap_name))
-                        && same_disk_entry(&ws.join(ws_name), &ws.join(snap_name))));
-            if is_alias {
-                handled_aliases.insert(ws_name.clone());
-                let _ = force_remove_all(&ws.join(ws_name));
+        let fold_k = nfd_k.to_ascii_lowercase();
+        if let Some(cands) = ws_by_fold.get(&fold_k) {
+            for ws_name in cands {
+                let is_alias = ws_name != snap_name
+                    && (top_level_nfd_key(ws_name) == *nfd_k
+                        || (components_equal_casefold_nfd(Path::new(ws_name), Path::new(snap_name))
+                            && same_disk_entry(&ws.join(ws_name), &ws.join(snap_name))));
+                if is_alias {
+                    handled_aliases.insert(ws_name.clone());
+                    let _ = force_remove_all(&ws.join(ws_name));
+                }
             }
         }
         stage_and_replace(&ws, "new", snap_child, &ws.join(snap_name))?;
     }
+    let mut snap_by_fold: std::collections::HashMap<String, Vec<&OsString>> =
+        std::collections::HashMap::with_capacity(snap_children.len());
+    for (nfd_k, (sn, _)) in &snap_children {
+        snap_by_fold.entry(nfd_k.to_ascii_lowercase()).or_default().push(sn);
+    }
     for (nfd_k, ws_name) in ws_children {
-        let points_to_restored = handled_aliases.contains(&ws_name)
-            || snap_children.values().any(|(sn, _)| same_disk_entry(&ws.join(&ws_name), &ws.join(sn)));
-        if !snap_children.contains_key(&nfd_k) && !points_to_restored {
+        if snap_children.contains_key(&nfd_k) || handled_aliases.contains(&ws_name) {
+            continue;
+        }
+        let fold_k = nfd_k.to_ascii_lowercase();
+        let points_to_restored = snap_by_fold
+            .get(&fold_k)
+            .map(|sns| sns.iter().any(|sn| same_disk_entry(&ws.join(&ws_name), &ws.join(sn))))
+            .unwrap_or(false);
+        if !points_to_restored {
             force_remove_all(&ws.join(ws_name))?;
         }
     }
@@ -311,6 +265,9 @@ pub fn restore_snapshot_paths_with_vault(
         if seen.insert(c.clone()) { clean_paths.push(c); }
     }
     let (ws, ws_vault) = resolve_workspace_vault_recovery(workspace, vault_override)?;
+    if !ws_vault.join("snapshots").is_dir() {
+        return Err(AfuseError::new(ERR_ENOENT, "no snapshots exist for this workspace"));
+    }
     let _guard = lock_vault(&ws_vault)?;
     let t0 = Instant::now();
     let (meta, snap_tree, vault_hash) = verify_snapshot_tree(&ws, &ws_vault, target_id)?;
@@ -360,8 +317,8 @@ pub fn restore_snapshot_paths_with_vault(
             if fs::symlink_metadata(&dst_item).is_ok() { force_remove_all(&dst_item)?; }
         }
     }
-    dir_guard.restore_all();
     nested_guard.restore_back()?;
+    dir_guard.restore_all();
     hetero.commit();
     let ino_after = verify_root_inode(&ws, ino_before)?;
     finalize_restore_unlocked(&ws, TargetKind::Directory, &ws_vault, &meta, ino_before, ino_after, safety_id, false, true, clean_paths.len(), None, true, Some((&snap_tree, &resolved, &clean_paths)), t0)

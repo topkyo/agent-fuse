@@ -1,10 +1,11 @@
 use crate::apfs::force_remove_all;
 use crate::error::{AfuseError, ERR_EINVAL};
 use crate::manifest::{
-    compute_fast_fingerprint, count_project_files, read_meta, write_meta, SnapshotMeta,
-    SnapshotOrigin,
+    compute_fast_fingerprint, count_project_files, read_verified_snap_meta, write_meta,
+    SnapshotMeta, SnapshotOrigin,
 };
 use crate::meta::PIN_CONTAINS_DELETED;
+use crate::restore_tree::find_single_snap_file;
 use crate::rolling::{enforce_pre_delete_quota_unlocked, is_delete_pinned, PRE_DELETE_LABEL};
 use crate::snapshot::list_snapshots_unlocked;
 use crate::vault::{lock_vault, resolve_workspace_vault_recovery, TargetKind};
@@ -14,6 +15,7 @@ use std::time::SystemTime;
 
 pub(crate) const ORPHAN_MAX_AGE_SECS: u64 = 60;
 pub(crate) const MAX_PRE_RESTORE_SNAPS: usize = 10;
+const MAX_HETERO_BACKUPS: usize = 10;
 
 pub(crate) fn is_primary_snapshot(m: &SnapshotMeta) -> bool {
     m.origin != SnapshotOrigin::BeforeRestore && m.label != "auto:pre-restore"
@@ -63,11 +65,8 @@ pub(crate) fn snap_tree_fast_fp(ws_vault: &Path, meta: &SnapshotMeta) -> Option<
     }
     let tree_dir = ws_vault.join("snapshots").join(&meta.id).join("tree");
     if meta.target_kind == TargetKind::SingleFile {
-        let f = fs::read_dir(&tree_dir)
-            .ok()?
-            .flatten()
-            .map(|e| e.path())
-            .find(|p| p.is_file())?;
+        let ws = Path::new(&meta.workspace);
+        let f = find_single_snap_file(ws, &tree_dir)?;
         return compute_fast_fingerprint(&f, TargetKind::SingleFile)
             .ok()
             .map(|x| x.0);
@@ -86,13 +85,14 @@ pub(crate) fn calibrate_legacy_meta_if_needed(snap_dir: &Path, meta: &mut Snapsh
         return;
     }
     let tree_dir = snap_dir.join("tree");
-    if !tree_dir.is_dir() {
+    if !fs::symlink_metadata(&tree_dir)
+        .map(|m| !m.file_type().is_symlink() && m.file_type().is_dir())
+        .unwrap_or(false)
+    {
         return;
     }
     let fp_target = if meta.target_kind == TargetKind::SingleFile {
-        fs::read_dir(&tree_dir)
-            .ok()
-            .and_then(|rd| rd.flatten().map(|e| e.path()).find(|p| p.is_file()))
+        find_single_snap_file(Path::new(&meta.workspace), &tree_dir)
             .unwrap_or_else(|| tree_dir.clone())
     } else {
         tree_dir.clone()
@@ -146,20 +146,21 @@ pub(crate) fn cleanup_orphan_snapshots_unlocked(ws_vault: &Path, min_age_secs: u
     let mut cleaned = 0usize;
     for entry in rd.flatten() {
         let p = entry.path();
-        if !p.is_dir() {
+        let Ok(dm) = fs::symlink_metadata(&p) else {
+            continue;
+        };
+        if dm.file_type().is_symlink() || !dm.file_type().is_dir() {
+            continue;
+        }
+        if read_verified_snap_meta(&p).is_ok() {
             continue;
         }
         let meta_p = p.join("meta.kv");
-        let tree_ok = p.join("tree").is_dir();
-        let meta_ok = meta_p.is_file() && read_meta(&meta_p).is_ok();
-        if tree_ok && meta_ok {
-            continue;
-        }
-        let corrupt_zombie = meta_p.is_file();
+        let corrupt_zombie = fs::symlink_metadata(&meta_p).is_ok();
         let is_stale = corrupt_zombie
             || min_age_secs == 0
-            || fs::symlink_metadata(&p)
-                .and_then(|m| m.modified())
+            || dm
+                .modified()
                 .ok()
                 .and_then(|mt| now.duration_since(mt).ok())
                 .map(|age| age.as_secs() >= min_age_secs)
@@ -169,6 +170,24 @@ pub(crate) fn cleanup_orphan_snapshots_unlocked(ws_vault: &Path, min_age_secs: u
         }
     }
     cleaned
+}
+
+fn prune_hetero_backups_unlocked(ws_vault: &Path, keep_max: usize) {
+    let backup_root = ws_vault.join("hetero-backups");
+    let Ok(rd) = fs::read_dir(&backup_root) else {
+        return;
+    };
+    let mut items: Vec<(String, std::path::PathBuf)> = rd
+        .flatten()
+        .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
+        .collect();
+    items.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in items.into_iter().skip(keep_max) {
+        let _ = force_remove_all(&path);
+    }
+    if keep_max == 0 {
+        let _ = force_remove_all(&backup_root);
+    }
 }
 
 pub(crate) fn is_prune_protected(m: &SnapshotMeta) -> bool {
@@ -194,6 +213,12 @@ pub(crate) fn prune_unlocked(
         }
     }
     let mut removed = cleanup_orphan_snapshots_unlocked(ws_vault, orphan_min_age_secs);
+    let hetero_keep = if keep_latest == 0 && label_prefix.is_none() {
+        0
+    } else {
+        MAX_HETERO_BACKUPS
+    };
+    prune_hetero_backups_unlocked(ws_vault, hetero_keep);
     if !(keep_latest == 0 && label_prefix.is_none()) {
         removed += dedup_and_calibrate_history_unlocked(ws_vault)?;
     }
@@ -325,5 +350,3 @@ pub fn prune_snapshots_filtered_with_vault(
     drop(guard);
     Ok(removed)
 }
-
-// MARK: - Transparent Hook Snippets, Depth-Aware JSON Scanner & Fail-Open `--exec`

@@ -69,9 +69,11 @@ fn pin_latest_contains_deleted_unlocked(
     if !latest.label.starts_with("auto:")
         || latest.origin == SnapshotOrigin::BeforeRestore
         || latest.label == "auto:pre-restore"
-        || is_delete_pinned(latest)
     {
         return Ok(None);
+    }
+    if is_delete_pinned(latest) {
+        return Ok(Some(latest.id.clone()));
     }
     let mut pinned = latest.clone();
     pinned.retention_pin = Some(PIN_CONTAINS_DELETED.to_string());
@@ -218,13 +220,14 @@ pub fn create_snapshot_rolling_with_vault(
         && proj_modified.is_empty()
         && proj_renamed.is_empty()
     {
+        let promoted_id = pin_latest_contains_deleted_unlocked(&ws_vault, latest)?;
         record_live_target_inode_if_new(&ws, TargetKind::Directory, &ws_vault);
         return Ok(RollingSnapReport {
             meta: latest.clone(),
             deduplicated: true,
             skipped: true,
             reason: Some("pure_delete_hold"),
-            promoted_pre_delete_id: None,
+            promoted_pre_delete_id: promoted_id,
         });
     }
 

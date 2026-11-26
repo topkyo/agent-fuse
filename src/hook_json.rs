@@ -200,18 +200,81 @@ pub fn parse_claude_hook_json(input: &str) -> ClaudeHookPayload {
     out
 }
 
+fn split_shell_words(cmd: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = cmd.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            } else if q == '"' && ch == '\\' {
+                if let Some(next_c) = chars.next() {
+                    cur.push(next_c);
+                }
+            } else {
+                cur.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '\\' => {
+                if let Some(next_c) = chars.next() {
+                    cur.push(next_c);
+                }
+            }
+            c if c.is_whitespace() => {
+                if !cur.is_empty() {
+                    words.push(std::mem::take(&mut cur));
+                }
+            }
+            ';' | '|' | '&' => {
+                if !cur.is_empty() {
+                    words.push(std::mem::take(&mut cur));
+                }
+                let mut sep = String::from(ch);
+                if (ch == '|' || ch == '&') && chars.peek() == Some(&ch) {
+                    sep.push(chars.next().unwrap());
+                }
+                words.push(sep);
+            }
+            _ => cur.push(ch),
+        }
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    words
+}
+
 /// Extracts plausible file or folder tokens from a shell command line.
 pub fn extract_bash_candidate_paths(cmd: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut skip_cmd_verb = true;
-    for raw in cmd.split_whitespace() {
-        if matches!(raw, "&&" | "||" | ";" | "|") {
+    for raw in split_shell_words(cmd) {
+        if matches!(raw.as_str(), "&&" | "||" | ";" | "|") {
             skip_cmd_verb = true;
             continue;
         }
-        let tok = raw
-            .trim_matches(|c| c == '"' || c == '\'' || c == ';')
-            .trim_start_matches('>');
+        let trimmed_raw = raw.trim_matches(|c| c == '"' || c == '\'' || c == ';');
+        let redir_target = trimmed_raw
+            .strip_prefix(">>")
+            .or_else(|| trimmed_raw.strip_prefix('>'))
+            .or_else(|| trimmed_raw.strip_prefix("1>>"))
+            .or_else(|| trimmed_raw.strip_prefix("1>"))
+            .or_else(|| trimmed_raw.strip_prefix("2>>"))
+            .or_else(|| trimmed_raw.strip_prefix("2>"))
+            .or_else(|| trimmed_raw.strip_prefix("&>"));
+        if let Some(target) = redir_target {
+            let t = target.trim_matches(|c| c == '"' || c == '\'' || c == ';');
+            if !t.is_empty() && t != "/dev/null" && !t.starts_with('&') && !t.starts_with('$') {
+                push_unique_candidate(&mut out, t.to_string());
+            }
+            continue;
+        }
+        let tok = trimmed_raw;
         if tok.is_empty() || tok == "/dev/null" {
             continue;
         }
@@ -221,7 +284,7 @@ pub fn extract_bash_candidate_paths(cmd: &str) -> Vec<String> {
             }
             continue;
         }
-        if tok.starts_with('-') || tok.starts_with("$") || tok == ">" || tok == ">>" {
+        if tok.starts_with('-') || tok.starts_with('$') {
             continue;
         }
         push_unique_candidate(&mut out, tok.to_string());

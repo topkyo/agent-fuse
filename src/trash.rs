@@ -67,7 +67,13 @@ pub(crate) fn validate_custom_trash_dir(
     if let Some(h) = home {
         forbidden_exact.push(h.to_path_buf());
         if let Ok(ch) = fs::canonicalize(h) {
-            forbidden_exact.push(ch);
+            forbidden_exact.push(ch.clone());
+            for sub in ["Desktop", "Documents", "Downloads", "Pictures", "Movies", "Music", "Public"] {
+                forbidden_exact.push(ch.join(sub));
+            }
+        }
+        for sub in ["Desktop", "Documents", "Downloads", "Pictures", "Movies", "Music", "Public"] {
+            forbidden_exact.push(h.join(sub));
         }
     }
     if forbidden_exact
@@ -76,16 +82,23 @@ pub(crate) fn validate_custom_trash_dir(
     {
         return None;
     }
-    let forbidden_trees = [
-        Path::new("/System"),
-        Path::new("/Applications"),
-        Path::new("/Library"),
-        Path::new("/usr"),
-        Path::new("/bin"),
-        Path::new("/sbin"),
-        Path::new("/etc"),
-        Path::new("/private/etc"),
+    let mut forbidden_trees = vec![
+        PathBuf::from("/System"),
+        PathBuf::from("/Applications"),
+        PathBuf::from("/Library"),
+        PathBuf::from("/usr"),
+        PathBuf::from("/bin"),
+        PathBuf::from("/sbin"),
+        PathBuf::from("/etc"),
+        PathBuf::from("/private/etc"),
     ];
+    if let Some(h) = home {
+        let h_base = fs::canonicalize(h).unwrap_or_else(|_| h.to_path_buf());
+        for sub in [".ssh", ".gnupg", ".aws", ".kube", ".agent-fuse", "Library"] {
+            forbidden_trees.push(h.join(sub));
+            forbidden_trees.push(h_base.join(sub));
+        }
+    }
     if forbidden_trees
         .iter()
         .any(|f| path_starts_with_casefold_nfd(&canon, f))
@@ -101,6 +114,9 @@ pub(crate) fn validate_custom_trash_dir(
             return None;
         }
     }
+    if sym.uid() != euid {
+        return None;
+    }
     let in_tmp_sandbox = [
         Path::new("/tmp"),
         Path::new("/private/tmp"),
@@ -114,8 +130,7 @@ pub(crate) fn validate_custom_trash_dir(
         .and_then(|n| n.to_str())
         .map(|n| n.to_ascii_lowercase().contains("trash"))
         .unwrap_or(false);
-    let owned_trash_leaf = leaf_has_trash && sym.uid() == euid;
-    if !in_tmp_sandbox && !owned_trash_leaf {
+    if !in_tmp_sandbox && !leaf_has_trash {
         return None;
     }
     Some(canon)
@@ -347,6 +362,9 @@ pub fn purge_workspace_trash_with_vault(
     vault_override: Option<&Path>,
 ) -> Result<TrashCleanupStatus, AfuseError> {
     let (ws, ws_vault) = resolve_workspace_vault_recovery(workspace, vault_override)?;
+    if !ws_vault.join("snapshots").is_dir() {
+        return Ok(TrashCleanupStatus::NotInTrash);
+    }
     let _guard = lock_vault(&ws_vault)?;
     let snaps = list_snapshots_unlocked(&ws_vault)?;
     let Some(latest) = snaps.first() else { return Ok(TrashCleanupStatus::NotInTrash); };

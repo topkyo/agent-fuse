@@ -1,24 +1,27 @@
-use crate::apfs::{
-    current_euid, force_remove_all, fsgetpath, lstat_inode_mode, random_hex_suffix, real_home_dir,
-    statfs_info,
-};
+use crate::apfs::{current_euid, fsgetpath, lstat_inode_mode, real_home_dir, statfs_info};
 use crate::error::{AfuseError, ERR_EACCES, ERR_EEXIST, ERR_EINVAL, ERR_ENOENT, ERR_EPERM};
-use crate::manifest::{compute_fast_fingerprint, compute_single_file_manifest, json_escape, read_meta, write_meta};
+use crate::manifest::{
+    compute_fast_fingerprint, compute_single_file_manifest, json_escape, read_verified_snap_meta,
+    write_meta,
+};
+use crate::restore_tree::{find_single_snap_file, same_disk_entry};
 use crate::snapshot::list_snapshots_unlocked;
 use crate::trash::{allowed_trash_roots_for, record_live_target_inode_if_new};
 use crate::trash_ledger::load_root_inodes;
 use crate::unicode_norm::{path_eq_casefold_nfd, path_starts_with_casefold_nfd};
 use crate::vault::{
-    lock_vault, resolve_vault_base, resolve_workspace_vault_recovery, try_lock_vault,
-    validate_workspace_binding_with_vault, TargetKind, VAULT_ROOT_MARKER,
+    lock_vault, resolve_workspace_vault_recovery, validate_workspace_binding_with_vault, TargetKind,
 };
+pub use crate::vault_gc::{
+    inspect_vault_orphans, prune_orphan_vaults_with, OrphanPruneReport,
+};
+pub(crate) use crate::vault_gc::atomic_retire_and_remove_vault;
 use crate::vault_policy::enforce_vault_target_kind;
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocateOutcome {
@@ -61,14 +64,6 @@ pub struct RelocateReport {
     pub dev: u64,
     pub ino: u64,
     pub snapshots_updated: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct OrphanPruneReport {
-    pub scanned: usize,
-    pub candidates: Vec<String>,
-    pub removed: usize,
-    pub dry_run: bool,
 }
 
 fn nearest_existing_dir(p: &Path) -> PathBuf {
@@ -132,7 +127,7 @@ pub fn locate_workspace_target_with_vault(
         {
             return Ok(LocateOutcome::Trashed { path: norm_path });
         }
-        if path_eq_casefold_nfd(&norm_path, &ws) {
+        if norm_path == ws {
             continue;
         }
         let Ok(meta) = fs::symlink_metadata(&norm_path) else { continue };
@@ -183,7 +178,7 @@ pub fn relocate_workspace_vault_with(
         }
     }
     let (new_ws, vault_p2) = resolve_workspace_vault_recovery(&validated.canonical_path, vault_override)?;
-    if path_eq_casefold_nfd(&old_ws, &new_ws) || path_eq_casefold_nfd(&vault_p1, &vault_p2) {
+    if old_ws == new_ws || vault_p1 == vault_p2 || same_disk_entry(&vault_p1, &vault_p2) {
         return Ok(RelocateReport {
             from: old_ws, to: new_ws, kind: validated.kind,
             dev: validated.dev, ino: validated.ino, snapshots_updated: 0,
@@ -217,32 +212,30 @@ pub fn relocate_workspace_vault_with(
     if let Ok(rd) = fs::read_dir(&snaps_dir) {
         for ent in rd.flatten() {
             let sdir = ent.path();
+            let Ok(mut m) = read_verified_snap_meta(&sdir) else { continue };
             let meta_p = sdir.join("meta.kv");
-            let Ok(mut m) = read_meta(&meta_p) else { continue };
             m.workspace = new_ws_str.clone();
             if validated.kind == TargetKind::SingleFile {
                 if let Some(ref nl) = new_leaf {
                     let tree_dir = sdir.join("tree");
-                    if let Ok(trd) = fs::read_dir(&tree_dir) {
-                        if let Some(old_f) = trd.flatten().map(|e| e.path()).find(|p| p.is_file()) {
-                            let dst_f = tree_dir.join(nl);
-                            let active_f = if old_f != dst_f && fs::rename(&old_f, &dst_f).is_ok() {
-                                dst_f
-                            } else {
-                                old_f
-                            };
-                            if m.tree_sha256.starts_with("fast:") {
-                                if let Ok((fp, fc, lb)) = compute_fast_fingerprint(&active_f, TargetKind::SingleFile) {
-                                    m.tree_sha256 = fp;
-                                    m.file_count = fc;
-                                    m.logical_bytes = lb;
-                                }
-                            } else if m.tree_sha256 != "fast" {
-                                if let Ok((h, fc, lb, _)) = compute_single_file_manifest(&active_f) {
-                                    m.tree_sha256 = h;
-                                    m.file_count = fc;
-                                    m.logical_bytes = lb;
-                                }
+                    if let Some(old_f) = find_single_snap_file(&old_ws, &tree_dir) {
+                        let dst_f = tree_dir.join(nl);
+                        let active_f = if old_f != dst_f && fs::rename(&old_f, &dst_f).is_ok() {
+                            dst_f
+                        } else {
+                            old_f
+                        };
+                        if m.tree_sha256.starts_with("fast:") {
+                            if let Ok((fp, fc, lb)) = compute_fast_fingerprint(&active_f, TargetKind::SingleFile) {
+                                m.tree_sha256 = fp;
+                                m.file_count = fc;
+                                m.logical_bytes = lb;
+                            }
+                        } else if m.tree_sha256 != "fast" {
+                            if let Ok((h, fc, lb, _)) = compute_single_file_manifest(&active_f) {
+                                m.tree_sha256 = h;
+                                m.file_count = fc;
+                                m.logical_bytes = lb;
                             }
                         }
                     }
@@ -258,126 +251,4 @@ pub fn relocate_workspace_vault_with(
         from: old_ws, to: new_ws, kind: validated.kind,
         dev: validated.dev, ino: validated.ino, snapshots_updated: updated,
     })
-}
-
-fn is_vault_subdir_candidate(name: &str, dir: &Path) -> bool {
-    let Some((prefix, hex)) = name.rsplit_once('-') else {
-        return false;
-    };
-    if prefix.is_empty()
-        || hex.len() != 16
-        || !hex.bytes().all(|b| b.is_ascii_hexdigit())
-    {
-        return false;
-    }
-    let has_snaps = fs::symlink_metadata(dir.join("snapshots"))
-        .map(|m| !m.file_type().is_symlink() && m.file_type().is_dir())
-        .unwrap_or(false);
-    let has_lock = fs::symlink_metadata(dir.join("vault.lock"))
-        .map(|m| !m.file_type().is_symlink() && m.file_type().is_file())
-        .unwrap_or(false);
-    has_snaps || has_lock
-}
-
-fn is_dir_orphan_now(dir: &Path) -> bool {
-    let snaps = list_snapshots_unlocked(dir).unwrap_or_default();
-    match snaps.first() {
-        None => true,
-        Some(m) => !m.workspace.is_empty() && fs::symlink_metadata(&m.workspace).is_err(),
-    }
-}
-
-pub(crate) fn atomic_retire_and_remove_vault(dir: &Path) -> Result<(), AfuseError> {
-    let Some(parent) = dir.parent() else {
-        return force_remove_all(dir);
-    };
-    let hidden = parent.join(format!(
-        ".afuse.retire.{}.{}",
-        std::process::id(),
-        random_hex_suffix()
-    ));
-    if fs::rename(dir, &hidden).is_ok() {
-        force_remove_all(&hidden)
-    } else {
-        force_remove_all(dir)
-    }
-}
-
-pub fn inspect_vault_orphans(vault_override: Option<&Path>, min_age_secs: u64) -> (usize, Vec<PathBuf>) {
-    let base = match vault_override {
-        Some(v) => v.to_path_buf(),
-        None => match resolve_vault_base() {
-            Ok(b) => b,
-            Err(_) => return (0, Vec::new()),
-        },
-    };
-    let has_root_marker = fs::symlink_metadata(base.join(VAULT_ROOT_MARKER))
-        .map(|m| !m.file_type().is_symlink() && m.file_type().is_file())
-        .unwrap_or(false);
-    let Ok(rd) = fs::read_dir(&base) else { return (0, Vec::new()) };
-    let now = SystemTime::now();
-    let mut total = 0usize;
-    let mut orphans = Vec::new();
-    for ent in rd.flatten() {
-        let p = ent.path();
-        let name = ent.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-        let Ok(meta) = fs::symlink_metadata(&p) else {
-            continue;
-        };
-        if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
-            continue;
-        }
-        if !has_root_marker && !is_vault_subdir_candidate(&name, &p) {
-            continue;
-        }
-        total += 1;
-        let age_ok = min_age_secs == 0
-            || meta
-                .modified()
-                .ok()
-                .and_then(|mt| now.duration_since(mt).ok())
-                .map(|d| d >= Duration::from_secs(min_age_secs))
-                .unwrap_or(false);
-        if !age_ok {
-            continue;
-        }
-        if is_dir_orphan_now(&p) {
-            orphans.push(p);
-        }
-    }
-    orphans.sort();
-    (total, orphans)
-}
-
-pub fn prune_orphan_vaults_with(
-    vault_override: Option<&Path>,
-    min_age_days: u64,
-    dry_run: bool,
-) -> Result<OrphanPruneReport, AfuseError> {
-    let min_age_secs = min_age_days.saturating_mul(86_400);
-    let (scanned, orphans) = inspect_vault_orphans(vault_override, min_age_secs);
-    let mut candidates = Vec::new();
-    let mut removed = 0usize;
-    for dir in orphans {
-        let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        if dry_run {
-            candidates.push(name);
-            continue;
-        }
-        let Ok(guard) = try_lock_vault(&dir) else { continue };
-        if !is_dir_orphan_now(&dir) {
-            drop(guard);
-            continue;
-        }
-        candidates.push(name);
-        let res = atomic_retire_and_remove_vault(&dir);
-        drop(guard);
-        if res.is_ok() {
-            removed += 1;
-        }
-    }
-    Ok(OrphanPruneReport { scanned, candidates, removed, dry_run })
 }

@@ -6,7 +6,7 @@ use crate::fs_guard::clonefile_readable;
 use crate::manifest::{
     clone_filtered_tree, compute_fast_entries, compute_fast_fingerprint,
     compute_single_file_manifest, compute_snap_tree_manifest, compute_tree_manifest,
-    count_non_git_entries, read_meta, write_meta, SnapshotMeta, SnapshotOrigin,
+    count_non_git_entries, read_verified_snap_meta, write_meta, SnapshotMeta, SnapshotOrigin,
 };
 use crate::meta::summarize_project_diff;
 use crate::prune::{
@@ -35,8 +35,32 @@ pub(crate) fn lock_vault_and_resolve(
     vault_override: Option<&Path>,
 ) -> Result<(PathBuf, PathBuf, VaultLock), AfuseError> {
     let (ws, ws_vault) = resolve_workspace_vault_recovery(workspace, vault_override)?;
+    if !ws_vault.join("snapshots").is_dir() {
+        return Err(AfuseError::new(ERR_ENOENT, "no snapshots exist for this workspace"));
+    }
     let guard = lock_vault(&ws_vault)?;
     Ok((ws, ws_vault, guard))
+}
+
+struct SnapDirCleanup {
+    dir: Option<PathBuf>,
+}
+
+impl SnapDirCleanup {
+    fn new(dir: PathBuf) -> Self {
+        Self { dir: Some(dir) }
+    }
+    fn defuse(&mut self) {
+        self.dir = None;
+    }
+}
+
+impl Drop for SnapDirCleanup {
+    fn drop(&mut self) {
+        if let Some(d) = self.dir.take() {
+            let _ = force_remove_all(&d);
+        }
+    }
 }
 
 pub fn create_snapshot(workspace: &Path, label: &str) -> Result<SnapshotMeta, AfuseError> {
@@ -230,26 +254,21 @@ pub(crate) fn create_snapshot_unlocked_full(
     );
     let snap_dir = ws_vault.join("snapshots").join(&snap_id);
     let tree_dir = snap_dir.join("tree");
+    let mut snap_cleanup = SnapDirCleanup::new(snap_dir.clone());
 
     let (root_inode, root_mode) = lstat_inode_mode(ws)?;
     let target_kind = if ws.is_file() { TargetKind::SingleFile } else { TargetKind::Directory };
 
     let t0 = Instant::now();
-    let clone_res = if target_kind == TargetKind::SingleFile {
+    if target_kind == TargetKind::SingleFile {
         fs::create_dir_all(&tree_dir)
-            .map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))
-            .and_then(|_| {
-                let fname = ws
-                    .file_name()
-                    .ok_or_else(|| AfuseError::new(ERR_EINVAL, "missing single-file name"))?;
-                clonefile_readable(ws, &tree_dir.join(fname))
-            })
+            .map_err(|e| AfuseError::new(e.raw_os_error().unwrap_or(1), e.to_string()))?;
+        let fname = ws
+            .file_name()
+            .ok_or_else(|| AfuseError::new(ERR_EINVAL, "missing single-file name"))?;
+        clonefile_readable(ws, &tree_dir.join(fname))?;
     } else {
-        clone_filtered_tree(ws, &tree_dir)
-    };
-    if let Err(e) = clone_res {
-        let _ = force_remove_all(&snap_dir);
-        return Err(e);
+        clone_filtered_tree(ws, &tree_dir)?;
     }
     let clone_elapsed_us = t0.elapsed().as_micros();
 
@@ -282,7 +301,6 @@ pub(crate) fn create_snapshot_unlocked_full(
         let empty_tree = file_count == 0 && prior.iter().any(|m| m.file_count > 0 || m.project_files > 0);
         let empty_proj = project_files == 0 && prior.iter().any(|m| m.project_files > 0);
         if empty_tree || empty_proj {
-            let _ = force_remove_all(&snap_dir);
             return Err(AfuseError::new(
                 ERR_EINVAL,
                 "refusing auto-snapshot of empty directory while non-empty history exists",
@@ -298,7 +316,7 @@ pub(crate) fn create_snapshot_unlocked_full(
         label: clean_label,
         workspace: ws.to_string_lossy().into_owned(),
         root_inode,
-        root_mode: root_mode & 0o7777,
+        root_mode: root_mode & 0o777,
         file_count,
         project_files,
         logical_bytes,
@@ -311,6 +329,7 @@ pub(crate) fn create_snapshot_unlocked_full(
         restored_from_id,
     };
     write_meta(&snap_dir.join("meta.kv"), &meta)?;
+    snap_cleanup.defuse();
     if meta.label.starts_with("auto:") && is_primary_snapshot(&meta) && meta.label != PRE_DELETE_LABEL {
         let _ = dedup_and_calibrate_history_unlocked(ws_vault)?;
     }
@@ -335,28 +354,8 @@ pub(crate) fn list_snapshots_unlocked(ws_vault: &Path) -> Result<Vec<SnapshotMet
     let mut out = Vec::new();
     if let Ok(rd) = fs::read_dir(ws_vault.join("snapshots")) {
         for entry in rd.flatten() {
-            let snap_dir = entry.path();
-            let dir_name = entry.file_name();
-            let Ok(dir_meta) = fs::symlink_metadata(&snap_dir) else {
-                continue;
-            };
-            if dir_meta.file_type().is_symlink() || !dir_meta.file_type().is_dir() {
-                continue;
-            }
-            let meta_path = snap_dir.join("meta.kv");
-            let tree_path = snap_dir.join("tree");
-            let meta_ok = fs::symlink_metadata(&meta_path)
-                .map(|m| !m.file_type().is_symlink() && m.file_type().is_file())
-                .unwrap_or(false);
-            let tree_ok = fs::symlink_metadata(&tree_path)
-                .map(|m| !m.file_type().is_symlink() && m.file_type().is_dir())
-                .unwrap_or(false);
-            if meta_ok && tree_ok {
-                if let Ok(m) = read_meta(&meta_path) {
-                    if dir_name.to_str() == Some(m.id.as_str()) {
-                        out.push(m);
-                    }
-                }
+            if let Ok(m) = read_verified_snap_meta(&entry.path()) {
+                out.push(m);
             }
         }
     }
@@ -379,13 +378,8 @@ pub(crate) fn resolve_snapshot_id(ws_vault: &Path, target: &str) -> Result<Snaps
     }
     if crate::meta::is_valid_snapshot_id(target) {
         let snap_dir = ws_vault.join("snapshots").join(target);
-        let direct_meta = snap_dir.join("meta.kv");
-        if direct_meta.is_file() && snap_dir.join("tree").is_dir() {
-            let m = read_meta(&direct_meta)?;
-            if m.id == target {
-                return Ok(m);
-            }
-            return Err(AfuseError::new(ERR_EINVAL, "snapshot meta.kv id does not match directory name"));
+        if fs::symlink_metadata(&snap_dir).is_ok() {
+            return read_verified_snap_meta(&snap_dir);
         }
     }
     Err(AfuseError::new(ERR_ENOENT, format!("snapshot '{}' not found", target)))

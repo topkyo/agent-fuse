@@ -5,7 +5,7 @@
 //! - `sha256`: Pure Rust FIPS 180-4 SHA-256 implementation.
 //! - `unicode_norm`: Pure Rust Unicode NFD decomposition & CCC ordering for APFS path parity.
 //! - `apfs`: Exclusive `unsafe` C-shim boundary (`darwin_shim.c`: `clonefile(2)`,
-//!   `renamex_np(2) RENAME_SWAP`, `statfs64(2)`, `flock(2)`, `fsgetpath`, `fork`/`execvp` in pgroup).
+//!   `renamex_np(2) RENAME_SWAP`, `statfs64(2)`, `flock(2)`, `fsgetpath`, `posix_spawnp(POSIX_SPAWN_SETPGROUP)`).
 //! - `vault` / `vault_policy`: Arbitrary plain folder (`.git` optional) & single-file (`TargetKind`)
 //!   guardian with physical system/container-root blacklist, same-APFS check & exclusive vault flock.
 //! - `fs_guard`: Temporary readonly permission unlocker & single-file sibling isolation guards.
@@ -14,10 +14,10 @@
 //! - `snapshot` / `diff` / `diff_rename` / `rolling`: Atomic snapshot creation, fast dedup, NFD-safe diffing, first-class `RenamePair` detection & append-only rolling baseline.
 //! - `restore` / `restore_tree` / `restore_fast`: Atomic root-Inode-preserving full/selective restore, append-only head progression & ignored-subtree stash.
 //! - `trash` / `trash_ledger`: Monotonic `known_inodes.tsv` ledger & Darwin `fsgetpath` exact `(fsid, ino)` Trash cleanup with TCC fallback.
-//! - `relocate`: Same-volume `fsgetpath` target locate, atomic `O(1)` vault relocation & orphan vault GC.
+//! - `relocate` / `vault_gc`: Same-volume `fsgetpath` target locate, atomic `O(1)` vault relocation & orphan vault GC.
 //! - `prune`: Orphan staging cleanup, `auto:*` rolling quota GC & label-filtered pruning.
 //! - `hook_json` / `hook_config` / `hook`: Opt-in zsh preexec & Claude Code PreToolUse auto-snap.
-//! - `guard`: Isolated process-group fuse tripping on runaway deletes, renames or truncation spikes.
+//! - `guard` / `guard_probe`: Isolated process-group fuse tripping on runaway deletes, renames, write spikes or truncation spikes.
 //! - `doctor`: Privacy-safe offline APFS & vault health diagnostics.
 //! - `upgrade_json` / `upgrade_verify` / `upgrade_tar` / `upgrade`: Opt-in release check, tar preflight & SHA-256 verified self-upgrade.
 //! - `cli_cmds` / `cli_ops` / `cli_upgrade`: CLI subcommand dispatch & structured `--json` formatting.
@@ -29,6 +29,7 @@ pub mod doctor;
 pub mod error;
 pub(crate) mod fs_guard;
 pub mod guard;
+mod guard_probe;
 pub mod hook;
 pub mod hook_config;
 pub mod hook_json;
@@ -50,6 +51,7 @@ pub mod upgrade_json;
 pub(crate) mod upgrade_tar;
 pub(crate) mod upgrade_verify;
 pub mod vault;
+pub(crate) mod vault_gc;
 mod vault_policy;
 
 pub use apfs::{
@@ -116,24 +118,22 @@ pub use vault::{
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_guard_hook;
+#[cfg(test)]
 mod tests_invariants;
 #[cfg(test)]
 mod tests_phase2;
 #[cfg(test)]
-mod tests_round3;
+mod tests_relocate;
 #[cfg(test)]
-mod tests_round4;
+mod tests_restore;
 #[cfg(test)]
-mod tests_round5;
-#[cfg(test)]
-mod tests_round6;
-#[cfg(test)]
-mod tests_round7;
-#[cfg(test)]
-mod tests_round8;
+mod tests_rolling;
 #[cfg(test)]
 mod tests_security;
 #[cfg(test)]
 mod tests_trash_ledger;
 #[cfg(test)]
 mod tests_trash_targets;
+#[cfg(test)]
+mod tests_upgrade;

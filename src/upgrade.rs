@@ -13,7 +13,9 @@ use crate::upgrade_tar::{
 };
 use crate::upgrade_verify::prepare_and_verify_staged_binary;
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::Ordering;
@@ -83,7 +85,7 @@ fn fetch_release_outcome() -> Result<ReleaseFetch, AfuseError> {
     }
     let out = cmd
         .args([
-            "-w", "\n%{http_code}", "-H", "Accept: application/vnd.github+json",
+            "-w", "\n%{http_code}\n%{url_effective}", "-H", "Accept: application/vnd.github+json",
             "-H", &format!("User-Agent: {}", ua), &source,
         ])
         .output()
@@ -99,7 +101,14 @@ fn fetch_release_outcome() -> Result<ReleaseFetch, AfuseError> {
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
     let trimmed = stdout.trim_end_matches(['\r', '\n']);
-    let (body, code_str) = trimmed.rsplit_once('\n').unwrap_or(("", trimmed));
+    let (body_and_code, eff_url) = trimmed.rsplit_once('\n').unwrap_or(("", ""));
+    let (body, code_str) = body_and_code.rsplit_once('\n').unwrap_or(("", body_and_code));
+    #[cfg(not(any(test, feature = "test-hooks")))]
+    crate::upgrade_tar::validate_release_api_effective_url(eff_url.trim())?;
+    #[cfg(any(test, feature = "test-hooks"))]
+    if source.starts_with("https://") {
+        crate::upgrade_tar::validate_release_api_effective_url(eff_url.trim())?;
+    }
     let status: u16 = code_str.trim().parse().unwrap_or(0);
     if status == 404 {
         return Ok(ReleaseFetch::Unpublished);
@@ -269,24 +278,37 @@ pub fn perform_upgrade_on_exe(exe_path: &Path) -> Result<UpgradeApplyReport, Afu
     let extracted_bin = preflight_and_extract_afuse(&tarball_path, &extract_dir)?;
 
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let staged_bin = parent_dir.join(format!(
-        ".afuse.upgrade.bin.{}.{}.{}",
+    let staged_bin = stage_dir.join(format!(
+        "afuse.staged.{}.{}.{}",
         std::process::id(),
         seq,
         random_hex_suffix()
     ));
-    if fs::copy(&extracted_bin, &staged_bin).is_err() {
+    let copy_res = (|| -> io::Result<()> {
+        let mut src_f = fs::File::open(&extracted_bin)?;
+        let mut dst_f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(&staged_bin)?;
+        io::copy(&mut src_f, &mut dst_f)?;
+        dst_f.sync_all()
+    })();
+    if copy_res.is_err() {
         let _ = force_remove_all(&staged_bin);
         return Err(AfuseError::new(
             ERR_EACCES,
             format!("cannot write replacement binary; run: {}", BREW_UPGRADE_CMD),
         ));
     }
-    let _ = chmod_nofollow(&staged_bin, 0o755);
-    if let Err(e) = prepare_and_verify_staged_binary(&staged_bin, Some(&rel.latest_version)) {
+    let _ = chmod_nofollow(&staged_bin, 0o700);
+    if let Err(e) =
+        prepare_and_verify_staged_binary(&staged_bin, Some(&install_target), Some(&rel.latest_version))
+    {
         let _ = force_remove_all(&staged_bin);
         return Err(e);
     }
+    let _ = chmod_nofollow(&staged_bin, 0o755);
     if let Err(e) = fs::rename(&staged_bin, &install_target) {
         let _ = force_remove_all(&staged_bin);
         return Err(AfuseError::new(

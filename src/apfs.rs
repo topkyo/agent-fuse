@@ -1,9 +1,10 @@
 use crate::error::{AfuseError, ERR_EEXIST, ERR_EINVAL, ERR_ENOTSUP, ERR_EXDEV};
 use std::env;
-use std::ffi::CString;
-use std::fs::{self, File};
+use std::ffi::{CString, OsStr};
+use std::fs::{self, DirBuilder, File};
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -39,6 +40,7 @@ extern "C" {
     fn afuse_current_euid() -> u32;
     fn afuse_pgid_alive(pgid: i32) -> i32;
     fn afuse_freeze_kill_reap_pgid(pgid: i32);
+    fn afuse_pgid_disk_bytes_written(pgid: i32, out_bytes: *mut u64) -> i32;
 }
 
 pub(crate) static TMP_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -99,7 +101,7 @@ pub(crate) fn create_exclusive_dir_0700(parent: &Path, prefix: &str) -> Result<P
             random_hex_suffix()
         );
         let cand = parent.join(name);
-        match fs::create_dir(&cand) {
+        match DirBuilder::new().mode(0o700).create(&cand) {
             Ok(()) => {
                 let _ = chmod_nofollow(&cand, 0o700);
                 return Ok(cand);
@@ -129,7 +131,7 @@ pub fn real_home_dir() -> Result<PathBuf, AfuseError> {
             .map(|&c| c as u8)
             .collect();
         if !bytes.is_empty() {
-            let p = PathBuf::from(String::from_utf8_lossy(&bytes).into_owned());
+            let p = PathBuf::from(OsStr::from_bytes(&bytes));
             return Ok(fs::canonicalize(&p).unwrap_or(p));
         }
     }
@@ -334,7 +336,7 @@ pub fn fsgetpath(fsid: (i32, i32), obj_id: u64) -> Result<PathBuf, AfuseError> {
     if bytes.is_empty() {
         return Err(AfuseError::new(ERR_EINVAL, "fsgetpath returned empty path"));
     }
-    Ok(PathBuf::from(String::from_utf8_lossy(&bytes).into_owned()))
+    Ok(PathBuf::from(OsStr::from_bytes(&bytes)))
 }
 
 pub(crate) fn can_write_path(p: &Path) -> Result<(), AfuseError> {
@@ -358,4 +360,10 @@ pub(crate) fn can_read_write(p: &Path) -> bool {
 
 pub(crate) fn current_euid() -> u32 {
     unsafe { afuse_current_euid() }
+}
+
+pub(crate) fn pgid_disk_bytes_written(pgid: i32) -> u64 {
+    let mut bytes = 0u64;
+    let rc = unsafe { afuse_pgid_disk_bytes_written(pgid, &mut bytes) };
+    if rc == 0 { bytes } else { 0 }
 }

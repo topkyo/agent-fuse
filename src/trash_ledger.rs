@@ -1,5 +1,5 @@
 use crate::apfs::{chmod_nofollow, fsgetpath, lstat_inode_mode};
-use crate::error::ERR_ENOENT;
+use crate::error::{ERR_ENOENT, ERR_ESTALE};
 use crate::manifest::SnapshotMeta;
 use crate::snapshot::list_snapshots_unlocked;
 use crate::unicode_norm::canonical_rel_key;
@@ -51,10 +51,9 @@ fn unescape_tsv_path(s: &str) -> String {
 }
 
 pub(crate) fn path_matches_target(canon_rel: &str, target: &str) -> bool {
-    canon_rel == target
-        || (canon_rel.len() > target.len()
-            && canon_rel.starts_with(target)
-            && canon_rel.as_bytes()[target.len()] == b'/')
+    let r = canonical_rel_key(canon_rel).to_ascii_lowercase();
+    let t = canonical_rel_key(target).to_ascii_lowercase();
+    r == t || (r.len() > t.len() && r.starts_with(&t) && r.as_bytes()[t.len()] == b'/')
 }
 
 pub(crate) fn collect_live_path_inodes(ws: &Path, kind: TargetKind) -> Vec<(u64, String)> {
@@ -232,7 +231,7 @@ pub(crate) fn retire_and_gc_ledger(
             .keys()
             .copied()
             .filter(|ino| !live_set.contains(ino))
-            .filter(|&ino| matches!(fsgetpath(fsid, ino), Err(e) if e.code == ERR_ENOENT))
+            .filter(|&ino| matches!(fsgetpath(fsid, ino), Err(e) if e.code == ERR_ENOENT || e.code == ERR_ESTALE))
             .collect();
         for ino in stale {
             ledger.remove(&ino);
