@@ -21,7 +21,7 @@ Autonomous CLI coding agents run `rm -rf`, `mv`, or mass file overwrites on dirt
 
 ## Comparison Matrix
 - **vs `git stash -u`**: `afuse` does not touch `.git` locks, protects `.git` itself against deletion and 0-byte truncation, supports single-path restore of untracked files, and finishes in single-digit ms without zlib hashing.
-- **vs `Provenrail` ($9/mo)**: `afuse` uses kernel `clonefile(2)` (`0 B` at `t=0`) instead of shadow Git object copies, adds a CLI `-pgid` process breaker + native AppKit GUI, and costs `$0` (MIT CLI) or `$19` one-time (Pro).
+- **vs `Provenrail` (MIT `$0` local core)**: `afuse` uses kernel `clonefile(2)` (`0 B` at `t=0`) instead of shadow Git object copies (`<= 50 MiB`, Git repos only), protects plain non-Git directories, single files, and `.git` itself, preserves workspace root inodes via `renamex_np`, and pairs the `$0` MIT CLI with a `< 5 MiB` native AppKit `FSEvents` desktop app (`1` target free forever; `$19` one-time Pro).
 - **vs `Claude Code /rewind` & `Cursor Checkpoint`**: `afuse` captures shell `Bash` deletions (`rm -rf`), works across multi-agent sessions concurrently, and restores untracked files.
 - **vs `Time Machine` / `Disk Drill` ($89)**: Sub-second CoW granularity immune to SSD `TRIM` after `unlink`.
 

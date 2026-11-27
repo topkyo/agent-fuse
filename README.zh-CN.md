@@ -116,8 +116,8 @@ afuse upgrade --check         # 仅在手动执行时查询 GitHub Releases 新�
 
 1. **Claude Code 的 `/rewind` 或 `git checkout` 无法找回被 `rm -rf` 删掉的文件，`afuse` 能救回吗？**
    只要误删前拍摄过快照（手动执行、挂载 `afuse hook claude` 或开启桌面端 `FSEvents` 守护），即可完整救回，且支持无 `.git` 的普通文件夹与单个关键文件。Claude Code `/rewind` 不追踪 Shell `Bash` 命令造成的文件删除；`afuse` 通过 APFS `clonefile(2)` 克隆目标，可在 `~12.6 ms` 内还原 142 个文件、自动按 `(fsid, ino)` 清除 `~/.Trash` 废纸篓同名副本，或通过 `afuse restore latest -- <路径>` 精准恢复指定文件。
-2. **`afuse` 与 `Provenrail`（`$9/月`）或 `git stash -u` 有何本质区别？**
-   `git stash -u` 依赖 Git 仓库且争抢 `.git/index` 锁；`Provenrail` 向影子 Git 仓库复制文件且按月收费（`$108/年`）。`afuse` 直接调用内核 `clonefile(2)` 对 Git 仓库、普通目录或单文件实现零 Git 开销守护，配备独立进程组熔断器（`SIGSTOP` -> `SIGKILL -pgid`，覆盖后台孙进程与 `.git` 0 字节截断防护），提供 `$0` MIT CLI 与一次买断原生桌面端（国内专享约 `¥98` / `$13.50 USD`，国际 `$19` USD，Creem.io 结算含企业报销发票）。
+2. **`afuse` 与 `Provenrail` 或 `git stash -u` 有何本质区别？**
+   `git stash -u` 依赖 Git 仓库且争抢 `.git/index` 锁；`Provenrail`（本地核心 MIT `$0` 免费，可选 `$9/月` 手机远程审批）仅限在 Git 仓库内将 `<= 50 MiB` 未忽略文件拷贝至外部影子 Git 对象库。`afuse` 直接调用内核 `clonefile(2)`（`t=0` 增量 `0 Bytes`）对 Git 仓库、普通无 `.git` 目录、`.git` 自身或单文件实现零 Git 开销守护，经 `renamex_np` 保持根目录 Inode 不断终端，配备独立进程组熔断器（`SIGSTOP` -> `SIGKILL -pgid`，覆盖后台孙进程），提供 `$0` MIT CLI 与 `< 5 MiB` 原生桌面端（`1` 目标永久免费；Pro 买断国内专享约 `¥98` / `$13.50 USD`，国际 `$19` USD，Creem.io 结算含企业报销发票）。
 3. **为什么 `afuse restore` 恢复后当前终端不需要重新 `cd .. && cd -`？**
    `afuse restore` 先在工作区同卷旁路克隆目标条目，再调用 Darwin 内核 `renamex_np(..., RENAME_SWAP)` 原子交换顶层目录项，始终保留工作区根目录本身的 Inode 不变，因此终端会话与语言服务器（LSP）不会悬空失效。
 4. **手动拖拽 `.dmg` 安装为什么会提示“无法验证开发者”？**
